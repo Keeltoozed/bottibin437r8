@@ -80,8 +80,25 @@ ENABLE_MOMENTUM_DEATH_EXIT = True
 # ==============================================================================
 # 5. MARKET SCANNER & THE FUNNEL (EXPANDED RADAR: 200+ TOKENS)
 # ==============================================================================
-# Фильтр ликвидности: только топовые монеты с объемом от $15M в сутки (исключаем неликвидный мусор)
-MIN_24H_VOLUME_USDT = float(os.getenv("MIN_24H_VOLUME_USDT", "15000000"))  # $15M
+# Фильтр ликвидности: только топовые монеты с объемом от $50M в сутки (исключаем неликвидный мусор)
+MIN_24H_VOLUME_USDT = float(os.getenv("MIN_24H_VOLUME_USDT", "50000000"))  # $50M
+
+# Элитный институциональный юниверс (высочайшая ликвидность, без скам-фитилей)
+TOP_CRYPTO_UNIVERSE = [
+    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT", 
+    "SUIUSDT", "NEARUSDT", "AVAXUSDT", "LINKUSDT", "APTUSDT", "RENDERUSDT",
+    "TIAUSDT", "SEIUSDT", "ENAUSDT", "JUPUSDT", "PEPEUSDT", "WIFUSDT",
+    "INJUSDT", "FTMUSDT", "FETUSDT", "GALAUSDT", "AAVEUSDT", "DOTUSDT",
+    "LTCUSDT", "BCHUSDT", "OPUSDT", "ARBUSDT", "FILUSDT",
+    "STXUSDT", "ONDOUSDT", "WLDUSDT", "TAOUSDT", "TONUSDT"
+]
+
+# Черный список: фондовые токены, стейблкоины и неликвид
+EXCLUDED_TICKERS = {
+    "USDCUSDT", "FDUSDUSDT", "TUSDUSDT", "BUSDUSDT", "EURUSDT", "DAIUSDT", "USTCUSDT",
+    "PAXGUSDT", "XAUUSDT", "XAGUSDT", "SOXLUSDT", "INTCUSDT", "SNDKUSDT", "NVDAUSDT", 
+    "TSLAUSDT", "AAPLUSDT", "AMZNUSDT", "MSFTUSDT", "COINBUSDT"
+}
 MIN_5M_VOLUME_SURGE_RATIO = float(os.getenv("MIN_5M_VOLUME_SURGE_RATIO", "1.50"))  # 1.50x реальный всплеск объёма
 MIN_5M_PRICE_IMPULSE_PCT = float(os.getenv("MIN_5M_PRICE_IMPULSE_PCT", "0.55"))  # 0.55% четкий импульс свечи (отсекает сонные боковики)
 MAX_SPREAD_PCT = float(os.getenv("MAX_SPREAD_PCT", "0.0015"))  # 0.15% max spread

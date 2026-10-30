@@ -75,44 +75,72 @@ class BinanceClient:
 
     async def fetch_top_tickers(self, min_vol_usdt: float = config.MIN_24H_VOLUME_USDT, limit: int = config.SCAN_TICKERS_LIMIT) -> List[Dict[str, Any]]:
         """
-        Получает 24ч статистику по парам USDT на Binance.
-        Сортирует по максимальной волатильности (топ-гэйнеры и ракеты) для поиска взрывных сетапов.
+        Формирует институциональный торговый радар:
+        1. Приоритетный топ-тир крипто-активов (BTC, ETH, SOL, SUI, DOGE, NEAR, RENDER...)
+        2. Высоколиквидные пары Binance Futures с суточным объемом от $50M.
+        Полностью исключает неликвидный мусор, скам-токены и фондовые индексы.
         """
         data = await self._request_with_fallback("ticker24")
         if not data or not isinstance(data, list):
             return []
 
-        candidates = []
-        for item in data:
-            sym = item.get("symbol", "")
-            if not sym.endswith("USDT"):
+        item_map = {item.get("symbol", ""): item for item in data if isinstance(item, dict) and "symbol" in item}
+        selected = []
+        seen = set()
+
+        # 1. Приоритетно добавляем институциональный крипто-юниверс
+        for sym in getattr(config, "TOP_CRYPTO_UNIVERSE", []):
+            if sym in item_map:
+                item = item_map[sym]
+                try:
+                    vol = float(item.get("quoteVolume", 0) or 0)
+                    pct = float(item.get("priceChangePercent", 0) or 0)
+                    last_p = float(item.get("lastPrice", 0) or 0)
+                    high_p = float(item.get("highPrice", 0) or 0)
+                    low_p = float(item.get("lowPrice", 0) or 0)
+                    if last_p > 0:
+                        selected.append({
+                            "symbol": sym,
+                            "price": last_p,
+                            "volume_24h": vol,
+                            "price_change_24h_pct": pct,
+                            "high_24h": high_p,
+                            "low_24h": low_p
+                        })
+                        seen.add(sym)
+                except (ValueError, TypeError):
+                    continue
+
+        # 2. Добавляем другие проверенные высоколиквидные монеты (от $50M объема)
+        excluded = getattr(config, "EXCLUDED_TICKERS", set())
+        for sym, item in item_map.items():
+            if not sym.endswith("USDT") or sym in seen or sym in excluded:
                 continue
-            if any(sym.startswith(skip) for skip in ["USDC", "FDUSD", "TUSD", "BUSD", "EUR", "DAI", "USTC", "PAXG", "XAU", "XAG"]):
+            if any(sym.startswith(x) for x in ["1000", "USDC", "FDUSD", "TUSD"]):
                 continue
 
             try:
-                quote_vol = float(item.get("quoteVolume", 0) or 0)
-                price_pct = float(item.get("priceChangePercent", 0) or 0)
-                last_price = float(item.get("lastPrice", 0) or 0)
-                high_price = float(item.get("highPrice", 0) or 0)
-                low_price = float(item.get("lowPrice", 0) or 0)
+                vol = float(item.get("quoteVolume", 0) or 0)
+                pct = float(item.get("priceChangePercent", 0) or 0)
+                last_p = float(item.get("lastPrice", 0) or 0)
+                high_p = float(item.get("highPrice", 0) or 0)
+                low_p = float(item.get("lowPrice", 0) or 0)
 
-                # Фильтр: объем от $15M и суточная волатильность от 2.0% (исключаем "мертвые" монеты-боковики)
-                if quote_vol >= min_vol_usdt and abs(price_pct) >= 2.0 and last_price > 0:
-                    candidates.append({
+                # Только высоколиквидные монеты с глубоким стаканом (от $50M)
+                if vol >= min_vol_usdt and last_p > 0:
+                    selected.append({
                         "symbol": sym,
-                        "price": last_price,
-                        "volume_24h": quote_vol,
-                        "price_change_24h_pct": price_pct,
-                        "high_24h": high_price,
-                        "low_24h": low_price
+                        "price": last_p,
+                        "volume_24h": vol,
+                        "price_change_24h_pct": pct,
+                        "high_24h": high_p,
+                        "low_24h": low_p
                     })
+                    seen.add(sym)
             except (ValueError, TypeError):
                 continue
 
-        # В топе — самые горячие ракеты и импульсные лидеры рынка (Rocket Momentum: Volatility * Volume^0.35)
-        candidates.sort(key=lambda x: abs(x["price_change_24h_pct"]) * (x["volume_24h"] ** 0.35), reverse=True)
-        return candidates[:limit]
+        return selected[:limit]
 
     async def fetch_candles_analysis(self, symbol: str, interval: str = "5m", limit: int = 30) -> Optional[Dict[str, Any]]:
         """
