@@ -68,6 +68,7 @@ class MarketScanner:
 
             # Проверка кулдауна и открытых позиций
             if sym in self.cooldowns and (now - self.cooldowns[sym]) < (config.PAIR_COOLDOWN_MINUTES * 60):
+                portfolio.funnel_stats["cooldown_blocked"] = portfolio.funnel_stats.get("cooldown_blocked", 0) + 1
                 return None
             if sym in portfolio.open_positions:
                 return None
@@ -76,6 +77,7 @@ class MarketScanner:
                 # 2. HARD GATE: Спред в стакане
                 _, _, spread = await binance_client.fetch_orderbook_spread(sym)
                 if spread > config.MAX_SPREAD_PCT:
+                    portfolio.funnel_stats["gate_failed"] = portfolio.funnel_stats.get("gate_failed", 0) + 1
                     return None
 
                 # 3. HARD GATE: Анализ свечей и объема (Институциональные фильтры A+)
@@ -95,46 +97,34 @@ class MarketScanner:
                 rsi = analysis.get("rsi", 50.0)
                 trend = analysis.get("trend", "CHOP")
 
-                # Проверка условий LONG (Институциональный сетап A+):
-                # 1. Всплеск объема >= 1.30x
-                # 2. Импульс 5m >= 0.45% или 15m >= 0.65%
-                # 3. Допустимый стоп под фитиль <= 1.2% (для 60x)
-                # 4. Откат от хая: обязательно откат -0.2%..-2.0% (НЕ покупаем вершину)
-                # 5. Нет фитиля истощения на хае (upper_wick < 35%)
-                # 6. RSI в здоровой зоне (40 <= RSI <= 70)
-                # 7. Не против тренда (тренд BULLISH или CHOP)
                 # Базовый институциональный фильтр кандидатов для Groq AI:
-                # 1. Всплеск объема от 1.20x или выраженный 15m импульс (>= 0.40%)
-                # 2. Допустимый стоп за фитиль (<= 1.3% для безопасного 60x плеча)
-                # 3. Macro Guard: запрет лонга при дампе BTC, запрет шорта при пампе BTC
                 has_vol = surge >= config.MIN_VOLUME_SURGE
                 has_long_momentum = (pct_5m >= config.MIN_IMPULSE_PCT or pct_15m >= 0.40)
                 has_short_momentum = (pct_5m <= -config.MIN_IMPULSE_PCT or pct_15m <= -0.40)
 
-                is_long = (
-                    (has_vol or pct_15m >= 0.40) and
-                    has_long_momentum and
-                    sl_dist <= config.MAX_ALLOWED_SL_PCT and
-                    trend != "BEARISH" and
-                    not btc_regime.get("is_dumping", False)
-                )
+                is_long_cand = (has_vol or pct_15m >= 0.40) and has_long_momentum and sl_dist <= config.MAX_ALLOWED_SL_PCT and trend != "BEARISH"
+                is_short_cand = config.ENABLE_SHORT and (has_vol or pct_15m <= -0.40) and has_short_momentum and short_sl_dist <= config.MAX_ALLOWED_SL_PCT and trend != "BULLISH"
 
-                is_short = (
-                    config.ENABLE_SHORT and
-                    (has_vol or pct_15m <= -0.40) and
-                    has_short_momentum and
-                    short_sl_dist <= config.MAX_ALLOWED_SL_PCT and
-                    trend != "BULLISH" and
-                    not btc_regime.get("is_pumping", False)
-                )
+                # Проверка BTC-фильтра
+                if is_long_cand and btc_regime.get("is_dumping", False):
+                    portfolio.funnel_stats["btc_blocked"] = portfolio.funnel_stats.get("btc_blocked", 0) + 1
+                    return None
+                if is_short_cand and btc_regime.get("is_pumping", False):
+                    portfolio.funnel_stats["btc_blocked"] = portfolio.funnel_stats.get("btc_blocked", 0) + 1
+                    return None
+
+                is_long = is_long_cand and not btc_regime.get("is_dumping", False)
+                is_short = is_short_cand and not btc_regime.get("is_pumping", False)
+
+                if not is_long and not is_short:
+                    portfolio.funnel_stats["gate_failed"] = portfolio.funnel_stats.get("gate_failed", 0) + 1
+                    return None
 
                 if is_long:
-                    self.cooldowns[sym] = now + 900  # 15 мин кулдаун
-                    print(f"🔥 [A+ СЕТАП - LONG] {sym}: всплеск {surge}x, +{pct_5m:.2f}%, 15m: +{pct_15m:.2f}%, RSI {rsi:.1f} ➔ Groq AI...", flush=True)
+                    print(f"🔥 [КАНДИДАТ - LONG] {sym}: всплеск {surge}x, +{pct_5m:.2f}%, 15m: +{pct_15m:.2f}%, RSI {rsi:.1f}...", flush=True)
                     return {**t, **analysis, "candidate_side": "LONG", "btc_regime": btc_regime.get("status_str", "Neutral")}
                 elif is_short:
-                    self.cooldowns[sym] = now + 900  # 15 мин кулдаун
-                    print(f"🔻 [A+ СЕТАП - SHORT] {sym}: всплеск {surge}x, {pct_5m:.2f}%, 15m: {pct_15m:.2f}%, RSI {rsi:.1f} ➔ Groq AI...", flush=True)
+                    print(f"🔻 [КАНДИДАТ - SHORT] {sym}: всплеск {surge}x, {pct_5m:.2f}%, 15m: {pct_15m:.2f}%, RSI {rsi:.1f}...", flush=True)
                     return {**t, **analysis, "candidate_side": "SHORT", "btc_regime": btc_regime.get("status_str", "Neutral")}
                 return None
 
@@ -153,6 +143,8 @@ class MarketScanner:
             sym = ctx["symbol"]
             cand_side = ctx.get("candidate_side", "LONG")
             portfolio.funnel_stats["groq_evaluated"] += 1
+            # КУЛДАУН: ставится ТОЛЬКО монете, которая реально отправлена на оценку в Groq (без блокировки остальных!)
+            self.cooldowns[sym] = now
 
             approved, groq_eval = await groq_engine.evaluate_setup(ctx)
 
@@ -224,6 +216,11 @@ class MarketScanner:
                         leverage=lev_to_use
                     )
             else:
+                if groq_eval.get("decision") == "SKIP":
+                    portfolio.funnel_stats["groq_skip"] = portfolio.funnel_stats.get("groq_skip", 0) + 1
+                elif groq_eval.get("confidence", 0.0) < config.GROQ_MIN_CONFIDENCE:
+                    portfolio.funnel_stats["low_conf"] = portfolio.funnel_stats.get("low_conf", 0) + 1
+
                 # Сохраняем в Shadow Tracker для анализа отклонённых сетапов
                 portfolio.shadow_trades.insert(0, {
                     "symbol": sym,

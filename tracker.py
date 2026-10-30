@@ -23,8 +23,13 @@ class PortfolioTracker:
         self.trade_history: List[Dict[str, Any]] = []
         self.funnel_stats: Dict[str, int] = {
             "universe": 0,
+            "gate_failed": 0,
+            "cooldown_blocked": 0,
+            "btc_blocked": 0,
             "hard_gates": 0,
             "groq_evaluated": 0,
+            "groq_skip": 0,
+            "low_conf": 0,
             "passed": 0,
             "filled": 0
         }
@@ -173,12 +178,16 @@ class PortfolioTracker:
             else:
                 raw_pct = (entry - cur_price) / entry
 
-            pos["pnl_pct"] = round(raw_pct * lev * 100, 2)
-            pos["unrealized_pnl"] = round(pos["margin_usdt"] * (raw_pct * lev), 3)
+            gross_unrealized = pos["margin_usdt"] * (raw_pct * lev)
+            # Честный вычет комиссии и проскальзывания на полный круг (0.12% от номинала)
+            est_fees = pos["notional_value"] * 0.0012
+            net_unrealized = gross_unrealized - est_fees
+            pos["pnl_pct"] = round((net_unrealized / pos["margin_usdt"]) * 100, 2)
+            pos["unrealized_pnl"] = round(net_unrealized, 3)
 
     def close_position(self, symbol: str, exit_price: float, reason: str, partial_pct: float = 1.0):
         """
-        Закрывает позицию (полностью или частично) и фиксирует PnL.
+        Закрывает позицию (полностью или частично) и фиксирует PnL с вычетом реальных комиссий.
         """
         if symbol not in self.open_positions:
             return
@@ -193,7 +202,14 @@ class PortfolioTracker:
             raw_pct = (entry - exit_price) / entry
 
         closed_margin = pos["margin_usdt"] * partial_pct
-        realized_pnl = round(closed_margin * (raw_pct * lev), 3)
+        gross_pnl = closed_margin * (raw_pct * lev)
+
+        # Честный учет биржевых комиссий Binance (0.05% вход + 0.05% выход + 0.02% проскальзывание):
+        notional_entry = closed_margin * lev
+        notional_exit = (pos["coins_qty"] * partial_pct) * exit_price
+        fees_and_slippage = round((notional_entry * 0.0005) + (notional_exit * 0.0007), 4)
+
+        realized_pnl = round(gross_pnl - fees_and_slippage, 3)
         return_to_cash = round(closed_margin + realized_pnl, 3)
 
         self.cash += max(return_to_cash, 0.0)
@@ -205,8 +221,10 @@ class PortfolioTracker:
             "exit_price": exit_price,
             "margin_usdt": round(closed_margin, 2),
             "leverage": lev,
+            "gross_pnl": round(gross_pnl, 3),
+            "fees_paid": fees_and_slippage,
             "realized_pnl": realized_pnl,
-            "roi_pct": round(raw_pct * lev * 100, 2),
+            "roi_pct": round((realized_pnl / closed_margin) * 100, 2),
             "reason": reason,
             "opened_at": pos["opened_at_str"],
             "closed_at": time.strftime("%Y-%m-%d %H:%M:%S"),

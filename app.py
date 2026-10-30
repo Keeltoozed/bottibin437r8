@@ -389,17 +389,25 @@ with tab_funnel:
     st.caption("Философия JEV Engine: отсекаем 99% мусора, чтобы входить только в высоковероятные сетапы.")
     
     fs = portfolio.funnel_stats
-    fc1, fc2, fc3, fc4, fc5 = st.columns(5)
+    fc1, fc2, fc3, fc4 = st.columns(4)
     with fc1:
-        st.metric("1. Universe", fs['universe'], help="Всего просканировано пар на Binance")
+        st.metric("1. Universe", fs.get('universe', 0), help="Всего просканировано пар на Binance")
     with fc2:
-        st.metric("2. Hard Gates", fs['hard_gates'], help="Прошли фильтр 24ч объема, спреда и волатильности")
+        st.metric("2. Отсечено индикаторами", fs.get('gate_failed', 0), help="Не хватило импульса или объема")
     with fc3:
-        st.metric("3. Groq Evaluated", fs['groq_evaluated'], help="Отправлено на глубокий анализ в Groq")
+        st.metric("3. Блок по BTC", fs.get('btc_blocked', 0), help="Заблокировано из-за резкого сброса BTC")
     with fc4:
-        st.metric("4. Groq Approved", fs['passed'], help="Одобрено AI с уверенностью >= 65%")
+        st.metric("4. Кулдаун", fs.get('cooldown_blocked', 0), help="Находится в защитном 5-мин кулдауне")
+
+    fc5, fc6, fc7, fc8 = st.columns(4)
     with fc5:
-        st.metric("5. Filled (Входы)", fs['filled'], help="Успешно открытые сделки")
+        st.metric("5. Кандидаты (Hard Gates)", fs.get('hard_gates', 0), help="Прошли все первичные условия")
+    with fc6:
+        st.metric("6. Оценено Groq ИИ", fs.get('groq_evaluated', 0), help="Отправлено на глубокий анализ в Groq")
+    with fc7:
+        st.metric("7. Отклонено ИИ (SKIP)", fs.get('groq_skip', 0), help="ИИ обнаружил ловушку или истощение")
+    with fc8:
+        st.metric("8. Открыто сделок", fs.get('filled', 0), help="Успешно открытые сделки в сопровождении")
 
 # ------------------------------------------------------------------------------
 # 4. ИСТОРИЯ СДЕЛОК
