@@ -8,14 +8,15 @@ from tracker import portfolio
 class ExitManager:
     """
     Интеллектуальный менеджер сопровождения и выхода из позиций (LONG и SHORT).
-    Реализует правила:
-      1. 'Stop lives under/above the wick': жесткий контроль свечного стопа.
-      2. 'Dynamic Breakeven': перенос в безубыток при прохождении 40% расстояния до TP1.
-      3. 'Tiered Take-Profit':
-         - При TP1: закрытие 50% позиции + гарантированный безубыток на остаток.
-         - При TP2: закрытие 25% позиции.
-         - Остаток: трейлинг-стоп за локальным экстремумом.
-      4. 'Live Price Tracking': непрерывный мониторинг рыночных цен.
+    Реализует правила Day-Trader Discipline:
+      1. 'Stop lives under/above the wick': сделка свободно дышит в рамках исходного стоп-лосса.
+         Никаких преждевременных микро-безубытков, удушающих сделку из-за рыночного шума!
+      2. 'Tiered Take-Profit':
+         - При TP1 (+1.5% хода цены = +112.5% ROI на 75x): закрытие 50% объема с фиксацией реальной прибыли в депозит.
+         - Только ПОСЛЕ взятия TP1: стоп оставшейся части переносится в гарантированный безубыток с запасом на комиссию.
+         - При TP2 (+3.0% хода цены = +225.0% ROI): фиксация еще 25% объема.
+         - Остаток (25%): трейлинг-стоп для ловли мощных трендовых выносов.
+      3. 'Live Price Tracking': непрерывный мониторинг рыночных цен каждые 2 секунды.
     """
     def __init__(self):
         self.is_running = False
@@ -71,34 +72,34 @@ class ExitManager:
                     # ЛОГИКА ВЫХОДА ДЛЯ LONG
                     # ==========================================================
                     if side == "LONG":
-                        # 1. СТОП-ЛОСС ПОД ФИТИЛЬ
+                        # 1. СТОП-ЛОСС ПОД ФИТИЛЬ (ИЛИ БЕЗУБЫТОК ПОСЛЕ TP1)
                         if cur_price <= wick_sl:
+                            reason_label = (
+                                f"🛡️ Breakeven Exit ({pos['pnl_pct']:+.1f}%)"
+                                if pos.get("breakeven_set")
+                                else f"🛑 Stop Under Wick ({pos['pnl_pct']:+.1f}%)"
+                            )
                             portfolio.close_position(
                                 sym, cur_price,
-                                reason=f"🛑 Stop Under Wick (-{abs(pos['pnl_pct']):.1f}%)"
+                                reason=reason_label
                             )
                             continue
 
-                        # 2. ПЕРЕНОС В БЕЗУБЫТОК (SAFE BREAKEVEN)
-                        distance_to_tp1 = tp1 - entry
-                        if not pos["breakeven_set"] and (cur_price >= entry + distance_to_tp1 * config.BREAKEVEN_TRIGGER_RATIO):
-                            pos["wick_sl"] = round(entry * 1.001, 6)
-                            pos["breakeven_set"] = True
-                            portfolio.save()
-                            print(f"🛡️ [BREAKEVEN] {sym} (LONG): SL перенесен в безубыток (${pos['wick_sl']:.4f}). Сделка безопасна!", flush=True)
-
-                        # 3. ТЕЙК-ПРОФИТ 1 (TP1): Фиксация 50% объема
+                        # 2. ТЕЙК-ПРОФИТ 1 (TP1): Фиксация 50% объема в плюс
                         if not pos["tp1_hit"] and cur_price >= tp1:
                             pos["tp1_hit"] = True
+                            # После взятия крупного профита TP1 переносим стоп на остаток в гарантированный плюс (+0.2%)
                             pos["wick_sl"] = round(entry * 1.002, 6)
+                            pos["breakeven_set"] = True
                             portfolio.close_position(
                                 sym, cur_price,
                                 reason=f"🎯 TP1 Hit (+{pos['pnl_pct']:.1f}%): Фиксация 50%",
                                 partial_pct=0.50
                             )
+                            print(f"🎯 [TP1 HIT] {sym} (LONG): Зафиксировано 50% прибыли! Стоп на остаток в плюсе (${pos['wick_sl']:.4f}).", flush=True)
                             continue
 
-                        # 4. ТЕЙК-ПРОФИТ 2 (TP2): Фиксация еще 25% объема
+                        # 3. ТЕЙК-ПРОФИТ 2 (TP2): Фиксация еще 25% объема
                         if pos["tp1_hit"] and not pos["tp2_hit"] and cur_price >= tp2:
                             pos["tp2_hit"] = True
                             portfolio.close_position(
@@ -106,9 +107,10 @@ class ExitManager:
                                 reason=f"🎯 TP2 Hit (+{pos['pnl_pct']:.1f}%): Фиксация 25%",
                                 partial_pct=0.50
                             )
+                            print(f"🎯 [TP2 HIT] {sym} (LONG): Зафиксировано еще 25% на цели 3R!", flush=True)
                             continue
 
-                        # 5. ТРЕЙЛИНГ-СТОП ДЛЯ ОСТАТКА
+                        # 4. ТРЕЙЛИНГ-СТОП ДЛЯ ОСТАТКА (активен только после взятия TP1)
                         if pos["tp1_hit"]:
                             highest = pos.get("highest_price", cur_price)
                             trailing_sl_price = round(highest * (1.0 - config.TRAILING_STOP_PCT), 6)
@@ -127,34 +129,34 @@ class ExitManager:
                     # ЛОГИКА ВЫХОДА ДЛЯ SHORT
                     # ==========================================================
                     else:
-                        # 1. СТОП-ЛОСС НАД ФИТИЛЕМ (для шорта срабатывает при росте)
+                        # 1. СТОП-ЛОСС НАД ФИТИЛЕМ (ИЛИ БЕЗУБЫТОК ПОСЛЕ TP1)
                         if cur_price >= wick_sl:
+                            reason_label = (
+                                f"🛡️ Breakeven Exit ({pos['pnl_pct']:+.1f}%)"
+                                if pos.get("breakeven_set")
+                                else f"🛑 Stop Above Wick ({pos['pnl_pct']:+.1f}%)"
+                            )
                             portfolio.close_position(
                                 sym, cur_price,
-                                reason=f"🛑 Stop Above Wick (-{abs(pos['pnl_pct']):.1f}%)"
+                                reason=reason_label
                             )
                             continue
 
-                        # 2. ПЕРЕНОС В БЕЗУБЫТОК ДЛЯ ШОРТА
-                        distance_to_tp1 = entry - tp1
-                        if not pos["breakeven_set"] and (cur_price <= entry - distance_to_tp1 * config.BREAKEVEN_TRIGGER_RATIO):
-                            pos["wick_sl"] = round(entry * 0.999, 6)
-                            pos["breakeven_set"] = True
-                            portfolio.save()
-                            print(f"🛡️ [BREAKEVEN] {sym} (SHORT): SL перенесен в безубыток (${pos['wick_sl']:.4f}). Сделка безопасна!", flush=True)
-
-                        # 3. ТЕЙК-ПРОФИТ 1 (TP1): Фиксация 50% объема (цена упала до tp1)
+                        # 2. ТЕЙК-ПРОФИТ 1 (TP1): Фиксация 50% объема (цена упала до tp1)
                         if not pos["tp1_hit"] and cur_price <= tp1:
                             pos["tp1_hit"] = True
+                            # После взятия крупного профита TP1 переносим стоп на остаток в гарантированный плюс (+0.2% ниже входа)
                             pos["wick_sl"] = round(entry * 0.998, 6)
+                            pos["breakeven_set"] = True
                             portfolio.close_position(
                                 sym, cur_price,
                                 reason=f"🎯 TP1 Hit (+{pos['pnl_pct']:.1f}%): Фиксация 50%",
                                 partial_pct=0.50
                             )
+                            print(f"🎯 [TP1 HIT] {sym} (SHORT): Зафиксировано 50% прибыли! Стоп на остаток в плюсе (${pos['wick_sl']:.4f}).", flush=True)
                             continue
 
-                        # 4. ТЕЙК-ПРОФИТ 2 (TP2): Фиксация еще 25% объема
+                        # 3. ТЕЙК-ПРОФИТ 2 (TP2): Фиксация еще 25% объема
                         if pos["tp1_hit"] and not pos["tp2_hit"] and cur_price <= tp2:
                             pos["tp2_hit"] = True
                             portfolio.close_position(
@@ -162,9 +164,10 @@ class ExitManager:
                                 reason=f"🎯 TP2 Hit (+{pos['pnl_pct']:.1f}%): Фиксация 25%",
                                 partial_pct=0.50
                             )
+                            print(f"🎯 [TP2 HIT] {sym} (SHORT): Зафиксировано еще 25% на цели 3R!", flush=True)
                             continue
 
-                        # 5. ТРЕЙЛИНГ-СТОП ДЛЯ ШОРТА (следует сверху за локальным минимумом)
+                        # 4. ТРЕЙЛИНГ-СТОП ДЛЯ ШОРТА (следует сверху за локальным минимумом, активен после TP1)
                         if pos["tp1_hit"]:
                             lowest = pos.get("lowest_price", cur_price)
                             trailing_sl_price = round(lowest * (1.0 + config.TRAILING_STOP_PCT), 6)

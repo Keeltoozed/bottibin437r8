@@ -73,18 +73,20 @@ class MarketScanner:
                 sl_dist = analysis["sl_pct_distance"]
                 short_sl_dist = analysis.get("short_sl_dist", 0.05)
 
-                # Проверка условий LONG (импульсный памп)
+                min_impulse = getattr(config, "MIN_5M_PRICE_IMPULSE_PCT", 0.55)
+
+                # Проверка условий LONG (импульсный памп с активным объемом)
                 is_long = (
                     surge >= config.MIN_5M_VOLUME_SURGE_RATIO and
-                    pct_5m >= 0.35 and
+                    pct_5m >= min_impulse and
                     sl_dist <= config.MAX_ALLOWED_SL_PCT
                 )
 
-                # Проверка условий SHORT (пробойный дамп)
+                # Проверка условий SHORT (пробойный дамп с давлением продавцов)
                 is_short = (
                     config.ENABLE_SHORT and
                     surge >= config.MIN_5M_VOLUME_SURGE_RATIO and
-                    pct_5m <= -0.35 and
+                    pct_5m <= -min_impulse and
                     short_sl_dist <= config.MAX_ALLOWED_SL_PCT
                 )
 
@@ -142,28 +144,29 @@ class MarketScanner:
                 entry_p = ctx["current_price"]
                 wick_sl = eval_entry["sl"]
 
+                # Минимальное расстояние тейк-профитов для защиты от микро-сделок:
+                # TP1: минимум 1.5% хода цены (+112.5% ROI при 75x)
+                # TP2: минимум 3.0% хода цены (+225.0% ROI при 75x)
+                min_tp1_dist = entry_p * config.TP1_PCT
+                min_tp2_dist = entry_p * config.TP2_PCT
+
                 if cand_side == "LONG":
                     risk_per_coin = max(entry_p - wick_sl, entry_p * 0.002)
-                    tp1_2r = round(entry_p + (config.TARGET_1_R * risk_per_coin), 6)
-                    tp2_3r = round(entry_p + (config.TARGET_2_R * risk_per_coin), 6)
+                    tp1_2r = round(max(entry_p + (config.TARGET_1_R * risk_per_coin), entry_p + min_tp1_dist), 6)
+                    tp2_3r = round(max(entry_p + (config.TARGET_2_R * risk_per_coin), entry_p + min_tp2_dist), 6)
                 else:  # SHORT
                     risk_per_coin = max(wick_sl - entry_p, entry_p * 0.002)
-                    tp1_2r = round(entry_p - (config.TARGET_1_R * risk_per_coin), 6)
-                    tp2_3r = round(entry_p - (config.TARGET_2_R * risk_per_coin), 6)
+                    tp1_2r = round(min(entry_p - (config.TARGET_1_R * risk_per_coin), entry_p - min_tp1_dist), 6)
+                    tp2_3r = round(min(entry_p - (config.TARGET_2_R * risk_per_coin), entry_p - min_tp2_dist), 6)
 
                 risk_pct = risk_per_coin / entry_p
 
-                # 2. Расчет размера позиции: Реинвестирование (Сложный процент 5-10%)
-                if getattr(config, "ENABLE_COMPOUNDING", True):
-                    risk_to_use = max(portfolio.cash * config.COMPOUND_RISK_PCT, config.MAX_RISK_PER_TRADE_USD)
-                else:
-                    risk_to_use = config.MAX_RISK_PER_TRADE_USD
-
+                # 2. Оптимальный расчет маржи для ощутимой прибыли ($3.00 - $7.00+ на сделку):
+                # На старте $20 используем рабочую маржу $6.00 (или 30-35% капитала при разгоне сложным процентом).
+                # Ограничиваем не более 45% от доступного свободного кеша, чтобы всегда помещались 2 сделки.
                 lev_to_use = getattr(portfolio, "current_leverage", config.LEVERAGE)
-                notional_pos = risk_to_use / max(risk_pct, 0.002)
-                calculated_margin = round(notional_pos / lev_to_use, 2)
-                max_margin_allowed = max(portfolio.cash * 0.40, config.TRADE_AMOUNT_USDT)
-                actual_margin = min(max(calculated_margin, 1.0), max_margin_allowed)
+                target_margin = max(config.TRADE_AMOUNT_USDT, portfolio.cash * 0.35)
+                actual_margin = round(min(target_margin, max(portfolio.cash * 0.45, 3.0)), 2)
 
                 # Проверка лимитов портфеля и открытие позиции
                 if len(portfolio.open_positions) < config.MAX_CONCURRENT_POSITIONS and portfolio.cash >= actual_margin:

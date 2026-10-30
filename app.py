@@ -172,8 +172,8 @@ with st.sidebar:
         config.TRADE_AMOUNT_USDT = 6.0
     else:
         config.COMPOUND_RISK_PCT = 0.05
-        config.MAX_RISK_PER_TRADE_USD = 0.80
-        config.TRADE_AMOUNT_USDT = 5.0
+        config.MAX_RISK_PER_TRADE_USD = 1.00
+        config.TRADE_AMOUNT_USDT = 6.0
 
     st.text(f"Маржа на сделку: ${config.TRADE_AMOUNT_USDT:.1f}")
     st.text(f"Плечо для новых входов: {portfolio.current_leverage}x 🚀")

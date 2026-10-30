@@ -87,7 +87,7 @@ class BinanceClient:
             sym = item.get("symbol", "")
             if not sym.endswith("USDT"):
                 continue
-            if any(sym.startswith(skip) for skip in ["USDC", "FDUSD", "TUSD", "BUSD", "EUR"]):
+            if any(sym.startswith(skip) for skip in ["USDC", "FDUSD", "TUSD", "BUSD", "EUR", "DAI", "USTC", "PAXG", "XAU", "XAG"]):
                 continue
 
             try:
@@ -97,7 +97,8 @@ class BinanceClient:
                 high_price = float(item.get("highPrice", 0) or 0)
                 low_price = float(item.get("lowPrice", 0) or 0)
 
-                if quote_vol >= min_vol_usdt and last_price > 0:
+                # Фильтр: объем от $15M и суточная волатильность от 2.0% (исключаем "мертвые" монеты-боковики)
+                if quote_vol >= min_vol_usdt and abs(price_pct) >= 2.0 and last_price > 0:
                     candidates.append({
                         "symbol": sym,
                         "price": last_price,
@@ -109,8 +110,8 @@ class BinanceClient:
             except (ValueError, TypeError):
                 continue
 
-        # В топе — самые ликвидные и волатильные лидеры рынка (SOL, DOGE, PEPE, SUI, JUP и др.)
-        candidates.sort(key=lambda x: x["volume_24h"] * (1.0 + min(abs(x["price_change_24h_pct"]), 20.0) / 10.0), reverse=True)
+        # В топе — самые горячие ракеты и импульсные лидеры рынка (Rocket Momentum: Volatility * Volume^0.35)
+        candidates.sort(key=lambda x: abs(x["price_change_24h_pct"]) * (x["volume_24h"] ** 0.35), reverse=True)
         return candidates[:limit]
 
     async def fetch_candles_analysis(self, symbol: str, interval: str = "5m", limit: int = 20) -> Optional[Dict[str, Any]]:

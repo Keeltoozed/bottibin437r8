@@ -40,10 +40,10 @@ TARGET_1_R = 2.0  # Цель 1: 2R (+10% к балансу)
 TARGET_2_R = 3.5  # Цель 2: 3.5R (+17.5% к балансу)
 ENABLE_SHORT = os.getenv("ENABLE_SHORT", "true").lower() == "true"  # Торговля в LONG и SHORT
 
-# For $20 capital: $5 margin per trade
-TRADE_AMOUNT_USDT = float(os.getenv("TRADE_AMOUNT_USDT", "5.0"))
+# Для капитала $20: $6 маржа на сделку (2 сделки = $12 в работе, $8 свободный резерв)
+TRADE_AMOUNT_USDT = float(os.getenv("TRADE_AMOUNT_USDT", "6.0"))
 LEVERAGE = 75  # Значение по умолчанию, динамически переключается пользователем в дашборде
-MAX_CONCURRENT_POSITIONS = int(os.getenv("MAX_POSITIONS", "3"))
+MAX_CONCURRENT_POSITIONS = int(os.getenv("MAX_POSITIONS", "2"))
 
 # ==============================================================================
 # 4. EXIT STRATEGY & "THE LINE" (GROK x JEV RULES DEDICATED FOR 75x LEVERAGE)
@@ -72,9 +72,10 @@ ENABLE_MOMENTUM_DEATH_EXIT = True
 # ==============================================================================
 # 5. MARKET SCANNER & THE FUNNEL (EXPANDED RADAR: 200+ TOKENS)
 # ==============================================================================
-# Фильтр ликвидности: только топовые монеты с объемом от $10M в сутки (исключаем неликвидный мусор)
-MIN_24H_VOLUME_USDT = float(os.getenv("MIN_24H_VOLUME_USDT", "10000000"))  # $10M
-MIN_5M_VOLUME_SURGE_RATIO = float(os.getenv("MIN_5M_VOLUME_SURGE_RATIO", "1.35"))  # 1.35x реальный всплеск объёма
+# Фильтр ликвидности: только топовые монеты с объемом от $15M в сутки (исключаем неликвидный мусор)
+MIN_24H_VOLUME_USDT = float(os.getenv("MIN_24H_VOLUME_USDT", "15000000"))  # $15M
+MIN_5M_VOLUME_SURGE_RATIO = float(os.getenv("MIN_5M_VOLUME_SURGE_RATIO", "1.50"))  # 1.50x реальный всплеск объёма
+MIN_5M_PRICE_IMPULSE_PCT = float(os.getenv("MIN_5M_PRICE_IMPULSE_PCT", "0.55"))  # 0.55% четкий импульс свечи (отсекает сонные боковики)
 MAX_SPREAD_PCT = float(os.getenv("MAX_SPREAD_PCT", "0.0015"))  # 0.15% max spread
 SCAN_TICKERS_LIMIT = int(os.getenv("SCAN_TICKERS_LIMIT", "100"))  # Сканируем топ-100 волатильных пар
 SCAN_INTERVAL_SECONDS = int(os.getenv("SCAN_INTERVAL_SECONDS", "10"))
