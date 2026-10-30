@@ -1,7 +1,9 @@
 import sys
 import os
+import warnings
 
-# Гарантируем немедленный вывод логов на Render / Docker (без буферизации)
+# Подавляем устаревшие предупреждения Streamlit в логах сервера
+warnings.filterwarnings("ignore")
 os.environ["PYTHONUNBUFFERED"] = "1"
 try:
     if hasattr(sys.stdout, "reconfigure"):
@@ -204,6 +206,17 @@ st.title("🚀 Binance Autonomous Groq Trader (JEV Engine)")
 last_scan_info = getattr(portfolio, "last_scan_str", "Ожидание...")
 st.caption(f"Автономный торговый конвейер: Сканер Binance Futures → Groq Soft Gate → Dynamic Breakeven & Stop Under Wick | Режим: {'🧪 Paper Trading (Симуляция)' if config.PAPER_TRADING else '⚡ Live Trading'} | Последний скан: {last_scan_info}")
 
+# Оповещение и ручной сброс Circuit Breaker
+if summary["circuit_breaker"]:
+    cb_col1, cb_col2 = st.columns([3, 1])
+    with cb_col1:
+        st.error(f"🛑 **Защита депозита (Circuit Breaker):** Дневной лимит убытка (-${summary['daily_loss']:.2f}) исчерпан. Новые входы приостановлены.")
+    with cb_col2:
+        if st.button("🔓 Снять лимит и возобновить торговлю", type="primary"):
+            portfolio.reset_daily_loss()
+            st.success("Торговля разблокирована!")
+            st.rerun()
+
 # Метрики карточками
 c1, c2, c3, c4, c5 = st.columns(5)
 with c1:
@@ -278,7 +291,9 @@ with tab_pos:
                 with col_b:
                     st.metric("Текущая цена", f"${pos['current_price']:.4f}")
                 with col_c:
-                    st.metric("PnL (%)", f"{pos['pnl_pct']:+.2f}%", delta=f"${pos['unrealized_pnl']:+.2f}")
+                    pnl_usd = pos['unrealized_pnl']
+                    delta_display = f"+${pnl_usd:.2f}" if pnl_usd >= 0 else f"-${abs(pnl_usd):.2f}"
+                    st.metric("PnL (%)", f"{pos['pnl_pct']:+.2f}%", delta=delta_display)
                 with col_d:
                     st.markdown(f"**{stop_label}:** `${pos['wick_sl']:.4f}`")
                     st.markdown(f"**TP1:** `${pos['tp1']:.4f}` | **TP2:** `${pos['tp2']:.4f}`")

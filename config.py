@@ -35,7 +35,7 @@ INITIAL_BALANCE = float(os.getenv("INITIAL_BALANCE", "20.0"))
 ENABLE_COMPOUNDING = os.getenv("ENABLE_COMPOUNDING", "true").lower() == "true"
 COMPOUND_RISK_PCT = float(os.getenv("COMPOUND_RISK_PCT", "0.05"))  # 5% от депозита на сделку ($1 при $20, $5 при $100)
 MAX_RISK_PER_TRADE_USD = float(os.getenv("MAX_RISK_PER_TRADE_USD", "0.80")) # минимум $0.80
-MAX_DAILY_LOSS_USD = float(os.getenv("MAX_DAILY_LOSS_USD", "2.40"))  # Дневной стоп (12% счета)
+MAX_DAILY_LOSS_USD = float(os.getenv("MAX_DAILY_LOSS_USD", "6.00"))  # Дневной лимит убытка ($6.00 = 30% счета)
 TARGET_1_R = 2.0  # Цель 1: 2R (+10% к балансу)
 TARGET_2_R = 3.5  # Цель 2: 3.5R (+17.5% к балансу)
 ENABLE_SHORT = os.getenv("ENABLE_SHORT", "true").lower() == "true"  # Торговля в LONG и SHORT
@@ -72,9 +72,9 @@ ENABLE_MOMENTUM_DEATH_EXIT = True
 # ==============================================================================
 # 5. MARKET SCANNER & THE FUNNEL (EXPANDED RADAR: 200+ TOKENS)
 # ==============================================================================
-# Снижаем порог объема до $2M для охвата всех взрывных альткоинов и мем-токенов
-MIN_24H_VOLUME_USDT = float(os.getenv("MIN_24H_VOLUME_USDT", "2000000"))  # $2M
-MIN_5M_VOLUME_SURGE_RATIO = float(os.getenv("MIN_5M_VOLUME_SURGE_RATIO", "1.25"))  # 1.25x всплеск
+# Фильтр ликвидности: только топовые монеты с объемом от $10M в сутки (исключаем неликвидный мусор)
+MIN_24H_VOLUME_USDT = float(os.getenv("MIN_24H_VOLUME_USDT", "10000000"))  # $10M
+MIN_5M_VOLUME_SURGE_RATIO = float(os.getenv("MIN_5M_VOLUME_SURGE_RATIO", "1.35"))  # 1.35x реальный всплеск объёма
 MAX_SPREAD_PCT = float(os.getenv("MAX_SPREAD_PCT", "0.0015"))  # 0.15% max spread
 SCAN_TICKERS_LIMIT = int(os.getenv("SCAN_TICKERS_LIMIT", "100"))  # Сканируем топ-100 волатильных пар
 SCAN_INTERVAL_SECONDS = int(os.getenv("SCAN_INTERVAL_SECONDS", "10"))

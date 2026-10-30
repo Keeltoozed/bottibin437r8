@@ -226,8 +226,16 @@ class PortfolioTracker:
         for symbol, pos in list(self.open_positions.items()):
             self.close_position(symbol, pos.get("current_price", pos["entry_price"]), reason)
 
+    def reset_daily_loss(self):
+        """Сбрасывает блокировку Circuit Breaker по запросу пользователя."""
+        self.circuit_breaker_override = True
+        self.save()
+        print("🔓 [CIRCUIT BREAKER] Блокировка снята пользователем. Торговля разблокирована!", flush=True)
+
     def get_daily_loss(self) -> float:
         """Суммарный убыток за сегодня (для правила Circuit Breaker из day-trader-skill)."""
+        if getattr(self, "circuit_breaker_override", False):
+            return 0.0
         today_str = time.strftime("%Y-%m-%d")
         daily_losses = [abs(t["realized_pnl"]) for t in self.trade_history if t.get("closed_at", "").startswith(today_str) and t["realized_pnl"] < 0]
         return round(sum(daily_losses), 2)

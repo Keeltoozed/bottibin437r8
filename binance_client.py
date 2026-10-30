@@ -109,8 +109,8 @@ class BinanceClient:
             except (ValueError, TypeError):
                 continue
 
-        # В топе — самые волатильные пампы и ракеты рынка
-        candidates.sort(key=lambda x: (abs(x["price_change_24h_pct"]), x["volume_24h"]), reverse=True)
+        # В топе — самые ликвидные и волатильные лидеры рынка (SOL, DOGE, PEPE, SUI, JUP и др.)
+        candidates.sort(key=lambda x: x["volume_24h"] * (1.0 + min(abs(x["price_change_24h_pct"]), 20.0) / 10.0), reverse=True)
         return candidates[:limit]
 
     async def fetch_candles_analysis(self, symbol: str, interval: str = "5m", limit: int = 20) -> Optional[Dict[str, Any]]:
