@@ -159,8 +159,9 @@ class MarketScanner:
                 else:
                     risk_to_use = config.MAX_RISK_PER_TRADE_USD
 
+                lev_to_use = getattr(portfolio, "current_leverage", config.LEVERAGE)
                 notional_pos = risk_to_use / max(risk_pct, 0.002)
-                calculated_margin = round(notional_pos / config.LEVERAGE, 2)
+                calculated_margin = round(notional_pos / lev_to_use, 2)
                 max_margin_allowed = max(portfolio.cash * 0.40, config.TRADE_AMOUNT_USDT)
                 actual_margin = min(max(calculated_margin, 1.0), max_margin_allowed)
 
@@ -175,7 +176,7 @@ class MarketScanner:
                         tp1=tp1_2r,
                         tp2=tp2_3r,
                         groq_reason=f"2R/3R Target | {eval_entry['reason']}",
-                        leverage=config.LEVERAGE
+                        leverage=lev_to_use
                     )
             else:
                 # Сохраняем в Shadow Tracker для анализа отклонённых сетапов

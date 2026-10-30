@@ -1,6 +1,7 @@
 {
   "cash": 20.0,
   "initial_balance": 20.0,
+  "current_leverage": 75,
   "open_positions": {},
   "trade_history": [],
   "funnel_stats": {
@@ -13,5 +14,5 @@
   "recent_evaluations": [],
   "shadow_trades": [],
   "is_paused": false,
-  "last_updated": 0
+  "last_updated": 1793373940.272219
 }

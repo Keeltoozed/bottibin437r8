@@ -40,9 +40,9 @@ TARGET_1_R = 2.0  # Цель 1: 2R (+10% к балансу)
 TARGET_2_R = 3.5  # Цель 2: 3.5R (+17.5% к балансу)
 ENABLE_SHORT = os.getenv("ENABLE_SHORT", "true").lower() == "true"  # Торговля в LONG и SHORT
 
-# For $20 capital: $5 margin with 75x leverage creates a $375 position per trade!
+# For $20 capital: $5 margin per trade
 TRADE_AMOUNT_USDT = float(os.getenv("TRADE_AMOUNT_USDT", "5.0"))
-LEVERAGE = int(os.getenv("LEVERAGE", "75"))  # 75x плечо
+LEVERAGE = 75  # Значение по умолчанию, динамически переключается пользователем в дашборде
 MAX_CONCURRENT_POSITIONS = int(os.getenv("MAX_POSITIONS", "3"))
 
 # ==============================================================================

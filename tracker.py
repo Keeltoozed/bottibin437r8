@@ -31,6 +31,7 @@ class PortfolioTracker:
         self.recent_evaluations: List[Dict[str, Any]] = []
         self.shadow_trades: List[Dict[str, Any]] = []
         self.is_paused = False
+        self.current_leverage = getattr(config, "LEVERAGE", 75)
         self.load()
 
     def save(self):
@@ -38,6 +39,7 @@ class PortfolioTracker:
         state = {
             "cash": round(self.cash, 4),
             "initial_balance": self.initial_balance,
+            "current_leverage": self.current_leverage,
             "open_positions": self.open_positions,
             "trade_history": self.trade_history[-100:],  # последние 100 сделок
             "funnel_stats": self.funnel_stats,
@@ -66,7 +68,9 @@ class PortfolioTracker:
                 self.recent_evaluations = state.get("recent_evaluations", [])
                 self.shadow_trades = state.get("shadow_trades", [])
                 self.is_paused = state.get("is_paused", False)
-                print(f"✅ Портфель загружен: баланс ${self.cash:.2f}, открытых позиций: {len(self.open_positions)}", flush=True)
+                self.current_leverage = int(state.get("current_leverage", getattr(config, "LEVERAGE", 75)))
+                config.LEVERAGE = self.current_leverage
+                print(f"✅ Портфель загружен: баланс ${self.cash:.2f}, открытых позиций: {len(self.open_positions)}, плечо: {self.current_leverage}x", flush=True)
         except Exception as e:
             print(f"⚠️ Ошибка чтения portfolio.json: {e}", flush=True)
 
@@ -127,6 +131,24 @@ class PortfolioTracker:
         self.save()
         print(f"🟢 [TRADE OPEN] {side} {symbol} по ${entry_price:.4f} (Маржа: ${margin_usdt:.2f}, Плечо: {leverage}x)", flush=True)
         return True
+
+    def update_leverage(self, new_leverage: int):
+        """Обновляет плечо и пересчитывает объем/PnL для всех открытых позиций."""
+        for symbol, pos in self.open_positions.items():
+            pos["leverage"] = new_leverage
+            pos["notional_value"] = round(pos["margin_usdt"] * new_leverage, 2)
+            pos["coins_qty"] = round(pos["notional_value"] / pos["entry_price"], 6)
+
+            entry = pos["entry_price"]
+            cur_price = pos.get("current_price", entry)
+            if pos["side"] == "LONG":
+                raw_pct = (cur_price - entry) / entry
+            else:
+                raw_pct = (entry - cur_price) / entry
+            pos["pnl_pct"] = round(raw_pct * new_leverage * 100, 2)
+            pos["unrealized_pnl"] = round(pos["margin_usdt"] * (raw_pct * new_leverage), 3)
+        self.save()
+        print(f"⚡ [LEVERAGE UPDATE] Кредитное плечо открытых позиций изменено на {new_leverage}x", flush=True)
 
     def update_position_prices(self, price_map: Dict[str, float]):
         """Обновляет текущие цены открытых позиций и рассчитывает PnL."""

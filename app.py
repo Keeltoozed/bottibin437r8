@@ -146,10 +146,22 @@ with st.sidebar:
     st.divider()
     st.markdown("### 🎯 Параметры стратегии ($20)")
     
+    # Выбор кредитного плеча
+    lev_options = [75, 50, 35, 25, 20, 10, 5]
+    cur_lev = getattr(portfolio, "current_leverage", config.LEVERAGE)
+    cur_idx = lev_options.index(cur_lev) if cur_lev in lev_options else 0
+    chosen_leverage = st.selectbox("⚡ Кредитное плечо (для новых сделок):", lev_options, index=cur_idx)
+
+    if chosen_leverage != getattr(portfolio, "current_leverage", None):
+        portfolio.current_leverage = chosen_leverage
+        config.LEVERAGE = chosen_leverage
+        portfolio.save()
+        st.rerun()
+
     # Режим разгона депозита (Compounding Multiplier)
     risk_mode = st.radio(
         "Режим доходности:",
-        ["🎯 Стандарт (5% риск, 2R/3.5R)", "🔥 Турбо 75x (10% риск, ускоренный разгон)"],
+        ["🔥 Турбо 75x (10% риск, ускоренный разгон)", "🎯 Стандарт (5% риск, 2R/3.5R)"],
         index=0
     )
     if "Турбо" in risk_mode:
@@ -162,7 +174,7 @@ with st.sidebar:
         config.TRADE_AMOUNT_USDT = 5.0
 
     st.text(f"Маржа на сделку: ${config.TRADE_AMOUNT_USDT:.1f}")
-    st.text(f"Плечо: {config.LEVERAGE}x 🚀")
+    st.text(f"Плечо для новых входов: {portfolio.current_leverage}x 🚀")
     current_risk_usd = max(portfolio.cash * config.COMPOUND_RISK_PCT, config.MAX_RISK_PER_TRADE_USD) if config.ENABLE_COMPOUNDING else config.MAX_RISK_PER_TRADE_USD
     st.text(f"Сложный процент: 🟢 ВКЛ ({int(config.COMPOUND_RISK_PCT*100)}% депо)")
     st.text(f"Текущий риск на сделку: ${current_risk_usd:.2f}")
@@ -262,7 +274,7 @@ with tab_pos:
                 col_a, col_b, col_c, col_d, col_e = st.columns([2, 2, 2, 2, 1])
                 with col_a:
                     st.markdown(f"### {sym} <span class='{side_badge_cls}'>{side} {pos['leverage']}x</span>", unsafe_allow_html=True)
-                    st.caption(f"Вход: **${pos['entry_price']:.4f}** | Маржа: **${pos['margin_usdt']:.2f}**")
+                    st.caption(f"Вход: ${pos['entry_price']:.4f} • Маржа: ${pos['margin_usdt']:.2f}")
                 with col_b:
                     st.metric("Текущая цена", f"${pos['current_price']:.4f}")
                 with col_c:

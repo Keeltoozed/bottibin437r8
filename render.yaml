@@ -22,8 +22,6 @@ services:
         value: "20.0"
       - key: TRADE_AMOUNT_USDT
         value: "5.0"
-      - key: LEVERAGE
-        value: "5"
       - key: MAX_POSITIONS
         value: "3"
 
