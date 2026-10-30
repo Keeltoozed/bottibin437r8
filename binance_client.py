@@ -144,9 +144,14 @@ class BinanceClient:
             return None
 
         last_c = candles[-1]
-        prior_vols = [c["quote_vol"] for c in candles[-10:-1]]
+        prev_c = candles[-2]
+        prior_vols = [c["quote_vol"] for c in candles[-11:-2]]
         avg_vol = (sum(prior_vols) / len(prior_vols)) if prior_vols else 1.0
-        surge_ratio = round(last_c["quote_vol"] / avg_vol, 2) if avg_vol > 0 else 1.0
+
+        # Учитываем всплеск объема как последней закрытой 5m свечи, так и текущей
+        surge_closed = prev_c["quote_vol"] / avg_vol if avg_vol > 0 else 1.0
+        surge_live = last_c["quote_vol"] / avg_vol if avg_vol > 0 else 1.0
+        surge_ratio = round(max(surge_closed, surge_live), 2)
 
         candle_range = max(last_c["high"] - last_c["low"], 1e-9)
         body_top = max(last_c["open"], last_c["close"])
@@ -161,12 +166,13 @@ class BinanceClient:
         recent_low = min(c["low"] for c in candles[-5:])
         bounce_from_low_pct = round((last_c["close"] - recent_low) / max(recent_low, 1e-9), 4)
 
-        recent_wick_low = min(c["low"] for c in candles[-3:])
+        # Скальп-стоп за фитилем: локальный экстремум последних 2 свечей (текущая + предыдущая)
+        recent_wick_low = min(c["low"] for c in candles[-2:])
         wick_stop_loss = round(recent_wick_low * (1.0 - config.WICK_BUFFER_PCT), 6)
         sl_pct_distance = round((last_c["close"] - wick_stop_loss) / last_c["close"], 4)
 
         # Расчет параметров для SHORT (стоп над верхним фитилем)
-        recent_wick_high = max(c["high"] for c in candles[-3:])
+        recent_wick_high = max(c["high"] for c in candles[-2:])
         short_wick_stop_loss = round(recent_wick_high * (1.0 + config.WICK_BUFFER_PCT), 6)
         short_sl_pct_distance = round((short_wick_stop_loss - last_c["close"]) / last_c["close"], 4)
 

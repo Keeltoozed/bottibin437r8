@@ -46,7 +46,7 @@ class MarketScanner:
         print(f"📡 [SCAN] {now_str} — Загружено {len(tickers)} пар Binance (Параллельный радар)...", flush=True)
 
         now = time.time()
-        sem = asyncio.Semaphore(8)  # 8 одновременных запросов для мгновенной скорости
+        sem = asyncio.Semaphore(12)  # 12 параллельных запросов для мгновенной скорости
 
         async def check_ticker(t: Dict[str, Any]) -> Any:
             sym = t["symbol"]
@@ -70,24 +70,23 @@ class MarketScanner:
 
                 surge = analysis["volume_surge_ratio"]
                 pct_5m = analysis["pct_5m"]
+                pct_15m = analysis.get("pct_15m", pct_5m)
                 sl_dist = analysis["sl_pct_distance"]
                 short_sl_dist = analysis.get("short_sl_dist", 0.05)
 
-                min_impulse = getattr(config, "MIN_5M_PRICE_IMPULSE_PCT", 0.55)
-
-                # Проверка условий LONG (импульсный памп с активным объемом)
+                # Проверка условий LONG (импульсный памп или выкуп пролива)
                 is_long = (
-                    surge >= config.MIN_5M_VOLUME_SURGE_RATIO and
-                    pct_5m >= min_impulse and
-                    sl_dist <= config.MAX_ALLOWED_SL_PCT
+                    surge >= 1.08 and
+                    (pct_5m >= 0.20 or pct_15m >= 0.40) and
+                    sl_dist <= 0.020
                 )
 
-                # Проверка условий SHORT (пробойный дамп с давлением продавцов)
+                # Проверка условий SHORT (пробойный дамп или отскок в сопротивление)
                 is_short = (
                     config.ENABLE_SHORT and
-                    surge >= config.MIN_5M_VOLUME_SURGE_RATIO and
-                    pct_5m <= -min_impulse and
-                    short_sl_dist <= config.MAX_ALLOWED_SL_PCT
+                    surge >= 1.08 and
+                    (pct_5m <= -0.20 or pct_15m <= -0.40) and
+                    short_sl_dist <= 0.020
                 )
 
                 if is_long:
@@ -106,8 +105,12 @@ class MarketScanner:
 
         portfolio.funnel_stats["hard_gates"] += len(candidates_passed_hard)
 
+        # Сортируем кандидатов по взрывному импульсу и направляем топ-3 на глубокий AI-анализ в Groq
+        candidates_passed_hard.sort(key=lambda x: abs(x["pct_5m"]) * x["volume_surge_ratio"], reverse=True)
+        candidates_to_eval = candidates_passed_hard[:3]
+
         # 4. GROQ SOFT GATE (JEV AI ENGINE)
-        for ctx in candidates_passed_hard:
+        for ctx in candidates_to_eval:
             sym = ctx["symbol"]
             cand_side = ctx.get("candidate_side", "LONG")
             portfolio.funnel_stats["groq_evaluated"] += 1
