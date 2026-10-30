@@ -114,6 +114,7 @@ class PortfolioTracker:
             "tp2_hit": False,
             "breakeven_set": False,
             "highest_price": entry_price,
+            "lowest_price": entry_price,
             "unrealized_pnl": 0.0,
             "pnl_pct": 0.0,
             "groq_reason": groq_reason,
@@ -135,11 +136,13 @@ class PortfolioTracker:
                 continue
 
             pos["current_price"] = cur_price
-            if cur_price > pos["highest_price"]:
-                pos["highest_price"] = cur_price
-
             entry = pos["entry_price"]
             lev = pos["leverage"]
+
+            if cur_price > pos.get("highest_price", entry):
+                pos["highest_price"] = cur_price
+            if cur_price < pos.get("lowest_price", entry):
+                pos["lowest_price"] = cur_price
 
             if pos["side"] == "LONG":
                 raw_pct = (cur_price - entry) / entry

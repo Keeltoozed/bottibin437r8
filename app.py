@@ -76,6 +76,14 @@ st.markdown("""
         font-size: 12px;
         font-weight: 600;
     }
+    .badge-short {
+        background-color: #da3633;
+        color: white;
+        padding: 3px 8px;
+        border-radius: 6px;
+        font-size: 12px;
+        font-weight: 600;
+    }
     .badge-buy {
         background-color: #2ea043;
         color: white;
@@ -137,11 +145,28 @@ with st.sidebar:
         
     st.divider()
     st.markdown("### 🎯 Параметры стратегии ($20)")
+    
+    # Режим разгона депозита (Compounding Multiplier)
+    risk_mode = st.radio(
+        "Режим доходности:",
+        ["🎯 Стандарт (5% риск, 2R/3.5R)", "🔥 Турбо 75x (10% риск, ускоренный разгон)"],
+        index=0
+    )
+    if "Турбо" in risk_mode:
+        config.COMPOUND_RISK_PCT = 0.10
+        config.MAX_RISK_PER_TRADE_USD = 1.50
+        config.TRADE_AMOUNT_USDT = 6.0
+    else:
+        config.COMPOUND_RISK_PCT = 0.05
+        config.MAX_RISK_PER_TRADE_USD = 0.80
+        config.TRADE_AMOUNT_USDT = 5.0
+
     st.text(f"Маржа на сделку: ${config.TRADE_AMOUNT_USDT:.1f}")
     st.text(f"Плечо: {config.LEVERAGE}x 🚀")
     current_risk_usd = max(portfolio.cash * config.COMPOUND_RISK_PCT, config.MAX_RISK_PER_TRADE_USD) if config.ENABLE_COMPOUNDING else config.MAX_RISK_PER_TRADE_USD
-    st.text(f"Сложный процент: 🟢 ВКЛ (5% депо)")
+    st.text(f"Сложный процент: 🟢 ВКЛ ({int(config.COMPOUND_RISK_PCT*100)}% депо)")
     st.text(f"Текущий риск на сделку: ${current_risk_usd:.2f}")
+    st.text(f"Направления: 🟢 LONG + 🔻 SHORT")
     st.text(f"Цели профита: 2R / 3.5R")
     st.text(f"Радар рынка: {config.SCAN_TICKERS_LIMIT} монет")
     st.text(f"Модель Groq: {config.GROQ_PRIMARY_MODEL}")
@@ -224,23 +249,26 @@ tab_pos, tab_radar, tab_funnel, tab_history, tab_shadow, tab_timemachine = st.ta
 with tab_pos:
     st.subheader("🟢 Активные сделки в сопровождении")
     if not portfolio.open_positions:
-        st.info("В данный момент нет открытых сделок. Автономный сканер ищет пробойные сетапы...")
+        st.info("В данный момент нет открытых сделок. Автономный сканер ищет сетапы (LONG и SHORT)...")
     else:
         for sym, pos in list(portfolio.open_positions.items()):
             with st.container():
                 pnl_color = "#3fb950" if pos['unrealized_pnl'] >= 0 else "#f85149"
                 be_badge = "🛡️ Безубыток АКТИВЕН" if pos['breakeven_set'] else "Ожидание TP1"
+                side = pos.get('side', 'LONG')
+                side_badge_cls = "badge-long" if side == 'LONG' else "badge-short"
+                stop_label = "Stop Under Wick" if side == 'LONG' else "Stop Above Wick"
                 
                 col_a, col_b, col_c, col_d, col_e = st.columns([2, 2, 2, 2, 1])
                 with col_a:
-                    st.markdown(f"### {sym} <span class='badge-long'>{pos['side']} {pos['leverage']}x</span>", unsafe_allow_html=True)
+                    st.markdown(f"### {sym} <span class='{side_badge_cls}'>{side} {pos['leverage']}x</span>", unsafe_allow_html=True)
                     st.caption(f"Вход: **${pos['entry_price']:.4f}** | Маржа: **${pos['margin_usdt']:.2f}**")
                 with col_b:
                     st.metric("Текущая цена", f"${pos['current_price']:.4f}")
                 with col_c:
                     st.metric("PnL (%)", f"{pos['pnl_pct']:+.2f}%", delta=f"${pos['unrealized_pnl']:+.2f}")
                 with col_d:
-                    st.markdown(f"**Stop Under Wick:** `${pos['wick_sl']:.4f}`")
+                    st.markdown(f"**{stop_label}:** `${pos['wick_sl']:.4f}`")
                     st.markdown(f"**TP1:** `${pos['tp1']:.4f}` | **TP2:** `${pos['tp2']:.4f}`")
                     st.caption(be_badge)
                 with col_e:
@@ -248,6 +276,35 @@ with tab_pos:
                         portfolio.close_position(sym, pos['current_price'], "Ручное закрытие из интерфейса")
                         st.rerun()
                 st.caption(f"🧠 Логика Groq: {pos.get('groq_reason', 'N/A')}")
+                st.divider()
+
+    # --------------------------------------------------------------------------
+    # НЕДАВНО ЗАКРЫТЫЕ СДЕЛКИ (ОТОБРАЖАЮТСЯ СРАЗУ ПОД ОТКРЫТЫМИ)
+    # --------------------------------------------------------------------------
+    st.subheader("🏁 Недавно закрытые сделки (Результаты)")
+    if not portfolio.trade_history:
+        st.caption("Здесь фиксируются все завершенные сделки (TP1, TP2, Stop-Loss или Trailing). История сохраняется персистентно.")
+    else:
+        for t in reversed(portfolio.trade_history[-10:]):
+            is_win = t["realized_pnl"] >= 0
+            pnl_color = "#3fb950" if is_win else "#f85149"
+            side = t.get("side", "LONG")
+            side_badge_cls = "badge-long" if side == 'LONG' else "badge-short"
+            
+            with st.container():
+                rc1, rc2, rc3, rc4 = st.columns([2, 2, 2, 3])
+                with rc1:
+                    st.markdown(f"**{t['symbol']}** <span class='{side_badge_cls}'>{side} {t.get('leverage', config.LEVERAGE)}x</span>", unsafe_allow_html=True)
+                    st.caption(f"Закрыто: {t.get('closed_at', 'N/A')}")
+                with rc2:
+                    st.markdown(f"Вход: **${t['entry_price']:.4f}**")
+                    st.markdown(f"Выход: **${t['exit_price']:.4f}**")
+                with rc3:
+                    st.markdown(f"<span style='color: {pnl_color}; font-size: 17px; font-weight: bold;'>{t['realized_pnl']:+.2f} USDT ({t['roi_pct']:+.1f}%)</span>", unsafe_allow_html=True)
+                    st.caption(f"Маржа: ${t.get('margin_usdt', 0):.2f}")
+                with rc4:
+                    st.markdown(f"**Причина:** {t.get('reason', 'Фиксация')}")
+                    st.caption(f"Длительность: {t.get('duration_sec', 0)} сек")
                 st.divider()
 
 # ------------------------------------------------------------------------------
@@ -261,7 +318,14 @@ with tab_radar:
         st.info("Ожидание первых данных от сканера...")
     else:
         for ev in portfolio.recent_evaluations[:15]:
-            badge = "<span class='badge-buy'>✅ BUY / APPROVED</span>" if ev['decision'] == 'BUY' else "<span class='badge-skip'>❌ SKIP / REJECTED</span>"
+            dec = ev.get('decision', 'SKIP')
+            if dec == 'BUY':
+                badge = "<span class='badge-buy'>✅ BUY (LONG)</span>"
+            elif dec == 'SHORT':
+                badge = "<span class='badge-short' style='font-size: 13px; font-weight: bold;'>🔻 SHORT</span>"
+            else:
+                badge = "<span class='badge-skip'>❌ SKIP</span>"
+
             conf = int(float(ev.get('confidence', 0)) * 100)
             
             with st.container():
@@ -274,8 +338,8 @@ with tab_radar:
                     st.caption(f"Всплеск: {ev.get('surge', 1)}x | Откат: {ev.get('pullback', 0)}%")
                 with rc3:
                     st.markdown(f"**Анализ Groq:** {ev.get('reason', 'N/A')}")
-                    if ev['decision'] == 'BUY':
-                        st.markdown(f"🎯 *Вход: ${ev.get('price'):.4f} | Wick SL: ${ev.get('sl'):.4f} | TP1: ${ev.get('tp1'):.4f}*")
+                    if dec in ['BUY', 'SHORT']:
+                        st.markdown(f"🎯 *Вход: ${ev.get('price'):.4f} | SL: ${ev.get('sl'):.4f} | TP1: ${ev.get('tp1'):.4f}*")
                 st.divider()
 
 # ------------------------------------------------------------------------------

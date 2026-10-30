@@ -21,86 +21,115 @@ from tracker import portfolio
 
 class MarketScanner:
     """
-    Автономный сканер рынка Binance Futures.
-    Непрерывно анализирует топовые пары, отсекает мусор через Hard Gates
-    и передает кандидатов на вердикт в Groq AI Engine.
+    Высокоскоростной автономный сканер рынка Binance Futures.
+    Параллельно (через Semaphore) анализирует пары, отсекает мусор через Hard Gates
+    и передает кандидатов (LONG и SHORT) на вердикт в Groq AI Engine.
     """
     def __init__(self):
         self.is_running = False
         self.cooldowns: Dict[str, float] = {}
 
     async def scan_market_once(self) -> List[Dict[str, Any]]:
-        """Один проход сканирования рынка."""
+        """Один высокоскоростной параллельный проход сканирования рынка."""
         if portfolio.is_paused:
             return []
 
         now_str = time.strftime("%H:%M:%S")
         portfolio.last_scan_str = now_str
 
-        # 1. UNIVERSE: Получаем топ пары Binance Futures
+        # 1. UNIVERSE: Получаем топ волатильные пары Binance Futures
         tickers = await binance_client.fetch_top_tickers(
             min_vol_usdt=config.MIN_24H_VOLUME_USDT,
             limit=config.SCAN_TICKERS_LIMIT
         )
         portfolio.funnel_stats["universe"] += len(tickers)
-        print(f"📡 [SCAN] {now_str} — Загружено {len(tickers)} пар Binance (Топ волатильные)...", flush=True)
+        print(f"📡 [SCAN] {now_str} — Загружено {len(tickers)} пар Binance (Параллельный радар)...", flush=True)
 
-        candidates_passed_hard = []
         now = time.time()
+        sem = asyncio.Semaphore(8)  # 8 одновременных запросов для мгновенной скорости
 
-        for t in tickers:
+        async def check_ticker(t: Dict[str, Any]) -> Any:
             sym = t["symbol"]
 
-            # Проверка кулдауна
+            # Проверка кулдауна и открытых позиций
             if sym in self.cooldowns and (now - self.cooldowns[sym]) < (config.PAIR_COOLDOWN_MINUTES * 60):
-                continue
+                return None
             if sym in portfolio.open_positions:
-                continue
+                return None
 
-            # 2. HARD GATE: Спред в стакане
-            _, _, spread = await binance_client.fetch_orderbook_spread(sym)
-            if spread > config.MAX_SPREAD_PCT:
-                continue
+            async with sem:
+                # 2. HARD GATE: Спред в стакане
+                _, _, spread = await binance_client.fetch_orderbook_spread(sym)
+                if spread > config.MAX_SPREAD_PCT:
+                    return None
 
-            # 3. HARD GATE: Анализ свечей и объема (всплеск объема + динамика)
-            analysis = await binance_client.fetch_candles_analysis(sym, interval="5m", limit=20)
-            if not analysis:
-                continue
+                # 3. HARD GATE: Анализ свечей и объема
+                analysis = await binance_client.fetch_candles_analysis(sym, interval="5m", limit=20)
+                if not analysis:
+                    return None
 
-            surge = analysis["volume_surge_ratio"]
-            pct_5m = analysis["pct_5m"]
-            sl_dist = analysis["sl_pct_distance"]
+                surge = analysis["volume_surge_ratio"]
+                pct_5m = analysis["pct_5m"]
+                sl_dist = analysis["sl_pct_distance"]
+                short_sl_dist = analysis.get("short_sl_dist", 0.05)
 
-            # Ищем памп / пробойный импульс (всплеск объема и положительный моментум)
-            if surge >= config.MIN_5M_VOLUME_SURGE_RATIO and pct_5m >= 0.35 and sl_dist <= config.MAX_ALLOWED_SL_PCT:
-                context = {**t, **analysis}
-                candidates_passed_hard.append(context)
-                self.cooldowns[sym] = now
-                print(f"🔥 [HARD GATE PASSED] {sym}: всплеск {surge}x, +{pct_5m:.2f}% (5m) ➔ Отправляем в Groq...", flush=True)
+                # Проверка условий LONG (импульсный памп)
+                is_long = (
+                    surge >= config.MIN_5M_VOLUME_SURGE_RATIO and
+                    pct_5m >= 0.35 and
+                    sl_dist <= config.MAX_ALLOWED_SL_PCT
+                )
+
+                # Проверка условий SHORT (пробойный дамп)
+                is_short = (
+                    config.ENABLE_SHORT and
+                    surge >= config.MIN_5M_VOLUME_SURGE_RATIO and
+                    pct_5m <= -0.35 and
+                    short_sl_dist <= config.MAX_ALLOWED_SL_PCT
+                )
+
+                if is_long:
+                    self.cooldowns[sym] = now
+                    print(f"🔥 [HARD GATE PASSED - LONG] {sym}: всплеск {surge}x, +{pct_5m:.2f}% (5m) ➔ Groq...", flush=True)
+                    return {**t, **analysis, "candidate_side": "LONG"}
+                elif is_short:
+                    self.cooldowns[sym] = now
+                    print(f"🔻 [HARD GATE PASSED - SHORT] {sym}: всплеск {surge}x, {pct_5m:.2f}% (5m) ➔ Groq...", flush=True)
+                    return {**t, **analysis, "candidate_side": "SHORT"}
+                return None
+
+        tasks = [check_ticker(t) for t in tickers]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        candidates_passed_hard = [r for r in results if r and isinstance(r, dict)]
 
         portfolio.funnel_stats["hard_gates"] += len(candidates_passed_hard)
 
         # 4. GROQ SOFT GATE (JEV AI ENGINE)
         for ctx in candidates_passed_hard:
             sym = ctx["symbol"]
+            cand_side = ctx.get("candidate_side", "LONG")
             portfolio.funnel_stats["groq_evaluated"] += 1
 
             approved, groq_eval = await groq_engine.evaluate_setup(ctx)
 
+            default_sl = ctx["wick_stop_loss"] if cand_side == "LONG" else ctx.get("short_wick_sl", ctx["current_price"] * 1.01)
+            default_tp1 = round(ctx["current_price"] * (1.02 if cand_side == "LONG" else 0.98), 4)
+
             eval_entry = {
                 "symbol": sym,
+                "side": cand_side,
                 "price": ctx["current_price"],
                 "decision": groq_eval.get("decision", "SKIP"),
                 "confidence": groq_eval.get("confidence", 0.0),
                 "reason": groq_eval.get("reason", ""),
-                "sl": groq_eval.get("stop_loss", ctx["wick_stop_loss"]),
-                "tp1": groq_eval.get("tp1", round(ctx["current_price"] * 1.025, 4)),
+                "sl": groq_eval.get("stop_loss", default_sl),
+                "tp1": groq_eval.get("tp1", default_tp1),
                 "surge": ctx["volume_surge_ratio"],
-                "pullback": round(ctx.get("pullback_from_high_pct", 0) * 100, 2),
+                "pullback": round(ctx.get("pullback_from_high_pct", 0) * 100, 2) if cand_side == "LONG" else round(ctx.get("bounce_from_low_pct", 0) * 100, 2),
                 "time": time.strftime("%H:%M:%S")
             }
             portfolio.add_evaluation(eval_entry)
-            print(f"🤖 [GROQ JEV] {sym}: {eval_entry['decision']} ({int(eval_entry['confidence']*100)}%) | {eval_entry['reason']}", flush=True)
+            print(f"🤖 [GROQ JEV] {sym} ({cand_side}): {eval_entry['decision']} ({int(eval_entry['confidence']*100)}%) | {eval_entry['reason']}", flush=True)
 
             if approved:
                 portfolio.funnel_stats["passed"] += 1
@@ -112,29 +141,34 @@ class MarketScanner:
 
                 entry_p = ctx["current_price"]
                 wick_sl = eval_entry["sl"]
-                risk_per_coin = max(entry_p - wick_sl, entry_p * 0.003)
+
+                if cand_side == "LONG":
+                    risk_per_coin = max(entry_p - wick_sl, entry_p * 0.002)
+                    tp1_2r = round(entry_p + (config.TARGET_1_R * risk_per_coin), 6)
+                    tp2_3r = round(entry_p + (config.TARGET_2_R * risk_per_coin), 6)
+                else:  # SHORT
+                    risk_per_coin = max(wick_sl - entry_p, entry_p * 0.002)
+                    tp1_2r = round(entry_p - (config.TARGET_1_R * risk_per_coin), 6)
+                    tp2_3r = round(entry_p - (config.TARGET_2_R * risk_per_coin), 6)
+
                 risk_pct = risk_per_coin / entry_p
 
-                # 2. Расчет размера позиции: Реинвестирование (Сложный процент 5%)
+                # 2. Расчет размера позиции: Реинвестирование (Сложный процент 5-10%)
                 if getattr(config, "ENABLE_COMPOUNDING", True):
                     risk_to_use = max(portfolio.cash * config.COMPOUND_RISK_PCT, config.MAX_RISK_PER_TRADE_USD)
                 else:
                     risk_to_use = config.MAX_RISK_PER_TRADE_USD
 
-                notional_pos = risk_to_use / risk_pct
+                notional_pos = risk_to_use / max(risk_pct, 0.002)
                 calculated_margin = round(notional_pos / config.LEVERAGE, 2)
-                max_margin_allowed = max(portfolio.cash * 0.35, config.TRADE_AMOUNT_USDT)
+                max_margin_allowed = max(portfolio.cash * 0.40, config.TRADE_AMOUNT_USDT)
                 actual_margin = min(max(calculated_margin, 1.0), max_margin_allowed)
 
-                # 3. Асимметричные цели 2R и 3.5R (trader-exit)
-                tp1_2r = round(entry_p + (config.TARGET_1_R * risk_per_coin), 6)
-                tp2_3r = round(entry_p + (config.TARGET_2_R * risk_per_coin), 6)
-
-                # Проверка лимитов портфеля
+                # Проверка лимитов портфеля и открытие позиции
                 if len(portfolio.open_positions) < config.MAX_CONCURRENT_POSITIONS and portfolio.cash >= actual_margin:
                     portfolio.open_position(
                         symbol=sym,
-                        side="LONG",
+                        side=cand_side,
                         entry_price=entry_p,
                         size_usdt=actual_margin,
                         wick_sl=wick_sl,
@@ -144,9 +178,10 @@ class MarketScanner:
                         leverage=config.LEVERAGE
                     )
             else:
-                # Сохраняем в Shadow Tracker для анализа упущенных / спасенных сетапов
+                # Сохраняем в Shadow Tracker для анализа отклонённых сетапов
                 portfolio.shadow_trades.insert(0, {
                     "symbol": sym,
+                    "side": cand_side,
                     "rejected_at_price": ctx["current_price"],
                     "reason": eval_entry["reason"],
                     "time": time.strftime("%H:%M:%S"),
@@ -160,7 +195,7 @@ class MarketScanner:
 
     async def run_loop(self):
         self.is_running = True
-        print(f"📡 [MarketScanner] Автономный сканер запущен (Интервал: {config.SCAN_INTERVAL_SECONDS}с)...", flush=True)
+        print(f"📡 [MarketScanner] Автономный сканер запущен (Интервал: {config.SCAN_INTERVAL_SECONDS}с, LONG+SHORT)...", flush=True)
         while self.is_running:
             try:
                 await self.scan_market_once()

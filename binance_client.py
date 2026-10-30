@@ -157,9 +157,17 @@ class BinanceClient:
         recent_high = max(c["high"] for c in candles[-5:])
         pullback_from_high_pct = round((last_c["close"] - recent_high) / recent_high, 4)
 
+        recent_low = min(c["low"] for c in candles[-5:])
+        bounce_from_low_pct = round((last_c["close"] - recent_low) / max(recent_low, 1e-9), 4)
+
         recent_wick_low = min(c["low"] for c in candles[-3:])
         wick_stop_loss = round(recent_wick_low * (1.0 - config.WICK_BUFFER_PCT), 6)
         sl_pct_distance = round((last_c["close"] - wick_stop_loss) / last_c["close"], 4)
+
+        # Расчет параметров для SHORT (стоп над верхним фитилем)
+        recent_wick_high = max(c["high"] for c in candles[-3:])
+        short_wick_stop_loss = round(recent_wick_high * (1.0 + config.WICK_BUFFER_PCT), 6)
+        short_sl_pct_distance = round((short_wick_stop_loss - last_c["close"]) / last_c["close"], 4)
 
         pct_5m = round((candles[-1]["close"] - candles[-2]["close"]) / candles[-2]["close"] * 100, 2)
         pct_15m = round((candles[-1]["close"] - candles[-4]["close"]) / candles[-4]["close"] * 100, 2) if len(candles) >= 4 else pct_5m
@@ -168,12 +176,16 @@ class BinanceClient:
             "symbol": symbol,
             "current_price": last_c["close"],
             "recent_high": recent_high,
+            "recent_low": recent_low,
             "pullback_from_high_pct": pullback_from_high_pct,
+            "bounce_from_low_pct": bounce_from_low_pct,
             "volume_surge_ratio": surge_ratio,
             "upper_wick_pct": upper_wick_pct,
             "lower_wick_pct": lower_wick_pct,
             "wick_stop_loss": wick_stop_loss,
             "sl_pct_distance": sl_pct_distance,
+            "short_wick_sl": short_wick_stop_loss,
+            "short_sl_dist": short_sl_pct_distance,
             "pct_5m": pct_5m,
             "pct_15m": pct_15m,
             "last_quote_volume": last_c["quote_vol"]

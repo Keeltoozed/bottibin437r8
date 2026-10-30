@@ -1,55 +1,17 @@
 {
-  "cash": 15.0,
+  "cash": 20.0,
   "initial_balance": 20.0,
-  "open_positions": {
-    "PARTIUSDT": {
-      "id": "PARTIUSDT_1793365147",
-      "symbol": "PARTIUSDT",
-      "side": "LONG",
-      "entry_price": 0.05245,
-      "current_price": 0.05245,
-      "margin_usdt": 5.0,
-      "notional_value": 25.0,
-      "coins_qty": 476.644423,
-      "leverage": 5,
-      "wick_sl": 0.051153,
-      "original_sl": 0.051153,
-      "tp1": 0.05399,
-      "tp2": 0.05555,
-      "tp1_hit": false,
-      "tp2_hit": false,
-      "breakeven_set": false,
-      "highest_price": 0.05245,
-      "unrealized_pnl": 0.0,
-      "pnl_pct": 0.0,
-      "groq_reason": "Price has pulled back 1.13% from the high, satisfying the consolidation requirement, and the 2.47% stop distance is within the 3.5% limit. The 45.1% upper wick indicates selling pressure but does not trigger rejection as the 15m gain is only 1.73%, well below the 12% exhaustion threshold.",
-      "opened_at": 1793365147.348232,
-      "opened_at_str": "2026-10-30 14:59:07"
-    }
-  },
+  "open_positions": {},
   "trade_history": [],
   "funnel_stats": {
-    "universe": 60,
-    "hard_gates": 1,
-    "groq_evaluated": 1,
-    "passed": 1,
-    "filled": 1
+    "universe": 0,
+    "hard_gates": 0,
+    "groq_evaluated": 0,
+    "passed": 0,
+    "filled": 0
   },
-  "recent_evaluations": [
-    {
-      "symbol": "PARTIUSDT",
-      "price": 0.05245,
-      "decision": "BUY",
-      "confidence": 0.85,
-      "reason": "Price has pulled back 1.13% from the high, satisfying the consolidation requirement, and the 2.47% stop distance is within the 3.5% limit. The 45.1% upper wick indicates selling pressure but does not trigger rejection as the 15m gain is only 1.73%, well below the 12% exhaustion threshold.",
-      "sl": 0.051153,
-      "tp1": 0.05399,
-      "surge": 2.16,
-      "pullback": -1.13,
-      "time": "14:59:07"
-    }
-  ],
+  "recent_evaluations": [],
   "shadow_trades": [],
   "is_paused": false,
-  "last_updated": 1793365147.348267
+  "last_updated": 0
 }
