@@ -1,11 +1,25 @@
+import sys
+import os
+
+# Гарантируем немедленный вывод логов на Render / Docker (без буферизации)
+os.environ["PYTHONUNBUFFERED"] = "1"
+try:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(line_buffering=True)
+except Exception:
+    pass
+
 import streamlit as st
 import time
-import os
 import threading
+import asyncio
 import pandas as pd
 from tracker import portfolio
 import config
 from main_bot import run_in_background
+from scanner import market_scanner
 
 # ==============================================================================
 # НАСТРОЙКА СТРАНИЦЫ
@@ -18,13 +32,14 @@ st.set_page_config(
 )
 
 # ==============================================================================
-# ЗАПУСК ФОНОВОГО БОТА (РО ВНО 1 РАЗ НА СЕССИЮ СЕРВЕРА)
+# ЗАПУСК ФОНОВОГО БОТА (РОВНО 1 РАЗ НА СЕССИЮ СЕРВЕРА)
 # ==============================================================================
 @st.cache_resource
 def initialize_bot():
     """Запускает торгового бота в фоне ровно один раз при старте сервера."""
     thread = threading.Thread(target=run_in_background, daemon=True)
     thread.start()
+    print("🚀 [STARTUP] Фоновый поток торгового бота запущен из Streamlit!", flush=True)
     return thread
 
 # Запуск бота
@@ -102,6 +117,18 @@ with st.sidebar:
             
     st.divider()
     
+    # Кнопка принудительного сканирования
+    if st.button("🔍 Сканировать сейчас", use_container_width=True):
+        with st.spinner("Сканирование рынка Binance Futures..."):
+            try:
+                loop = asyncio.new_event_loop()
+                loop.run_until_complete(market_scanner.scan_market_once())
+                loop.close()
+                st.success("Сканирование завершено!")
+            except Exception as e:
+                st.error(f"Ошибка сканирования: {e}")
+        st.rerun()
+
     # Кнопка экстренного закрытия
     if st.button("🚨 Panic Close (Закрыть все)", type="primary", use_container_width=True):
         portfolio.close_all("Экстренное ручное закрытие из дашборда")
@@ -125,18 +152,16 @@ with st.sidebar:
         st.rerun()
 
     st.divider()
-    auto_refresh = st.checkbox("🔄 Автообновление (3 сек)", value=True)
-    if auto_refresh:
-        time.sleep(3)
-        st.rerun()
+    auto_refresh = st.checkbox("🔄 Автообновление UI (4 сек)", value=True)
 
 # ==============================================================================
-# ВЕРХНИЙ ХЕДЕР И ОСНОВНЫЕ МЕТРИКИ
+# ВЕРХНИЙ ХЕДЕР И ОСНОВНЫЕ МЕТРИКИ (ОСНОВНОЙ ЭКРАН)
 # ==============================================================================
 summary = portfolio.get_portfolio_summary()
 
 st.title("🚀 Binance Autonomous Groq Trader (JEV Engine)")
-st.caption(f"Автономный торговый конвейер: Сканер Binance Futures → Groq Soft Gate → Dynamic Breakeven & Stop Under Wick | Режим: {'🧪 Paper Trading (Симуляция)' if config.PAPER_TRADING else '⚡ Live Trading'}")
+last_scan_info = getattr(portfolio, "last_scan_str", "Ожидание...")
+st.caption(f"Автономный торговый конвейер: Сканер Binance Futures → Groq Soft Gate → Dynamic Breakeven & Stop Under Wick | Режим: {'🧪 Paper Trading (Симуляция)' if config.PAPER_TRADING else '⚡ Live Trading'} | Последний скан: {last_scan_info}")
 
 # Метрики карточками
 c1, c2, c3, c4, c5 = st.columns(5)
@@ -277,7 +302,6 @@ with tab_history:
         st.info("История сделок пока пуста.")
     else:
         df = pd.DataFrame(portfolio.trade_history)
-        # Форматирование
         st.dataframe(
             df[["symbol", "side", "entry_price", "exit_price", "margin_usdt", "realized_pnl", "roi_pct", "reason", "closed_at"]],
             use_container_width=True
@@ -294,3 +318,9 @@ with tab_shadow:
     else:
         st.dataframe(pd.DataFrame(portfolio.shadow_trades[:30]), use_container_width=True)
 
+# ==============================================================================
+# АВТООБНОВЛЕНИЕ СТРАНИЦЫ (В САМОМ КОНЦЕ СКРИПТА ПОСЛЕ ОТРИСОВКИ ВСЕГО UI)
+# ==============================================================================
+if auto_refresh:
+    time.sleep(4)
+    st.rerun()

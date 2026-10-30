@@ -50,7 +50,7 @@ class PortfolioTracker:
             with open(PORTFOLIO_FILE, "w", encoding="utf-8") as f:
                 json.dump(state, f, indent=2, ensure_ascii=False)
         except Exception as e:
-            print(f"⚠️ Ошибка сохранения portfolio.json: {e}")
+            print(f"⚠️ Ошибка сохранения portfolio.json: {e}", flush=True)
 
     def load(self):
         """Загружает сохраненное состояние из portfolio.json."""
@@ -66,9 +66,9 @@ class PortfolioTracker:
                 self.recent_evaluations = state.get("recent_evaluations", [])
                 self.shadow_trades = state.get("shadow_trades", [])
                 self.is_paused = state.get("is_paused", False)
-                print(f"✅ Портфель загружен: баланс ${self.cash:.2f}, открытых позиций: {len(self.open_positions)}")
+                print(f"✅ Портфель загружен: баланс ${self.cash:.2f}, открытых позиций: {len(self.open_positions)}", flush=True)
         except Exception as e:
-            print(f"⚠️ Ошибка чтения portfolio.json: {e}")
+            print(f"⚠️ Ошибка чтения portfolio.json: {e}", flush=True)
 
     def add_evaluation(self, eval_data: Dict[str, Any]):
         """Добавляет свежую оценку Groq в ленту радара."""
@@ -124,7 +124,7 @@ class PortfolioTracker:
         self.open_positions[symbol] = pos
         self.funnel_stats["filled"] += 1
         self.save()
-        print(f"🟢 [TRADE OPEN] {side} {symbol} по ${entry_price:.4f} (Маржа: ${margin_usdt:.2f}, Плечо: {leverage}x)")
+        print(f"🟢 [TRADE OPEN] {side} {symbol} по ${entry_price:.4f} (Маржа: ${margin_usdt:.2f}, Плечо: {leverage}x)", flush=True)
         return True
 
     def update_position_prices(self, price_map: Dict[str, float]):
@@ -194,7 +194,7 @@ class PortfolioTracker:
             pos["coins_qty"] *= (1.0 - partial_pct)
 
         self.save()
-        print(f"🔴 [TRADE CLOSED] {symbol} по ${exit_price:.4f} | PnL: ${realized_pnl:+.2f} ({trade_record['roi_pct']:+.1f}%) | Причина: {reason}")
+        print(f"🔴 [TRADE CLOSED] {symbol} по ${exit_price:.4f} | PnL: ${realized_pnl:+.2f} ({trade_record['roi_pct']:+.1f}%) | Причина: {reason}", flush=True)
 
     def close_all(self, reason: str = "Ручное закрытие (Panic Close)"):
         """Экстренно закрывает все открытые позиции."""

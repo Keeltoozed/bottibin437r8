@@ -22,7 +22,7 @@ class ExitManager:
 
     async def run_loop(self):
         self.is_running = True
-        print("🛡️ [ExitManager] Менеджер умного выхода активен.")
+        print("🛡️ [ExitManager] Менеджер умного выхода активен.", flush=True)
         while self.is_running:
             try:
                 positions = portfolio.open_positions
@@ -67,7 +67,7 @@ class ExitManager:
                         pos["wick_sl"] = round(entry * 1.001, 6)
                         pos["breakeven_set"] = True
                         portfolio.save()
-                        print(f"🛡️ [BREAKEVEN] {sym}: SL перенесен в безубыток (${pos['wick_sl']:.4f}). Сделка безопасна!")
+                        print(f"🛡️ [BREAKEVEN] {sym}: SL перенесен в безубыток (${pos['wick_sl']:.4f}). Сделка безопасна!", flush=True)
 
                     # 3. ТЕЙК-ПРОФИТ 1 (TP1): Фиксация 50% объема
                     if not pos["tp1_hit"] and cur_price >= tp1:

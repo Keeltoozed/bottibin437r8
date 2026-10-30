@@ -4,10 +4,12 @@ services:
     runtime: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: streamlit run app.py --server.port $PORT --server.address 0.0.0.0 --server.headless true
+    startCommand: python3 -u -m streamlit run app.py --server.port $PORT --server.address 0.0.0.0 --server.headless true
     envVars:
       - key: PYTHON_VERSION
         value: 3.10.12
+      - key: PYTHONUNBUFFERED
+        value: "1"
       - key: GROQ_API_KEY
         sync: false
       - key: BINANCE_API_KEY

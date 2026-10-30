@@ -1,3 +1,16 @@
+import sys
+import os
+
+# Гарантируем немедленный вывод логов на Render / Docker
+os.environ["PYTHONUNBUFFERED"] = "1"
+try:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(line_buffering=True)
+except Exception:
+    pass
+
 import asyncio
 import time
 from typing import Dict, Any, List
@@ -21,12 +34,16 @@ class MarketScanner:
         if portfolio.is_paused:
             return []
 
+        now_str = time.strftime("%H:%M:%S")
+        portfolio.last_scan_str = now_str
+
         # 1. UNIVERSE: Получаем топ пары Binance Futures
         tickers = await binance_client.fetch_top_tickers(
             min_vol_usdt=config.MIN_24H_VOLUME_USDT,
             limit=60
         )
         portfolio.funnel_stats["universe"] += len(tickers)
+        print(f"📡 [SCAN] {now_str} — Загружено {len(tickers)} пар Binance Futures...", flush=True)
 
         candidates_passed_hard = []
         now = time.time()
@@ -59,6 +76,7 @@ class MarketScanner:
                 context = {**t, **analysis}
                 candidates_passed_hard.append(context)
                 self.cooldowns[sym] = now
+                print(f"🔥 [HARD GATE PASSED] {sym}: всплеск {surge}x, +{pct_5m:.2f}% (5m) ➔ Отправляем в Groq...", flush=True)
 
         portfolio.funnel_stats["hard_gates"] += len(candidates_passed_hard)
 
@@ -82,6 +100,7 @@ class MarketScanner:
                 "time": time.strftime("%H:%M:%S")
             }
             portfolio.add_evaluation(eval_entry)
+            print(f"🤖 [GROQ JEV] {sym}: {eval_entry['decision']} ({int(eval_entry['confidence']*100)}%) | {eval_entry['reason']}", flush=True)
 
             if approved:
                 portfolio.funnel_stats["passed"] += 1
@@ -116,13 +135,12 @@ class MarketScanner:
 
     async def run_loop(self):
         self.is_running = True
-        print(f"📡 [MarketScanner] Автономный сканер запущен (Интервал: {config.SCAN_INTERVAL_SECONDS}с)...")
+        print(f"📡 [MarketScanner] Автономный сканер запущен (Интервал: {config.SCAN_INTERVAL_SECONDS}с)...", flush=True)
         while self.is_running:
             try:
                 await self.scan_market_once()
             except Exception as e:
-                print(f"⚠️ Ошибка в MarketScanner: {e}")
+                print(f"⚠️ Ошибка в MarketScanner: {e}", flush=True)
             await asyncio.sleep(config.SCAN_INTERVAL_SECONDS)
 
 market_scanner = MarketScanner()
-
