@@ -79,10 +79,10 @@ class GroqEngine:
         prompt = f"""You are the Lead Risk & Execution Officer at an elite quantitative crypto prop desk.
 Analyze this high-momentum breakout candidate on Binance Futures.
 
-RULES OF ENGAGEMENT:
-1. 'We bid the flush, not the candle': NEVER buy the top of an overextended green candle without consolidation. A healthy pullback (-0.3% to -2.0% from recent high) is required for a clean entry.
-2. 'The stop lives under the wick': The stop-loss must be placed right below the lower wick of recent candles ({context.get('wick_stop_loss')}). If the stop distance is > 3.5%, REJECT it (risk too high).
-3. 'Momentum already spent': If price pumped > 12% in 15m with a massive upper wick (> 45%), reject (exhaustion wick/dump risk).
+RULES OF ENGAGEMENT (OPTIMIZED FOR 75x LEVERAGE & EXPLOSIVE ALTS):
+1. 'We bid the flush, not the candle': NEVER buy the very top of a candle. An entry on a local pullback (-0.2% to -1.5% from high) is required for a clean risk-managed entry.
+2. 'The stop lives under the wick': The stop-loss must be placed right below the lower wick of recent candles ({context.get('wick_stop_loss')}). Because we are running 75x leverage, the stop distance MUST be strictly tight (<= 1.0%). If the stop distance is > 1.0%, REJECT it (liquidation prevention).
+3. 'Momentum already spent': If price pumped > 15% in 15m with a massive upper wick (> 45%), reject (exhaustion wick/dump risk).
 4. Minimum Risk-to-Reward ratio must be at least 1.8 to 1.
 
 CANDIDATE CONTEXT:
@@ -102,9 +102,9 @@ Respond STRICTLY with a valid JSON object matching this schema, with no preamble
   "decision": "BUY" or "SKIP",
   "confidence": float between 0.0 and 1.0,
   "entry_price": float (price to buy, near current or slightly below),
-  "stop_loss": float (under wick stop loss),
-  "tp1": float (take profit target 1, approx +2.0% to +3.0%),
-  "tp2": float (take profit target 2, approx +4.0% to +6.0%),
+  "stop_loss": float (tight under-wick stop loss, <= 1.0% distance),
+  "tp1": float (take profit target 1, approx +1.5% to +2.0%, yielding +112% to +150% ROI on 75x),
+  "tp2": float (take profit target 2, approx +3.0% to +4.5%, yielding +225% to +337% ROI on 75x),
   "reason": "1-2 concise sentences explaining why this passed or was rejected based on wicks and flush"
 }}
 """

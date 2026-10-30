@@ -138,8 +138,9 @@ with st.sidebar:
     st.divider()
     st.markdown("### 🎯 Параметры стратегии ($20)")
     st.text(f"Маржа на сделку: ${config.TRADE_AMOUNT_USDT:.1f}")
-    st.text(f"Плечо: {config.LEVERAGE}x")
-    st.text(f"Макс. позиций: {config.MAX_CONCURRENT_POSITIONS}")
+    st.text(f"Плечо: {config.LEVERAGE}x 🚀")
+    st.text(f"Объем позиции: ${config.TRADE_AMOUNT_USDT * config.LEVERAGE:.0f}")
+    st.text(f"Радар рынка: {config.SCAN_TICKERS_LIMIT} монет")
     st.text(f"Модель Groq: {config.GROQ_PRIMARY_MODEL}")
     
     st.divider()

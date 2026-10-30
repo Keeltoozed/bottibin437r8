@@ -30,40 +30,45 @@ BINANCE_TESTNET_FUTURES_URL = "https://testnet.binancefuture.com"
 PAPER_TRADING = os.getenv("PAPER_TRADING", "true").lower() == "true"
 INITIAL_BALANCE = float(os.getenv("INITIAL_BALANCE", "20.0"))
 
-# For $20 capital: $5 margin per position allows up to 3 positions with $5 cash reserve
+# For $20 capital: $5 margin with 75x leverage creates a $375 position per trade!
 TRADE_AMOUNT_USDT = float(os.getenv("TRADE_AMOUNT_USDT", "5.0"))
-LEVERAGE = int(os.getenv("LEVERAGE", "5"))
+LEVERAGE = int(os.getenv("LEVERAGE", "75"))  # 75x плечо для высокой доходности
 MAX_CONCURRENT_POSITIONS = int(os.getenv("MAX_POSITIONS", "3"))
 
 # ==============================================================================
-# 4. EXIT STRATEGY & "THE LINE" (GROK x JEV RULES)
+# 4. EXIT STRATEGY & "THE LINE" (GROK x JEV RULES DEDICATED FOR 75x LEVERAGE)
 # ==============================================================================
 # "We bid the flush, not the candle": pullback required before entry
-MIN_PULLBACK_PCT = float(os.getenv("MIN_PULLBACK_PCT", "0.003"))  # 0.3% pullback
+MIN_PULLBACK_PCT = float(os.getenv("MIN_PULLBACK_PCT", "0.002"))  # 0.2% pullback
 
-# "The stop lives under the wick": wick buffer (0.15% below the candle's low wick)
-WICK_BUFFER_PCT = float(os.getenv("WICK_BUFFER_PCT", "0.0015"))
-MAX_ALLOWED_SL_PCT = float(os.getenv("MAX_ALLOWED_SL_PCT", "0.035"))  # Max 3.5% SL
+# "The stop lives under the wick": ultra-tight wick buffer for 75x leverage
+WICK_BUFFER_PCT = float(os.getenv("WICK_BUFFER_PCT", "0.001"))
+MAX_ALLOWED_SL_PCT = float(os.getenv("MAX_ALLOWED_SL_PCT", "0.010"))  # Макс. 1.0% SL (защита от ликвидации на 75x)
 
-# Multi-tier Take Profit
-TP1_PCT = float(os.getenv("TP1_PCT", "0.022"))  # +2.2% -> close 50% & move to breakeven
-TP2_PCT = float(os.getenv("TP2_PCT", "0.045"))  # +4.5% -> close 25%
-TRAILING_STOP_PCT = float(os.getenv("TRAILING_STOP_PCT", "0.012"))  # 1.2% trailing off high
+# Multi-tier Take Profit (с плечом 75x):
+# +1.5% ход цены = +112.5% ROI (TP1: фиксация 50% + мгновенный безубыток)
+# +3.0% ход цены = +225.0% ROI (TP2: фиксация 25%)
+# Остаток 25%: трейлинг-стоп 0.8%
+TP1_PCT = float(os.getenv("TP1_PCT", "0.015"))
+TP2_PCT = float(os.getenv("TP2_PCT", "0.030"))
+TRAILING_STOP_PCT = float(os.getenv("TRAILING_STOP_PCT", "0.008"))  # 0.8% trailing
 
-# Breakeven trigger: move SL to entry when 50% of distance to TP1 is reached
-BREAKEVEN_TRIGGER_RATIO = 0.50
+# Быстрый перевод в безубыток при прохождении 40% пути до TP1 (+0.6% ход = +45% прибыли)
+BREAKEVEN_TRIGGER_RATIO = 0.40
 
 # Momentum Death: early exit if 1m volume collapses and price stalls
 ENABLE_MOMENTUM_DEATH_EXIT = True
 
 # ==============================================================================
-# 5. MARKET SCANNER & THE FUNNEL (HARD GATES)
+# 5. MARKET SCANNER & THE FUNNEL (EXPANDED RADAR: 200+ TOKENS)
 # ==============================================================================
-MIN_24H_VOLUME_USDT = float(os.getenv("MIN_24H_VOLUME_USDT", "8000000"))  # $8M
-MIN_5M_VOLUME_SURGE_RATIO = float(os.getenv("MIN_5M_VOLUME_SURGE_RATIO", "1.6"))  # 1.6x avg vol
-MAX_SPREAD_PCT = float(os.getenv("MAX_SPREAD_PCT", "0.001"))  # 0.1% max spread
-SCAN_INTERVAL_SECONDS = int(os.getenv("SCAN_INTERVAL_SECONDS", "12"))
-PAIR_COOLDOWN_MINUTES = int(os.getenv("PAIR_COOLDOWN_MINUTES", "8"))
+# Снижаем порог объема до $2M для охвата всех взрывных альткоинов и мем-токенов
+MIN_24H_VOLUME_USDT = float(os.getenv("MIN_24H_VOLUME_USDT", "2000000"))  # $2M
+MIN_5M_VOLUME_SURGE_RATIO = float(os.getenv("MIN_5M_VOLUME_SURGE_RATIO", "1.25"))  # 1.25x всплеск
+MAX_SPREAD_PCT = float(os.getenv("MAX_SPREAD_PCT", "0.0015"))  # 0.15% max spread
+SCAN_TICKERS_LIMIT = int(os.getenv("SCAN_TICKERS_LIMIT", "200"))  # Сканируем 200 пар
+SCAN_INTERVAL_SECONDS = int(os.getenv("SCAN_INTERVAL_SECONDS", "10"))
+PAIR_COOLDOWN_MINUTES = int(os.getenv("PAIR_COOLDOWN_MINUTES", "5"))
 
 # ==============================================================================
 # 6. TELEGRAM NOTIFICATIONS (FAIL-SAFE OPTIONAL)

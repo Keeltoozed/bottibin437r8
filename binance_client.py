@@ -73,10 +73,10 @@ class BinanceClient:
                 pass
         return None
 
-    async def fetch_top_tickers(self, min_vol_usdt: float = 8000000, limit: int = 80) -> List[Dict[str, Any]]:
+    async def fetch_top_tickers(self, min_vol_usdt: float = config.MIN_24H_VOLUME_USDT, limit: int = config.SCAN_TICKERS_LIMIT) -> List[Dict[str, Any]]:
         """
-        Получает 24ч статистику по всем парам USDT на Binance.
-        Автоматически использует глобальное зеркало, если основной сервер блокирует регион.
+        Получает 24ч статистику по парам USDT на Binance.
+        Сортирует по максимальной волатильности (топ-гэйнеры и ракеты) для поиска взрывных сетапов.
         """
         data = await self._request_with_fallback("ticker24")
         if not data or not isinstance(data, list):
@@ -109,7 +109,8 @@ class BinanceClient:
             except (ValueError, TypeError):
                 continue
 
-        candidates.sort(key=lambda x: (abs(x["price_change_24h_pct"]) > 1.2, x["volume_24h"]), reverse=True)
+        # В топе — самые волатильные пампы и ракеты рынка
+        candidates.sort(key=lambda x: (abs(x["price_change_24h_pct"]), x["volume_24h"]), reverse=True)
         return candidates[:limit]
 
     async def fetch_candles_analysis(self, symbol: str, interval: str = "5m", limit: int = 20) -> Optional[Dict[str, Any]]:

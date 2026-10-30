@@ -40,10 +40,10 @@ class MarketScanner:
         # 1. UNIVERSE: Получаем топ пары Binance Futures
         tickers = await binance_client.fetch_top_tickers(
             min_vol_usdt=config.MIN_24H_VOLUME_USDT,
-            limit=60
+            limit=config.SCAN_TICKERS_LIMIT
         )
         portfolio.funnel_stats["universe"] += len(tickers)
-        print(f"📡 [SCAN] {now_str} — Загружено {len(tickers)} пар Binance Futures...", flush=True)
+        print(f"📡 [SCAN] {now_str} — Загружено {len(tickers)} пар Binance (Топ волатильные)...", flush=True)
 
         candidates_passed_hard = []
         now = time.time()
@@ -72,7 +72,7 @@ class MarketScanner:
             sl_dist = analysis["sl_pct_distance"]
 
             # Ищем памп / пробойный импульс (всплеск объема и положительный моментум)
-            if surge >= config.MIN_5M_VOLUME_SURGE_RATIO and pct_5m >= 0.60 and sl_dist <= config.MAX_ALLOWED_SL_PCT:
+            if surge >= config.MIN_5M_VOLUME_SURGE_RATIO and pct_5m >= 0.35 and sl_dist <= config.MAX_ALLOWED_SL_PCT:
                 context = {**t, **analysis}
                 candidates_passed_hard.append(context)
                 self.cooldowns[sym] = now
