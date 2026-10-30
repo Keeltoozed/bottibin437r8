@@ -78,23 +78,27 @@ BREAKEVEN_TRIGGER_RATIO = 0.40
 ENABLE_MOMENTUM_DEATH_EXIT = True
 
 # ==============================================================================
-# 5. MARKET SCANNER & THE FUNNEL (EXPANDED RADAR: 200+ TOKENS)
+# 5. MARKET SCANNER & ELITE CRYPTO WHITELIST (EXCLUSIVE PROP UNIVERSE)
 # ==============================================================================
-# Фильтр ликвидности: только топовые монеты с объемом от $50M в сутки (исключаем неликвидный мусор)
 MIN_24H_VOLUME_USDT = float(os.getenv("MIN_24H_VOLUME_USDT", "50000000"))  # $50M
 
-# Элитный институциональный юниверс (высочайшая ликвидность, без скам-фитилей)
+# Жесткий режим белого списка: бот торгует ИСКЛЮЧИТЕЛЬНО проверенный топ-тир крипторынка.
+# Любой случайный токен, хакнутый протокол (как INIT) или щиткоин на 100% заблокирован!
+STRICT_WHITELIST_ONLY = True
+
+# Элитный институциональный юниверс (высочайшая ликвидность, без скам-фитилей и хаков)
 TOP_CRYPTO_UNIVERSE = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT", 
     "SUIUSDT", "NEARUSDT", "AVAXUSDT", "LINKUSDT", "APTUSDT", "RENDERUSDT",
     "TIAUSDT", "SEIUSDT", "ENAUSDT", "JUPUSDT", "PEPEUSDT", "WIFUSDT",
-    "INJUSDT", "FTMUSDT", "FETUSDT", "GALAUSDT", "AAVEUSDT", "DOTUSDT",
-    "LTCUSDT", "BCHUSDT", "OPUSDT", "ARBUSDT", "FILUSDT",
-    "STXUSDT", "ONDOUSDT", "WLDUSDT", "TAOUSDT", "TONUSDT"
+    "INJUSDT", "FETUSDT", "AAVEUSDT", "DOTUSDT", "LTCUSDT", "BCHUSDT", 
+    "OPUSDT", "ARBUSDT", "FILUSDT", "STXUSDT", "ONDOUSDT", "WLDUSDT", 
+    "TAOUSDT", "TONUSDT"
 ]
 
-# Черный список: фондовые токены, стейблкоины и неликвид
+# Черный список на случай любых попыток обращения
 EXCLUDED_TICKERS = {
+    "INITUSDT", "CRVUSDT", "MEGAUSDT", "AVAUSDT", "SOLVUSDT", "BIRBUSDT",
     "USDCUSDT", "FDUSDUSDT", "TUSDUSDT", "BUSDUSDT", "EURUSDT", "DAIUSDT", "USTCUSDT",
     "PAXGUSDT", "XAUUSDT", "XAGUSDT", "SOXLUSDT", "INTCUSDT", "SNDKUSDT", "NVDAUSDT", 
     "TSLAUSDT", "AAPLUSDT", "AMZNUSDT", "MSFTUSDT", "COINBUSDT"

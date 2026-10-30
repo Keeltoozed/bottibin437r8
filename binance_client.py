@@ -76,9 +76,8 @@ class BinanceClient:
     async def fetch_top_tickers(self, min_vol_usdt: float = config.MIN_24H_VOLUME_USDT, limit: int = config.SCAN_TICKERS_LIMIT) -> List[Dict[str, Any]]:
         """
         Формирует институциональный торговый радар:
-        1. Приоритетный топ-тир крипто-активов (BTC, ETH, SOL, SUI, DOGE, NEAR, RENDER...)
-        2. Высоколиквидные пары Binance Futures с суточным объемом от $50M.
-        Полностью исключает неликвидный мусор, скам-токены и фондовые индексы.
+        Торгует ИСКЛЮЧИТЕЛЬНО утвержденный белый список топ-активов (BTC, ETH, SOL, SUI, DOGE, NEAR, RENDER...).
+        Любые случайные монеты, хаки/эксплойты протоколов (как INIT) на 100% заблокированы.
         """
         data = await self._request_with_fallback("ticker24")
         if not data or not isinstance(data, list):
@@ -86,11 +85,11 @@ class BinanceClient:
 
         item_map = {item.get("symbol", ""): item for item in data if isinstance(item, dict) and "symbol" in item}
         selected = []
-        seen = set()
+        excluded = getattr(config, "EXCLUDED_TICKERS", set())
 
-        # 1. Приоритетно добавляем институциональный крипто-юниверс
+        # Сканируем ИСКЛЮЧИТЕЛЬНО утвержденный элитный белый список
         for sym in getattr(config, "TOP_CRYPTO_UNIVERSE", []):
-            if sym in item_map:
+            if sym in item_map and sym not in excluded:
                 item = item_map[sym]
                 try:
                     vol = float(item.get("quoteVolume", 0) or 0)
@@ -107,38 +106,8 @@ class BinanceClient:
                             "high_24h": high_p,
                             "low_24h": low_p
                         })
-                        seen.add(sym)
                 except (ValueError, TypeError):
                     continue
-
-        # 2. Добавляем другие проверенные высоколиквидные монеты (от $50M объема)
-        excluded = getattr(config, "EXCLUDED_TICKERS", set())
-        for sym, item in item_map.items():
-            if not sym.endswith("USDT") or sym in seen or sym in excluded:
-                continue
-            if any(sym.startswith(x) for x in ["1000", "USDC", "FDUSD", "TUSD"]):
-                continue
-
-            try:
-                vol = float(item.get("quoteVolume", 0) or 0)
-                pct = float(item.get("priceChangePercent", 0) or 0)
-                last_p = float(item.get("lastPrice", 0) or 0)
-                high_p = float(item.get("highPrice", 0) or 0)
-                low_p = float(item.get("lowPrice", 0) or 0)
-
-                # Только высоколиквидные монеты с глубоким стаканом (от $50M)
-                if vol >= min_vol_usdt and last_p > 0:
-                    selected.append({
-                        "symbol": sym,
-                        "price": last_p,
-                        "volume_24h": vol,
-                        "price_change_24h_pct": pct,
-                        "high_24h": high_p,
-                        "low_24h": low_p
-                    })
-                    seen.add(sym)
-            except (ValueError, TypeError):
-                continue
 
         return selected[:limit]
 
@@ -273,6 +242,51 @@ class BinanceClient:
             "ema9": ema9,
             "ema21": ema21,
             "trend": trend
+        }
+
+    async def fetch_btc_regime(self) -> Dict[str, Any]:
+        """
+        Институциональный макро-фильтр рынка по Bitcoin (Поводырь рынка).
+        Защищает депозит от общерыночных сливов, негативных новостей и FUD.
+        """
+        analysis = await self.fetch_candles_analysis("BTCUSDT", interval="5m", limit=30)
+        if not analysis:
+            return {
+                "trend": "CHOP",
+                "pct_5m": 0.0,
+                "pct_15m": 0.0,
+                "rsi": 50.0,
+                "is_dumping": False,
+                "is_pumping": False,
+                "status_str": "🟡 Нейтральный (BTC спокоен)"
+            }
+
+        p5 = analysis.get("pct_5m", 0.0)
+        p15 = analysis.get("pct_15m", 0.0)
+        trend = analysis.get("trend", "CHOP")
+        rsi = analysis.get("rsi", 50.0)
+
+        # BTC Дамп на плохих новостях: пролив 15m свечи <= -0.40% или сильный медвежий тренд
+        is_dumping = p15 <= -0.40 or (trend == "BEARISH" and p5 < -0.15) or rsi < 35.0
+
+        # BTC Памп на позитиве: взлет 15m свечи >= +0.40% или сильный бычий тренд
+        is_pumping = p15 >= 0.40 or (trend == "BULLISH" and p5 > 0.15) or rsi > 65.0
+
+        if is_dumping:
+            status_str = f"🔴 Медвежий дамп BTC ({p15:+.2f}%) — Лонги по альтам ЗАБЛОКИРОВАНЫ"
+        elif is_pumping:
+            status_str = f"🟢 Бычий импульс BTC ({p15:+.2f}%) — Шорты по альтам ЗАБЛОКИРОВАНЫ"
+        else:
+            status_str = f"🟡 Нейтральный (BTC: {p15:+.2f}%, тренд: {trend})"
+
+        return {
+            "trend": trend,
+            "pct_5m": p5,
+            "pct_15m": p15,
+            "rsi": rsi,
+            "is_dumping": is_dumping,
+            "is_pumping": is_pumping,
+            "status_str": status_str
         }
 
     async def fetch_orderbook_spread(self, symbol: str) -> Tuple[float, float, float]:

@@ -37,6 +37,14 @@ class MarketScanner:
         now_str = time.strftime("%H:%M:%S")
         portfolio.last_scan_str = now_str
 
+        # 0. MACRO GUARD: Проверяем состояние Bitcoin (Поводырь рынка и защита от негативных новостей)
+        btc_regime = await binance_client.fetch_btc_regime()
+        portfolio.btc_regime_str = btc_regime.get("status_str", "")
+        if btc_regime.get("is_dumping"):
+            print(f"🛑 [MACRO GUARD] Bitcoin дамп ({btc_regime.get('pct_15m'):+.2f}%). Все LONG по альтам ЗАБЛОКИРОВАНЫ!", flush=True)
+        elif btc_regime.get("is_pumping"):
+            print(f"🚀 [MACRO GUARD] Bitcoin памп ({btc_regime.get('pct_15m'):+.2f}%). Все SHORT по альтам ЗАБЛОКИРОВАНЫ!", flush=True)
+
         # 1. UNIVERSE: Получаем топ волатильные пары Binance Futures
         tickers = await binance_client.fetch_top_tickers(
             min_vol_usdt=config.MIN_24H_VOLUME_USDT,
@@ -50,6 +58,10 @@ class MarketScanner:
 
         async def check_ticker(t: Dict[str, Any]) -> Any:
             sym = t["symbol"]
+
+            # Строгий белый список: мгновенно отсекаем любой неизвестный токен или токен из черного списка
+            if sym not in getattr(config, "TOP_CRYPTO_UNIVERSE", []) or sym in getattr(config, "EXCLUDED_TICKERS", set()):
+                return None
 
             # Проверка кулдауна и открытых позиций
             if sym in self.cooldowns and (now - self.cooldowns[sym]) < (config.PAIR_COOLDOWN_MINUTES * 60):
@@ -117,14 +129,20 @@ class MarketScanner:
                     trend != "BULLISH"
                 )
 
+                # Защита от крипто-новостей и дампа биткоина (Macro Regime Guard)
+                if is_long and btc_regime.get("is_dumping"):
+                    return None
+                if is_short and btc_regime.get("is_pumping"):
+                    return None
+
                 if is_long:
                     self.cooldowns[sym] = now + 900  # 15 мин кулдаун
                     print(f"🔥 [A+ SETUP - LONG] {sym}: всплеск {surge}x, +{pct_5m:.2f}%, RSI {rsi}, откат {pullback*100:.1f}% ➔ Groq...", flush=True)
-                    return {**t, **analysis, "candidate_side": "LONG"}
+                    return {**t, **analysis, "candidate_side": "LONG", "btc_regime": btc_regime.get("status_str", "Neutral")}
                 elif is_short:
                     self.cooldowns[sym] = now + 900  # 15 мин кулдаун
                     print(f"🔻 [A+ SETUP - SHORT] {sym}: всплеск {surge}x, {pct_5m:.2f}%, RSI {rsi}, отскок +{bounce*100:.1f}% ➔ Groq...", flush=True)
-                    return {**t, **analysis, "candidate_side": "SHORT"}
+                    return {**t, **analysis, "candidate_side": "SHORT", "btc_regime": btc_regime.get("status_str", "Neutral")}
                 return None
 
         tasks = [check_ticker(t) for t in tickers]

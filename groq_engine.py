@@ -104,6 +104,7 @@ ADVERSARIAL TRAP FILTERS:
 
 CANDIDATE:
 - Symbol: {symbol} | Side: LONG | Price: ${context.get('current_price')}
+- Macro / Bitcoin Regime: {context.get('btc_regime', 'Neutral')}
 - 5m Volume Surge: {context.get('volume_surge_ratio')}x | 5m Move: {context.get('pct_5m'):+.2f}% | 15m Move: {context.get('pct_15m'):+.2f}%
 - Pullback: {context.get('pullback_from_high_pct', 0) * 100:+.2f}% | RSI(14): {rsi_val} | Trend: {trend_val} (EMA9: {ema9_val}, EMA21: {ema21_val})
 - Upper Wick: {context.get('upper_wick_pct', 0) * 100:.1f}% | Lower Wick: {context.get('lower_wick_pct', 0) * 100:.1f}%
@@ -137,6 +138,7 @@ ADVERSARIAL TRAP FILTERS:
 
 CANDIDATE:
 - Symbol: {symbol} | Side: SHORT | Price: ${context.get('current_price')}
+- Macro / Bitcoin Regime: {context.get('btc_regime', 'Neutral')}
 - 5m Volume Surge: {context.get('volume_surge_ratio')}x | 5m Move: {context.get('pct_5m'):+.2f}% | 15m Move: {context.get('pct_15m'):+.2f}%
 - Bounce: +{context.get('bounce_from_low_pct', 0) * 100:.2f}% | RSI(14): {rsi_val} | Trend: {trend_val} (EMA9: {ema9_val}, EMA21: {ema21_val})
 - Upper Wick: {context.get('upper_wick_pct', 0) * 100:.1f}% | Lower Wick: {context.get('lower_wick_pct', 0) * 100:.1f}%

@@ -32,6 +32,8 @@ class PortfolioTracker:
         self.shadow_trades: List[Dict[str, Any]] = []
         self.is_paused = False
         self.current_leverage = getattr(config, "LEVERAGE", 60)
+        self.btc_regime_str = "🟡 Анализ рынка BTC..."
+        self.last_scan_str = "Ожидание..."
         self.load()
 
     def save(self):

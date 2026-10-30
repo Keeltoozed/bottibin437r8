@@ -214,7 +214,9 @@ summary = portfolio.get_portfolio_summary()
 
 st.title("🚀 Binance Autonomous Groq Trader (JEV Engine)")
 last_scan_info = getattr(portfolio, "last_scan_str", "Ожидание...")
-st.caption(f"Автономный торговый конвейер: Сканер Binance Futures → Groq Soft Gate → Dynamic Breakeven & Stop Under Wick | Режим: {'🧪 Paper Trading (Симуляция)' if config.PAPER_TRADING else '⚡ Live Trading'} | Последний скан: {last_scan_info}")
+btc_regime_info = getattr(portfolio, "btc_regime_str", "🟡 Анализ Bitcoin...")
+st.caption(f"🌍 **Макро-щит (Защита от новостей/дампа BTC):** {btc_regime_info}")
+st.caption(f"Автономный торговый конвейер: Топ-30 Крипто-вселенная → Защита от ловушек ИИ (CT Anti-Trap) → Динамический трейлинг | Режим: {'🧪 Paper Trading (Симуляция)' if config.PAPER_TRADING else '⚡ Live Trading'} | Последний скан: {last_scan_info}")
 
 # Оповещение и ручной сброс Circuit Breaker
 if summary["circuit_breaker"]:
