@@ -13,12 +13,12 @@ GROQ_RPM_LIMIT = int(os.getenv("GROQ_RPM_LIMIT", "25"))  # Safe rate limit for f
 GROQ_MIN_CONFIDENCE = float(os.getenv("GROQ_MIN_CONFIDENCE", "0.75"))  # Повышен порог для отсева мусора (только A+ сетапы)
 
 # Институциональные фильтры входа (High-Conviction A+ Scanners)
-MIN_VOLUME_SURGE = float(os.getenv("MIN_VOLUME_SURGE", "1.30"))  # Всплеск объема от 1.3x к средней
-MIN_IMPULSE_PCT = float(os.getenv("MIN_IMPULSE_PCT", "0.45"))    # Импульс свечи от 0.45%
-MIN_RSI_LONG = 40.0
-MAX_RSI_LONG = 70.0
-MIN_RSI_SHORT = 30.0
-MAX_RSI_SHORT = 60.0
+MIN_VOLUME_SURGE = float(os.getenv("MIN_VOLUME_SURGE", "1.20"))  # Всплеск объема от 1.20x
+MIN_IMPULSE_PCT = float(os.getenv("MIN_IMPULSE_PCT", "0.30"))    # Импульс свечи от 0.30%
+MIN_RSI_LONG = 35.0
+MAX_RSI_LONG = 75.0
+MIN_RSI_SHORT = 25.0
+MAX_RSI_SHORT = 65.0
 
 # ==============================================================================
 # 2. BINANCE API CONFIG
@@ -57,7 +57,7 @@ MAX_CONCURRENT_POSITIONS = int(os.getenv("MAX_POSITIONS", "2"))
 # 4. EXIT STRATEGY & "THE LINE" (GROK x JEV RULES DEDICATED FOR 60x LEVERAGE)
 # ==============================================================================
 # "We bid the flush, not the candle": pullback required before entry
-MIN_PULLBACK_PCT = float(os.getenv("MIN_PULLBACK_PCT", "0.002"))  # 0.2% pullback
+MIN_PULLBACK_PCT = float(os.getenv("MIN_PULLBACK_PCT", "0.0005"))  # 0.05% pullback
 
 # "The stop lives under the wick": ultra-tight wick buffer for 60x leverage
 WICK_BUFFER_PCT = float(os.getenv("WICK_BUFFER_PCT", "0.001"))

@@ -28,32 +28,35 @@ class MarketScanner:
     def __init__(self):
         self.is_running = False
         self.cooldowns: Dict[str, float] = {}
+        self._last_log_time = 0.0
 
     async def scan_market_once(self) -> List[Dict[str, Any]]:
         """Один высокоскоростной параллельный проход сканирования рынка."""
         if portfolio.is_paused:
             return []
 
+        now = time.time()
         now_str = time.strftime("%H:%M:%S")
         portfolio.last_scan_str = now_str
 
         # 0. MACRO GUARD: Проверяем состояние Bitcoin (Поводырь рынка и защита от негативных новостей)
         btc_regime = await binance_client.fetch_btc_regime()
         portfolio.btc_regime_str = btc_regime.get("status_str", "")
-        if btc_regime.get("is_dumping"):
-            print(f"🛑 [MACRO GUARD] Bitcoin дамп ({btc_regime.get('pct_15m'):+.2f}%). Все LONG по альтам ЗАБЛОКИРОВАНЫ!", flush=True)
-        elif btc_regime.get("is_pumping"):
-            print(f"🚀 [MACRO GUARD] Bitcoin памп ({btc_regime.get('pct_15m'):+.2f}%). Все SHORT по альтам ЗАБЛОКИРОВАНЫ!", flush=True)
 
-        # 1. UNIVERSE: Получаем топ волатильные пары Binance Futures
+        # 1. UNIVERSE: Получаем проверенные пары топ-30 крипторынка
         tickers = await binance_client.fetch_top_tickers(
             min_vol_usdt=config.MIN_24H_VOLUME_USDT,
             limit=config.SCAN_TICKERS_LIMIT
         )
         portfolio.funnel_stats["universe"] += len(tickers)
-        print(f"📡 [SCAN] {now_str} — Загружено {len(tickers)} пар Binance (Параллельный радар)...", flush=True)
 
-        now = time.time()
+        # Выводим сводный лог радара раз в минуту, чтобы не забивать экран спамом
+        should_log = (now - self._last_log_time) >= 60.0
+        if should_log:
+            self._last_log_time = now
+            btc_p = btc_regime.get("pct_15m", 0.0)
+            print(f"📡 [РАДАР] {now_str} — Мониторинг {len(tickers)} пар Binance | BTC: {btc_p:+.2f}% | Оценок Groq: {portfolio.funnel_stats['groq_evaluated']}", flush=True)
+
         sem = asyncio.Semaphore(12)  # 12 параллельных запросов для мгновенной скорости
 
         async def check_ticker(t: Dict[str, Any]) -> Any:
@@ -100,48 +103,38 @@ class MarketScanner:
                 # 5. Нет фитиля истощения на хае (upper_wick < 35%)
                 # 6. RSI в здоровой зоне (40 <= RSI <= 70)
                 # 7. Не против тренда (тренд BULLISH или CHOP)
+                # Базовый институциональный фильтр кандидатов для Groq AI:
+                # 1. Всплеск объема от 1.20x или выраженный 15m импульс (>= 0.40%)
+                # 2. Допустимый стоп за фитиль (<= 1.3% для безопасного 60x плеча)
+                # 3. Macro Guard: запрет лонга при дампе BTC, запрет шорта при пампе BTC
+                has_vol = surge >= config.MIN_VOLUME_SURGE
+                has_long_momentum = (pct_5m >= config.MIN_IMPULSE_PCT or pct_15m >= 0.40)
+                has_short_momentum = (pct_5m <= -config.MIN_IMPULSE_PCT or pct_15m <= -0.40)
+
                 is_long = (
-                    surge >= config.MIN_VOLUME_SURGE and
-                    (pct_5m >= config.MIN_IMPULSE_PCT or pct_15m >= 0.65) and
+                    (has_vol or pct_15m >= 0.40) and
+                    has_long_momentum and
                     sl_dist <= config.MAX_ALLOWED_SL_PCT and
-                    (-0.020 <= pullback <= -config.MIN_PULLBACK_PCT) and
-                    upper_wick < 0.35 and
-                    (config.MIN_RSI_LONG <= rsi <= config.MAX_RSI_LONG) and
-                    trend != "BEARISH"
+                    trend != "BEARISH" and
+                    not btc_regime.get("is_dumping", False)
                 )
 
-                # Проверка условий SHORT (Институциональный сетап A+):
-                # 1. Всплеск объема на дампах >= 1.30x
-                # 2. Дамп 5m <= -0.45% или 15m <= -0.65%
-                # 3. Допустимый стоп над фитилем <= 1.2% (для 60x)
-                # 4. Микро-отскок в сопротивление: обязательно отскок +0.2%..+2.0% (НЕ шортим дно)
-                # 5. Нет фитиля выкупа на лоях (lower_wick < 35%)
-                # 6. RSI в здоровой зоне для шорта (30 <= RSI <= 60)
-                # 7. Не против тренда (тренд BEARISH или CHOP)
                 is_short = (
                     config.ENABLE_SHORT and
-                    surge >= config.MIN_VOLUME_SURGE and
-                    (pct_5m <= -config.MIN_IMPULSE_PCT or pct_15m <= -0.65) and
+                    (has_vol or pct_15m <= -0.40) and
+                    has_short_momentum and
                     short_sl_dist <= config.MAX_ALLOWED_SL_PCT and
-                    (config.MIN_PULLBACK_PCT <= bounce <= 0.020) and
-                    lower_wick < 0.35 and
-                    (config.MIN_RSI_SHORT <= rsi <= config.MAX_RSI_SHORT) and
-                    trend != "BULLISH"
+                    trend != "BULLISH" and
+                    not btc_regime.get("is_pumping", False)
                 )
-
-                # Защита от крипто-новостей и дампа биткоина (Macro Regime Guard)
-                if is_long and btc_regime.get("is_dumping"):
-                    return None
-                if is_short and btc_regime.get("is_pumping"):
-                    return None
 
                 if is_long:
                     self.cooldowns[sym] = now + 900  # 15 мин кулдаун
-                    print(f"🔥 [A+ SETUP - LONG] {sym}: всплеск {surge}x, +{pct_5m:.2f}%, RSI {rsi}, откат {pullback*100:.1f}% ➔ Groq...", flush=True)
+                    print(f"🔥 [A+ СЕТАП - LONG] {sym}: всплеск {surge}x, +{pct_5m:.2f}%, 15m: +{pct_15m:.2f}%, RSI {rsi:.1f} ➔ Groq AI...", flush=True)
                     return {**t, **analysis, "candidate_side": "LONG", "btc_regime": btc_regime.get("status_str", "Neutral")}
                 elif is_short:
                     self.cooldowns[sym] = now + 900  # 15 мин кулдаун
-                    print(f"🔻 [A+ SETUP - SHORT] {sym}: всплеск {surge}x, {pct_5m:.2f}%, RSI {rsi}, отскок +{bounce*100:.1f}% ➔ Groq...", flush=True)
+                    print(f"🔻 [A+ СЕТАП - SHORT] {sym}: всплеск {surge}x, {pct_5m:.2f}%, 15m: {pct_15m:.2f}%, RSI {rsi:.1f} ➔ Groq AI...", flush=True)
                     return {**t, **analysis, "candidate_side": "SHORT", "btc_regime": btc_regime.get("status_str", "Neutral")}
                 return None
 
