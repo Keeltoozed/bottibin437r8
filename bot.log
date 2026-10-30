@@ -1,0 +1,63 @@
+2026-05-13T17:07:52.571Z [INFO] ═══════════════════════════════════════
+2026-05-13T17:07:52.585Z [INFO]   SMART MONEY AGGRESSIVE BOT STARTED
+2026-05-13T17:07:52.588Z [INFO]   Lev: 75x | Amount: 500 USDT
+2026-05-13T17:07:52.591Z [INFO]   Testnet: true | URL: https://testnet.binancefuture.com
+2026-05-13T17:07:52.598Z [INFO]   Channel: -1003325030622
+2026-05-13T17:07:52.603Z [INFO] ═══════════════════════════════════════
+[2026-05-13 18:37:13] BOT STARTED
+[2026-05-13 18:37:13] Monitor started (3s interval)
+[2026-05-13 18:37:13] ═══════════════════════════════════
+[2026-05-13 18:37:13] Lev: 75x | Amount: 500 USDT
+[2026-05-13 18:37:13] Testnet: true | Channel: -1003325030622
+[2026-05-13 18:37:13] ═══════════════════════════════════
+[2026-05-13 19:07:57] BOT STARTED
+[2026-05-13 19:07:57] Monitor started (3s interval)
+[2026-05-13 19:07:57] ═══════════════════════════════════
+[2026-05-13 19:07:57] Lev: 75x | Amount: 500 USDT
+[2026-05-13 19:07:57] Testnet: true | Channel: -1003325030622
+[2026-05-13 19:07:57] ═══════════════════════════════════
+[2026-05-13 19:10:45] BOT STARTED
+[2026-05-13 19:10:45] Monitor started (3s interval)
+[2026-05-13 19:10:45] ═══════════════════════════════════
+[2026-05-13 19:10:45] Lev: 75x | Amount: 500 USDT
+[2026-05-13 19:10:45] Testnet: true | Channel: -1003325030622
+[2026-05-13 19:10:45] ═══════════════════════════════════
+[2026-05-13 19:30:41] ═══════════════════════════════════
+[2026-05-13 19:30:41]   AUTONOMOUS SMART MONEY BOT
+[2026-05-13 19:30:41]   Self-trading | 75x | Aggressive
+[2026-05-13 19:30:41]   Scan: 60s | Monitor: 3s
+[2026-05-13 19:30:41] ═══════════════════════════════════
+[2026-05-13 19:30:47] Scanning 30 coins...
+[2026-05-13 19:30:56] Found 16 signals: SAGA/USDT:USDT(SHORT+8), DYM/USDT:USDT(SHORT+8), VIC/USDT:USDT(SHORT+8), XRP/USDT:USDT(SHORT+7), AVAAI/USDT:USDT(SHORT+7), BTC/USDT:USDT(SHORT+6), ETH/USDT:USDT(SHORT+6), BNB/USDT:USDT(SHORT+6), BCH/USDT:USDT(SHORT+6), PORT3/USDT:USDT(LONG+5), GUA/USDT:USDT(SHORT+5), LAB/USDT:USDT(LONG+5), RDNT/USDT:USDT(SHORT+5), NAORIS/USDT:USDT(SHORT+5), JCT/USDT:USDT(LONG+5), SXP/USDT:USDT(SHORT+5)
+[2026-05-13 19:30:57] SEND: 🔍 СКАНЕР НАШЁЛ СИГНАЛ
+
+📊 SAGA/USDT:USDT SHORT
+⭐ Оценка: 8/10
+💰 Цена: 0.0286
+📈 RSI: 60.4
+📊 Momen
+[2026-05-13 19:30:58] Open err SAGA/USDT:USDT: -4028: Leverage 75 is not valid
+[2026-05-13 19:30:58] SEND: ❌ Ошибка SAGA/USDT:USDT: -4028: Leverage 75 is not valid
+[2026-05-13 19:31:41] Scanning 30 coins...
+[2026-05-13 19:31:51] Found 17 signals: SAGA/USDT:USDT(SHORT+8), DYM/USDT:USDT(SHORT+8), VIC/USDT:USDT(SHORT+8), XRP/USDT:USDT(SHORT+7), AVAAI/USDT:USDT(SHORT+7), BTC/USDT:USDT(SHORT+6), ETH/USDT:USDT(SHORT+6), BNB/USDT:USDT(SHORT+6), BCH/USDT:USDT(SHORT+6), XNY/USDT:USDT(LONG+6), FIS/USDT:USDT(LONG+5), GUA/USDT:USDT(SHORT+5), LAB/USDT:USDT(LONG+5), RDNT/USDT:USDT(SHORT+5), NAORIS/USDT:USDT(SHORT+5), JCT/USDT:USDT(LONG+5), SXP/USDT:USDT(SHORT+5)
+[2026-05-13 19:31:51] SEND: 🔍 СКАНЕР НАШЁЛ СИГНАЛ
+
+📊 SAGA/USDT:USDT SHORT
+⭐ Оценка: 8/10
+💰 Цена: 0.0286
+📈 RSI: 60.4
+📊 Momen
+[2026-05-13 19:31:52] Open err SAGA/USDT:USDT: -4028: Leverage 75 is not valid
+[2026-05-13 19:31:52] SEND: ❌ Ошибка SAGA/USDT:USDT: -4028: Leverage 75 is not valid
+[2026-05-13 19:32:42] Scanning 30 coins...
+[2026-05-13 19:32:52] Found 16 signals: DYM/USDT:USDT(SHORT+8), VIC/USDT:USDT(SHORT+8), XRP/USDT:USDT(SHORT+7), SAGA/USDT:USDT(SHORT+7), AVAAI/USDT:USDT(SHORT+7), BTC/USDT:USDT(SHORT+6), ETH/USDT:USDT(SHORT+6), BNB/USDT:USDT(SHORT+6), BCH/USDT:USDT(SHORT+6), XNY/USDT:USDT(LONG+6), PORT3/USDT:USDT(LONG+5), GUA/USDT:USDT(SHORT+5), RDNT/USDT:USDT(SHORT+5), NAORIS/USDT:USDT(SHORT+5), JCT/USDT:USDT(LONG+5), SXP/USDT:USDT(SHORT+5)
+[2026-05-13 19:32:52] SEND: 🔍 СКАНЕР НАШЁЛ СИГНАЛ
+
+📊 DYM/USDT:USDT SHORT
+⭐ Оценка: 8/10
+💰 Цена: 0.02601
+📈 RSI: 66.1
+📊 Momen
+[2026-05-13 19:32:53] Open err DYM/USDT:USDT: -4028: Leverage 75 is not valid
+[2026-05-13 19:32:53] SEND: ❌ Ошибка DYM/USDT:USDT: -4028: Leverage 75 is not valid
+[2026-05-13 19:33:41] Scanning 30 coins...

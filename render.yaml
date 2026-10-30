@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: binance-groq-trader
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: streamlit run app.py --server.port $PORT --server.address 0.0.0.0 --server.headless true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.10.12
+      - key: GROQ_API_KEY
+        sync: false
+      - key: BINANCE_API_KEY
+        sync: false
+      - key: BINANCE_SECRET
+        sync: false
+      - key: PAPER_TRADING
+        value: "true"
+      - key: INITIAL_BALANCE
+        value: "20.0"
+      - key: TRADE_AMOUNT_USDT
+        value: "5.0"
+      - key: LEVERAGE
+        value: "5"
+      - key: MAX_POSITIONS
+        value: "3"
+
