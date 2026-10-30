@@ -24,15 +24,25 @@ BINANCE_FUTURES_PUBLIC_URL = "https://fapi.binance.com"
 BINANCE_TESTNET_FUTURES_URL = "https://testnet.binancefuture.com"
 
 # ==============================================================================
-# 3. TRADING & RISK MANAGEMENT ($20 BANKROLL)
+# 3. TRADING & RISK MANAGEMENT (DAY-TRADER-SKILL 2R/3R DISCIPLINE)
 # ==============================================================================
 # Paper trading is enabled by default for safe real-market testing
 PAPER_TRADING = os.getenv("PAPER_TRADING", "true").lower() == "true"
 INITIAL_BALANCE = float(os.getenv("INITIAL_BALANCE", "20.0"))
 
+# Дисциплина Day-Trader-Skill: динамический сложный процент (Compounding)
+# При росте баланса размер риска и прибыль растут автоматически!
+ENABLE_COMPOUNDING = os.getenv("ENABLE_COMPOUNDING", "true").lower() == "true"
+COMPOUND_RISK_PCT = float(os.getenv("COMPOUND_RISK_PCT", "0.05"))  # 5% от депозита на сделку ($1 при $20, $5 при $100)
+MAX_RISK_PER_TRADE_USD = float(os.getenv("MAX_RISK_PER_TRADE_USD", "0.80")) # минимум $0.80
+MAX_DAILY_LOSS_USD = float(os.getenv("MAX_DAILY_LOSS_USD", "2.40"))  # Дневной стоп (12% счета)
+TARGET_1_R = 2.0  # Цель 1: 2R (+10% к балансу)
+TARGET_2_R = 3.5  # Цель 2: 3.5R (+17.5% к балансу)
+ENABLE_SHORT = os.getenv("ENABLE_SHORT", "true").lower() == "true"  # Торговля в LONG и SHORT
+
 # For $20 capital: $5 margin with 75x leverage creates a $375 position per trade!
 TRADE_AMOUNT_USDT = float(os.getenv("TRADE_AMOUNT_USDT", "5.0"))
-LEVERAGE = int(os.getenv("LEVERAGE", "75"))  # 75x плечо для высокой доходности
+LEVERAGE = int(os.getenv("LEVERAGE", "75"))  # 75x плечо
 MAX_CONCURRENT_POSITIONS = int(os.getenv("MAX_POSITIONS", "3"))
 
 # ==============================================================================

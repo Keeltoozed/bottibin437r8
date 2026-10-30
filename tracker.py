@@ -201,6 +201,12 @@ class PortfolioTracker:
         for symbol, pos in list(self.open_positions.items()):
             self.close_position(symbol, pos.get("current_price", pos["entry_price"]), reason)
 
+    def get_daily_loss(self) -> float:
+        """Суммарный убыток за сегодня (для правила Circuit Breaker из day-trader-skill)."""
+        today_str = time.strftime("%Y-%m-%d")
+        daily_losses = [abs(t["realized_pnl"]) for t in self.trade_history if t.get("closed_at", "").startswith(today_str) and t["realized_pnl"] < 0]
+        return round(sum(daily_losses), 2)
+
     def get_portfolio_summary(self) -> Dict[str, Any]:
         """Возвращает агрегированную сводку для веб-дашборда."""
         unrealized_sum = sum(p["unrealized_pnl"] for p in self.open_positions.values())
@@ -210,6 +216,7 @@ class PortfolioTracker:
         total_trades = len(self.trade_history)
         wins = sum(1 for t in self.trade_history if t["realized_pnl"] > 0)
         win_rate = round((wins / total_trades * 100), 1) if total_trades > 0 else 0.0
+        daily_loss = self.get_daily_loss()
 
         return {
             "cash": round(self.cash, 2),
@@ -222,6 +229,8 @@ class PortfolioTracker:
             "wins": wins,
             "losses": total_trades - wins,
             "win_rate": win_rate,
+            "daily_loss": daily_loss,
+            "circuit_breaker": daily_loss >= config.MAX_DAILY_LOSS_USD,
             "is_paused": self.is_paused
         }
 

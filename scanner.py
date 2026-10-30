@@ -105,17 +105,42 @@ class MarketScanner:
             if approved:
                 portfolio.funnel_stats["passed"] += 1
 
-                # Проверка лимитов портфеля ($20 банкролл)
-                if len(portfolio.open_positions) < config.MAX_CONCURRENT_POSITIONS and portfolio.cash >= config.TRADE_AMOUNT_USDT:
+                # 1. Проверка дневного лимита Circuit Breaker (trader-risk)
+                if portfolio.get_daily_loss() >= config.MAX_DAILY_LOSS_USD:
+                    print(f"🛑 [CIRCUIT BREAKER] Дневной лимит убытка (-${portfolio.get_daily_loss():.2f}) исчерпан. Защита депозита активна.", flush=True)
+                    continue
+
+                entry_p = ctx["current_price"]
+                wick_sl = eval_entry["sl"]
+                risk_per_coin = max(entry_p - wick_sl, entry_p * 0.003)
+                risk_pct = risk_per_coin / entry_p
+
+                # 2. Расчет размера позиции: Реинвестирование (Сложный процент 5%)
+                if getattr(config, "ENABLE_COMPOUNDING", True):
+                    risk_to_use = max(portfolio.cash * config.COMPOUND_RISK_PCT, config.MAX_RISK_PER_TRADE_USD)
+                else:
+                    risk_to_use = config.MAX_RISK_PER_TRADE_USD
+
+                notional_pos = risk_to_use / risk_pct
+                calculated_margin = round(notional_pos / config.LEVERAGE, 2)
+                max_margin_allowed = max(portfolio.cash * 0.35, config.TRADE_AMOUNT_USDT)
+                actual_margin = min(max(calculated_margin, 1.0), max_margin_allowed)
+
+                # 3. Асимметричные цели 2R и 3.5R (trader-exit)
+                tp1_2r = round(entry_p + (config.TARGET_1_R * risk_per_coin), 6)
+                tp2_3r = round(entry_p + (config.TARGET_2_R * risk_per_coin), 6)
+
+                # Проверка лимитов портфеля
+                if len(portfolio.open_positions) < config.MAX_CONCURRENT_POSITIONS and portfolio.cash >= actual_margin:
                     portfolio.open_position(
                         symbol=sym,
                         side="LONG",
-                        entry_price=ctx["current_price"],
-                        size_usdt=config.TRADE_AMOUNT_USDT,
-                        wick_sl=eval_entry["sl"],
-                        tp1=eval_entry["tp1"],
-                        tp2=groq_eval.get("tp2", round(ctx["current_price"] * 1.05, 4)),
-                        groq_reason=eval_entry["reason"],
+                        entry_price=entry_p,
+                        size_usdt=actual_margin,
+                        wick_sl=wick_sl,
+                        tp1=tp1_2r,
+                        tp2=tp2_3r,
+                        groq_reason=f"2R/3R Target | {eval_entry['reason']}",
                         leverage=config.LEVERAGE
                     )
             else:
