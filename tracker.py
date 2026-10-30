@@ -31,7 +31,7 @@ class PortfolioTracker:
         self.recent_evaluations: List[Dict[str, Any]] = []
         self.shadow_trades: List[Dict[str, Any]] = []
         self.is_paused = False
-        self.current_leverage = getattr(config, "LEVERAGE", 75)
+        self.current_leverage = getattr(config, "LEVERAGE", 60)
         self.load()
 
     def save(self):
@@ -68,7 +68,7 @@ class PortfolioTracker:
                 self.recent_evaluations = state.get("recent_evaluations", [])
                 self.shadow_trades = state.get("shadow_trades", [])
                 self.is_paused = state.get("is_paused", False)
-                self.current_leverage = int(state.get("current_leverage", getattr(config, "LEVERAGE", 75)))
+                self.current_leverage = int(state.get("current_leverage", getattr(config, "LEVERAGE", 60)))
                 config.LEVERAGE = self.current_leverage
                 print(f"✅ Портфель загружен: баланс ${self.cash:.2f}, открытых позиций: {len(self.open_positions)}, плечо: {self.current_leverage}x", flush=True)
         except Exception as e:

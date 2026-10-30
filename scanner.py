@@ -148,8 +148,8 @@ class MarketScanner:
                 wick_sl = eval_entry["sl"]
 
                 # Минимальное расстояние тейк-профитов для защиты от микро-сделок:
-                # TP1: минимум 1.5% хода цены (+112.5% ROI при 75x)
-                # TP2: минимум 3.0% хода цены (+225.0% ROI при 75x)
+                # TP1: минимум 1.5% хода цены (+90.0% ROI при 60x)
+                # TP2: минимум 3.0% хода цены (+180.0% ROI при 60x)
                 min_tp1_dist = entry_p * config.TP1_PCT
                 min_tp2_dist = entry_p * config.TP2_PCT
 

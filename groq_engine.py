@@ -13,7 +13,7 @@ class GroqEngine:
     Анализирует контекст рынка, подтверждает сетапы (LONG и SHORT) и фильтрует сделки по правилам:
       1. 'We bid the flush, not the candle' (для LONG: вход на откате -0.2%..-1.5% от хая).
       2. 'We sell the bounce, not the drop' (для SHORT: вход на микро-отскоке +0.2%..+1.5% в сопротивление).
-      3. 'The stop lives under/above the wick' (динамический стоп за фитиль, <= 1.0% на 75x).
+      3. 'The stop lives under/above the wick' (динамический стоп за фитиль, <= 1.2% на 60x).
       4. Оценка риска 'Momentum already spent' (проверка, не выдохся ли импульс / пролив).
     """
     def __init__(self):
@@ -76,13 +76,20 @@ class GroqEngine:
                 await asyncio.sleep(min_interval - elapsed)
             self._last_call_ts = time.time()
 
+        lev = int(getattr(config, "LEVERAGE", 60))
+        max_sl = config.MAX_ALLOWED_SL_PCT * 100.0
+        tp1_min_roi = int(1.5 * lev)
+        tp1_max_roi = int(2.0 * lev)
+        tp2_min_roi = int(3.0 * lev)
+        tp2_max_roi = int(4.5 * lev)
+
         if cand_side == "LONG":
             prompt = f"""You are the Lead Risk & Execution Officer at an elite quantitative crypto prop desk.
 Analyze this high-momentum breakout candidate for a LONG position on Binance Futures.
 
-RULES OF ENGAGEMENT (OPTIMIZED FOR 75x LEVERAGE & EXPLOSIVE ALTS):
+RULES OF ENGAGEMENT (OPTIMIZED FOR {lev}x LEVERAGE & EXPLOSIVE ALTS):
 1. 'We bid the flush, not the candle': NEVER buy the very top of a candle. An entry on a local pullback (-0.2% to -1.5% from high) is required for a clean risk-managed entry.
-2. 'The stop lives under the wick': The stop-loss must be placed right below the lower wick of recent candles ({context.get('wick_stop_loss')}). Because we are running 75x leverage, the stop distance MUST be strictly tight (<= 1.0%). If the stop distance is > 1.0%, REJECT it (liquidation prevention).
+2. 'The stop lives under the wick': The stop-loss must be placed right below the lower wick of recent candles ({context.get('wick_stop_loss')}). Because we are running {lev}x leverage, the stop distance MUST be strictly tight (<= {max_sl:.1f}%). If the stop distance is > {max_sl:.1f}%, REJECT it (liquidation prevention).
 3. 'Momentum already spent': If price pumped > 15% in 15m with a massive upper wick (> 45%), reject (exhaustion wick/dump risk).
 4. Minimum Risk-to-Reward ratio must be at least 1.8 to 1.
 
@@ -104,9 +111,9 @@ Respond STRICTLY with a valid JSON object matching this schema, with no preamble
   "decision": "BUY" or "SKIP",
   "confidence": float between 0.0 and 1.0,
   "entry_price": float (price to buy, near current or slightly below),
-  "stop_loss": float (tight under-wick stop loss, <= 1.0% distance),
-  "tp1": float (take profit target 1, approx +1.5% to +2.0%, yielding +112% to +150% ROI on 75x),
-  "tp2": float (take profit target 2, approx +3.0% to +4.5%, yielding +225% to +337% ROI on 75x),
+  "stop_loss": float (tight under-wick stop loss, <= {max_sl:.1f}% distance),
+  "tp1": float (take profit target 1, approx +1.5% to +2.0%, yielding +{tp1_min_roi}% to +{tp1_max_roi}% ROI on {lev}x),
+  "tp2": float (take profit target 2, approx +3.0% to +4.5%, yielding +{tp2_min_roi}% to +{tp2_max_roi}% ROI on {lev}x),
   "reason": "1-2 concise sentences explaining why this passed or was rejected based on wicks and flush"
 }}
 """
@@ -114,9 +121,9 @@ Respond STRICTLY with a valid JSON object matching this schema, with no preamble
             prompt = f"""You are the Lead Risk & Execution Officer at an elite quantitative crypto prop desk.
 Analyze this high-momentum breakdown candidate for a SHORT position on Binance Futures.
 
-RULES OF ENGAGEMENT (OPTIMIZED FOR 75x LEVERAGE & BREAKDOWNS):
+RULES OF ENGAGEMENT (OPTIMIZED FOR {lev}x LEVERAGE & BREAKDOWNS):
 1. 'We sell the bounce, not the bottom': NEVER short the very low of a dump candle. An entry on a local micro-bounce into resistance (+0.2% to +1.5% from low) is required for a clean entry.
-2. 'The stop lives above the wick': The stop-loss must be placed right above the upper wick of recent candles ({context.get('short_wick_sl')}). With 75x leverage, the stop distance MUST be strictly tight (<= 1.0%). If the stop distance is > 1.0%, REJECT it (liquidation prevention).
+2. 'The stop lives above the wick': The stop-loss must be placed right above the upper wick of recent candles ({context.get('short_wick_sl')}). With {lev}x leverage, the stop distance MUST be strictly tight (<= {max_sl:.1f}%). If the stop distance is > {max_sl:.1f}%, REJECT it (liquidation prevention).
 3. 'Dump exhaustion': If price already dumped > 15% in 15m with a massive lower wick (> 45%), reject (buyer absorption / bounce risk).
 4. Minimum Risk-to-Reward ratio must be at least 1.8 to 1.
 
@@ -138,9 +145,9 @@ Respond STRICTLY with a valid JSON object matching this schema, with no preamble
   "decision": "SHORT" or "SKIP",
   "confidence": float between 0.0 and 1.0,
   "entry_price": float (price to short, near current or slightly above),
-  "stop_loss": float (tight above-wick stop loss, <= 1.0% distance),
-  "tp1": float (take profit target 1, approx -1.5% to -2.0% below entry, yielding +112% to +150% ROI on 75x),
-  "tp2": float (take profit target 2, approx -3.0% to -4.5% below entry, yielding +225% to +337% ROI on 75x),
+  "stop_loss": float (tight above-wick stop loss, <= {max_sl:.1f}% distance),
+  "tp1": float (take profit target 1, approx -1.5% to -2.0% below entry, yielding +{tp1_min_roi}% to +{tp1_max_roi}% ROI on {lev}x),
+  "tp2": float (take profit target 2, approx -3.0% to -4.5% below entry, yielding +{tp2_min_roi}% to +{tp2_max_roi}% ROI on {lev}x),
   "reason": "1-2 concise sentences explaining why this passed or was rejected based on wicks and resistance"
 }}
 """

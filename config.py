@@ -42,22 +42,22 @@ ENABLE_SHORT = os.getenv("ENABLE_SHORT", "true").lower() == "true"  # Торго
 
 # Для капитала $20: $6 маржа на сделку (2 сделки = $12 в работе, $8 свободный резерв)
 TRADE_AMOUNT_USDT = float(os.getenv("TRADE_AMOUNT_USDT", "6.0"))
-LEVERAGE = 75  # Значение по умолчанию, динамически переключается пользователем в дашборде
+LEVERAGE = 60  # Значение по умолчанию: 60x (Оптимальный баланс высокой прибыли и сниженной просадки)
 MAX_CONCURRENT_POSITIONS = int(os.getenv("MAX_POSITIONS", "2"))
 
 # ==============================================================================
-# 4. EXIT STRATEGY & "THE LINE" (GROK x JEV RULES DEDICATED FOR 75x LEVERAGE)
+# 4. EXIT STRATEGY & "THE LINE" (GROK x JEV RULES DEDICATED FOR 60x LEVERAGE)
 # ==============================================================================
 # "We bid the flush, not the candle": pullback required before entry
 MIN_PULLBACK_PCT = float(os.getenv("MIN_PULLBACK_PCT", "0.002"))  # 0.2% pullback
 
-# "The stop lives under the wick": ultra-tight wick buffer for 75x leverage
+# "The stop lives under the wick": ultra-tight wick buffer for 60x leverage
 WICK_BUFFER_PCT = float(os.getenv("WICK_BUFFER_PCT", "0.001"))
-MAX_ALLOWED_SL_PCT = float(os.getenv("MAX_ALLOWED_SL_PCT", "0.010"))  # Макс. 1.0% SL (защита от ликвидации на 75x)
+MAX_ALLOWED_SL_PCT = float(os.getenv("MAX_ALLOWED_SL_PCT", "0.012"))  # Макс. 1.2% SL (защита от ликвидации на 60x)
 
-# Multi-tier Take Profit (с плечом 75x):
-# +1.5% ход цены = +112.5% ROI (TP1: фиксация 50% + мгновенный безубыток)
-# +3.0% ход цены = +225.0% ROI (TP2: фиксация 25%)
+# Multi-tier Take Profit (с плечом 60x):
+# +1.5% ход цены = +90.0% ROI (TP1: фиксация 50% + мгновенный безубыток)
+# +3.0% ход цены = +180.0% ROI (TP2: фиксация 25%)
 # Остаток 25%: трейлинг-стоп 0.8%
 TP1_PCT = float(os.getenv("TP1_PCT", "0.015"))
 TP2_PCT = float(os.getenv("TP2_PCT", "0.030"))
