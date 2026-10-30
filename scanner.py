@@ -63,8 +63,8 @@ class MarketScanner:
                 if spread > config.MAX_SPREAD_PCT:
                     return None
 
-                # 3. HARD GATE: Анализ свечей и объема
-                analysis = await binance_client.fetch_candles_analysis(sym, interval="5m", limit=20)
+                # 3. HARD GATE: Анализ свечей и объема (Институциональные фильтры A+)
+                analysis = await binance_client.fetch_candles_analysis(sym, interval="5m", limit=30)
                 if not analysis:
                     return None
 
@@ -73,29 +73,57 @@ class MarketScanner:
                 pct_15m = analysis.get("pct_15m", pct_5m)
                 sl_dist = analysis["sl_pct_distance"]
                 short_sl_dist = analysis.get("short_sl_dist", 0.05)
+                pullback = analysis.get("pullback_from_high_pct", 0.0)
+                bounce = analysis.get("bounce_from_low_pct", 0.0)
+                upper_wick = analysis.get("upper_wick_pct", 0.0)
+                lower_wick = analysis.get("lower_wick_pct", 0.0)
+                rsi = analysis.get("rsi", 50.0)
+                trend = analysis.get("trend", "CHOP")
 
-                # Проверка условий LONG (импульсный памп или выкуп пролива)
+                # Проверка условий LONG (Институциональный сетап A+):
+                # 1. Всплеск объема >= 1.30x
+                # 2. Импульс 5m >= 0.45% или 15m >= 0.65%
+                # 3. Допустимый стоп под фитиль <= 1.2% (для 60x)
+                # 4. Откат от хая: обязательно откат -0.2%..-2.0% (НЕ покупаем вершину)
+                # 5. Нет фитиля истощения на хае (upper_wick < 35%)
+                # 6. RSI в здоровой зоне (40 <= RSI <= 70)
+                # 7. Не против тренда (тренд BULLISH или CHOP)
                 is_long = (
-                    surge >= 1.08 and
-                    (pct_5m >= 0.20 or pct_15m >= 0.40) and
-                    sl_dist <= 0.020
+                    surge >= config.MIN_VOLUME_SURGE and
+                    (pct_5m >= config.MIN_IMPULSE_PCT or pct_15m >= 0.65) and
+                    sl_dist <= config.MAX_ALLOWED_SL_PCT and
+                    (-0.020 <= pullback <= -config.MIN_PULLBACK_PCT) and
+                    upper_wick < 0.35 and
+                    (config.MIN_RSI_LONG <= rsi <= config.MAX_RSI_LONG) and
+                    trend != "BEARISH"
                 )
 
-                # Проверка условий SHORT (пробойный дамп или отскок в сопротивление)
+                # Проверка условий SHORT (Институциональный сетап A+):
+                # 1. Всплеск объема на дампах >= 1.30x
+                # 2. Дамп 5m <= -0.45% или 15m <= -0.65%
+                # 3. Допустимый стоп над фитилем <= 1.2% (для 60x)
+                # 4. Микро-отскок в сопротивление: обязательно отскок +0.2%..+2.0% (НЕ шортим дно)
+                # 5. Нет фитиля выкупа на лоях (lower_wick < 35%)
+                # 6. RSI в здоровой зоне для шорта (30 <= RSI <= 60)
+                # 7. Не против тренда (тренд BEARISH или CHOP)
                 is_short = (
                     config.ENABLE_SHORT and
-                    surge >= 1.08 and
-                    (pct_5m <= -0.20 or pct_15m <= -0.40) and
-                    short_sl_dist <= 0.020
+                    surge >= config.MIN_VOLUME_SURGE and
+                    (pct_5m <= -config.MIN_IMPULSE_PCT or pct_15m <= -0.65) and
+                    short_sl_dist <= config.MAX_ALLOWED_SL_PCT and
+                    (config.MIN_PULLBACK_PCT <= bounce <= 0.020) and
+                    lower_wick < 0.35 and
+                    (config.MIN_RSI_SHORT <= rsi <= config.MAX_RSI_SHORT) and
+                    trend != "BULLISH"
                 )
 
                 if is_long:
-                    self.cooldowns[sym] = now
-                    print(f"🔥 [HARD GATE PASSED - LONG] {sym}: всплеск {surge}x, +{pct_5m:.2f}% (5m) ➔ Groq...", flush=True)
+                    self.cooldowns[sym] = now + 900  # 15 мин кулдаун
+                    print(f"🔥 [A+ SETUP - LONG] {sym}: всплеск {surge}x, +{pct_5m:.2f}%, RSI {rsi}, откат {pullback*100:.1f}% ➔ Groq...", flush=True)
                     return {**t, **analysis, "candidate_side": "LONG"}
                 elif is_short:
-                    self.cooldowns[sym] = now
-                    print(f"🔻 [HARD GATE PASSED - SHORT] {sym}: всплеск {surge}x, {pct_5m:.2f}% (5m) ➔ Groq...", flush=True)
+                    self.cooldowns[sym] = now + 900  # 15 мин кулдаун
+                    print(f"🔻 [A+ SETUP - SHORT] {sym}: всплеск {surge}x, {pct_5m:.2f}%, RSI {rsi}, отскок +{bounce*100:.1f}% ➔ Groq...", flush=True)
                     return {**t, **analysis, "candidate_side": "SHORT"}
                 return None
 
@@ -105,9 +133,9 @@ class MarketScanner:
 
         portfolio.funnel_stats["hard_gates"] += len(candidates_passed_hard)
 
-        # Сортируем кандидатов по взрывному импульсу и направляем топ-3 на глубокий AI-анализ в Groq
+        # Сортируем кандидатов по взрывному импульсу и направляем ТОП-1 на глубокий AI-анализ в Groq
         candidates_passed_hard.sort(key=lambda x: abs(x["pct_5m"]) * x["volume_surge_ratio"], reverse=True)
-        candidates_to_eval = candidates_passed_hard[:3]
+        candidates_to_eval = candidates_passed_hard[:1]
 
         # 4. GROQ SOFT GATE (JEV AI ENGINE)
         for ctx in candidates_to_eval:

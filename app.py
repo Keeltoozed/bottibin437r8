@@ -192,6 +192,8 @@ with st.sidebar:
     st.text(f"Цели профита: 2R / 3.5R")
     st.text(f"Радар рынка: {config.SCAN_TICKERS_LIMIT} монет")
     st.text(f"Модель Groq: {config.GROQ_PRIMARY_MODEL}")
+    has_key = bool(config.GROQ_API_KEY)
+    st.text(f"ИИ Статус: {'🟢 Активен (Groq Cloud)' if has_key else '🟡 Резервный (Institutional)'}")
     
     st.divider()
     if st.button("🔄 Сбросить портфель к $20.00"):

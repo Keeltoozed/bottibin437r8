@@ -7,10 +7,18 @@ load_dotenv()
 # 1. GROQ AI ENGINE CONFIG (JEV ENGINE)
 # ==============================================================================
 GROQ_API_KEY = (os.getenv("GROQ_API_KEY") or "").strip().strip('"').strip("'")
-GROQ_PRIMARY_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b").strip()
+GROQ_PRIMARY_MODEL = os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b").strip()
 GROQ_FALLBACK_MODEL = os.getenv("GROQ_MODEL_FALLBACK", "openai/gpt-oss-20b").strip()
 GROQ_RPM_LIMIT = int(os.getenv("GROQ_RPM_LIMIT", "25"))  # Safe rate limit for free tier (max 30 RPM)
-GROQ_MIN_CONFIDENCE = float(os.getenv("GROQ_MIN_CONFIDENCE", "0.65"))
+GROQ_MIN_CONFIDENCE = float(os.getenv("GROQ_MIN_CONFIDENCE", "0.75"))  # Повышен порог для отсева мусора (только A+ сетапы)
+
+# Институциональные фильтры входа (High-Conviction A+ Scanners)
+MIN_VOLUME_SURGE = float(os.getenv("MIN_VOLUME_SURGE", "1.30"))  # Всплеск объема от 1.3x к средней
+MIN_IMPULSE_PCT = float(os.getenv("MIN_IMPULSE_PCT", "0.45"))    # Импульс свечи от 0.45%
+MIN_RSI_LONG = 40.0
+MAX_RSI_LONG = 70.0
+MIN_RSI_SHORT = 30.0
+MAX_RSI_SHORT = 60.0
 
 # ==============================================================================
 # 2. BINANCE API CONFIG

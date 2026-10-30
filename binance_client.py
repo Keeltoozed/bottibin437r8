@@ -114,13 +114,15 @@ class BinanceClient:
         candidates.sort(key=lambda x: abs(x["price_change_24h_pct"]) * (x["volume_24h"] ** 0.35), reverse=True)
         return candidates[:limit]
 
-    async def fetch_candles_analysis(self, symbol: str, interval: str = "5m", limit: int = 20) -> Optional[Dict[str, Any]]:
+    async def fetch_candles_analysis(self, symbol: str, interval: str = "5m", limit: int = 30) -> Optional[Dict[str, Any]]:
         """
-        Запрашивает свечи и производит расчет:
+        Запрашивает свечи и производит институциональный технический расчет:
         - Всплеск объема (Volume Surge)
         - Фитили последней свечи (Wick analysis)
-        - Доля отката (Pullback)
-        - Локальный минимум под фитилем (Wick Stop Loss)
+        - Доля отката (Pullback) / микро-отскока (Bounce)
+        - Локальный минимум/максимум под фитилем (Wick Stop Loss)
+        - Индекс относительной силы RSI-14
+        - Экспоненциальные скользящие средние EMA-9 и EMA-21 (Trend Alignment)
         """
         raw_candles = await self._request_with_fallback("klines", params={"symbol": symbol, "interval": interval, "limit": limit})
         if not raw_candles or len(raw_candles) < 8:
@@ -179,6 +181,49 @@ class BinanceClient:
         pct_5m = round((candles[-1]["close"] - candles[-2]["close"]) / candles[-2]["close"] * 100, 2)
         pct_15m = round((candles[-1]["close"] - candles[-4]["close"]) / candles[-4]["close"] * 100, 2) if len(candles) >= 4 else pct_5m
 
+        # ======================================================================
+        # ИНСТИТУЦИОНАЛЬНЫЕ ИНДИКАТОРЫ: RSI-14 & EMA 9/21 TREND ALIGNMENT
+        # ======================================================================
+        closes = [c["close"] for c in candles]
+
+        # EMA-9 & EMA-21
+        def calc_ema(values, period):
+            k = 2.0 / (period + 1.0)
+            ema = values[0]
+            for v in values[1:]:
+                ema = v * k + ema * (1.0 - k)
+            return ema
+
+        ema9 = round(calc_ema(closes, 9), 6)
+        ema21 = round(calc_ema(closes, 21) if len(closes) >= 21 else calc_ema(closes, len(closes)), 6)
+
+        # RSI-14
+        gains, losses = [], []
+        for i in range(1, len(closes)):
+            delta = closes[i] - closes[i - 1]
+            if delta >= 0:
+                gains.append(delta)
+                losses.append(0.0)
+            else:
+                gains.append(0.0)
+                losses.append(abs(delta))
+
+        avg_gain = sum(gains[-14:]) / 14.0 if len(gains) >= 14 else 0.0
+        avg_loss = sum(losses[-14:]) / 14.0 if len(losses) >= 14 else 0.0
+        if avg_loss == 0:
+            rsi = 100.0 if avg_gain > 0 else 50.0
+        else:
+            rs = avg_gain / avg_loss
+            rsi = round(100.0 - (100.0 / (1.0 + rs)), 1)
+
+        # Структура тренда
+        if last_c["close"] >= ema9 >= ema21:
+            trend = "BULLISH"
+        elif last_c["close"] <= ema9 <= ema21:
+            trend = "BEARISH"
+        else:
+            trend = "CHOP"
+
         return {
             "symbol": symbol,
             "current_price": last_c["close"],
@@ -195,7 +240,11 @@ class BinanceClient:
             "short_sl_dist": short_sl_pct_distance,
             "pct_5m": pct_5m,
             "pct_15m": pct_15m,
-            "last_quote_volume": last_c["quote_vol"]
+            "last_quote_volume": last_c["quote_vol"],
+            "rsi": rsi,
+            "ema9": ema9,
+            "ema21": ema21,
+            "trend": trend
         }
 
     async def fetch_orderbook_spread(self, symbol: str) -> Tuple[float, float, float]:
