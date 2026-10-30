@@ -89,61 +89,69 @@ class GroqEngine:
         ema21_val = context.get('ema21', 0)
 
         if cand_side == "LONG":
-            prompt = f"""You are the Chief Investment Officer at an institutional crypto prop desk evaluating a 60x leverage LONG on Binance Futures.
+            prompt = f"""You are the Chief Quantitative Risk Officer at an elite crypto proprietary trading desk.
+You are evaluating a 60x leverage momentum breakout ('rocket') on Binance Futures.
 
-RULES OF ENGAGEMENT ({lev}x LEVERAGE - STRICT INSTITUTIONAL DISCIPLINE):
-1. NO FOMO: Entry MUST be on a pullback (-0.2% to -2.0% from high). NEVER buy candle high.
-2. STOP DISTANCE: Stop-loss under wick ({context.get('wick_stop_loss')}) MUST be <= {max_sl:.1f}% (liquidation prevention).
-3. RSI HEALTH: 40 <= RSI <= 70. Reject if RSI > 70 (exhaustion).
-4. TREND: Trend must be Bullish or healthy consolidation. Reject Bearish downtrend.
-5. Minimum Risk-to-Reward ratio must be at least 2.0 to 1.
+CORE MANDATE:
+1. Capital preservation is priority #1. YOUR DEFAULT BIAS IS TO SKIP.
+2. Only approve rare, undeniable A+ institutional breakouts.
 
-CANDIDATE CONTEXT:
-- Symbol: {symbol} | Direction: LONG | Price: ${context.get('current_price')}
+ADVERSARIAL TRAP FILTERS:
+- Bull Trap: If upper wick > 30% or RSI > 70 or volume is fading on the push, set trap_risk = true and decision = SKIP.
+- No FOMO: Price must be on a pullback (-0.2% to -2.0% from high) to support. Never buy the peak candle.
+- Stop Distance: Must be <= {max_sl:.1f}% behind extreme wick.
+- Structure: Trend must be Bullish (Price >= EMA9 >= EMA21).
+
+CANDIDATE:
+- Symbol: {symbol} | Side: LONG | Price: ${context.get('current_price')}
 - 5m Volume Surge: {context.get('volume_surge_ratio')}x | 5m Move: {context.get('pct_5m'):+.2f}% | 15m Move: {context.get('pct_15m'):+.2f}%
-- Pullback from High: {context.get('pullback_from_high_pct', 0) * 100:+.2f}%
-- RSI(14): {rsi_val} | Trend: {trend_val} (EMA9: {ema9_val}, EMA21: {ema21_val})
-- Upper Wick: {context.get('upper_wick_pct', 0) * 100:.1f}% | Lower Wick: {context.get('lower_wick_pct', 0) * 100:.1f}% (buyer defense)
-- Suggested Wick SL: ${context.get('wick_stop_loss')} ({context.get('sl_pct_distance', 0) * 100:.2f}% distance)
+- Pullback: {context.get('pullback_from_high_pct', 0) * 100:+.2f}% | RSI(14): {rsi_val} | Trend: {trend_val} (EMA9: {ema9_val}, EMA21: {ema21_val})
+- Upper Wick: {context.get('upper_wick_pct', 0) * 100:.1f}% | Lower Wick: {context.get('lower_wick_pct', 0) * 100:.1f}%
+- Stop Loss: ${context.get('wick_stop_loss')} ({context.get('sl_pct_distance', 0) * 100:.2f}% distance)
 
-Respond STRICTLY with raw valid JSON:
+Respond ONLY with raw valid JSON:
 {{
+  "trap_risk": bool,
   "decision": "BUY" or "SKIP",
   "confidence": float (0.0 to 1.0, >= 0.75 for approval),
-  "entry_price": float (price to buy),
-  "stop_loss": float (tight under-wick stop loss, <= {max_sl:.1f}% distance),
+  "entry_price": float,
+  "stop_loss": float,
   "tp1": float (approx +1.5% to +2.0%, yielding +{tp1_min_roi}% to +{tp1_max_roi}% ROI on {lev}x),
   "tp2": float (approx +3.0% to +4.5%, yielding +{tp2_min_roi}% to +{tp2_max_roi}% ROI on {lev}x),
-  "reason": "1-2 sharp sentences of institutional trade thesis covering structure, RSI, and wick defense"
+  "reason": "1-2 sharp sentences of institutional trade thesis analyzing volume conviction, trap risk, and level defense"
 }}
 """
         else:  # SHORT
-            prompt = f"""You are the Chief Investment Officer at an institutional crypto prop desk evaluating a 60x leverage SHORT on Binance Futures.
+            prompt = f"""You are the Chief Quantitative Risk Officer at an elite crypto proprietary trading desk.
+You are evaluating a 60x leverage breakdown scalp on Binance Futures.
 
-RULES OF ENGAGEMENT ({lev}x LEVERAGE - STRICT INSTITUTIONAL DISCIPLINE):
-1. NO SELLING FLOORS: Entry MUST be on a micro-bounce into resistance (+0.2% to +2.0% from low). NEVER short the lowest tick.
-2. STOP DISTANCE: Stop-loss above wick ({context.get('short_wick_sl')}) MUST be <= {max_sl:.1f}% (liquidation prevention).
-3. RSI HEALTH: 30 <= RSI <= 60. Reject if RSI < 30 (extreme oversold flush / short squeeze risk).
-4. TREND: Trend must be Bearish or breakdown. Reject Bullish uptrend.
-5. Minimum Risk-to-Reward ratio must be at least 2.0 to 1.
+CORE MANDATE:
+1. Capital preservation is priority #1. YOUR DEFAULT BIAS IS TO SKIP.
+2. Only approve rare, undeniable A+ institutional breakdowns.
 
-CANDIDATE CONTEXT:
-- Symbol: {symbol} | Direction: SHORT | Price: ${context.get('current_price')}
+ADVERSARIAL TRAP FILTERS:
+- Bear Trap: If lower wick > 30% or RSI < 30 or price is on the very bottom of the dump, set trap_risk = true and decision = SKIP.
+- No Floor Selling: Price must be on a micro-bounce (+0.2% to +2.0% from low) into resistance. Never short the lowest tick.
+- Stop Distance: Must be <= {max_sl:.1f}% behind extreme wick.
+- Structure: Trend must be Bearish (Price <= EMA9 <= EMA21).
+
+CANDIDATE:
+- Symbol: {symbol} | Side: SHORT | Price: ${context.get('current_price')}
 - 5m Volume Surge: {context.get('volume_surge_ratio')}x | 5m Move: {context.get('pct_5m'):+.2f}% | 15m Move: {context.get('pct_15m'):+.2f}%
-- Bounce from Low: +{context.get('bounce_from_low_pct', 0) * 100:.2f}%
-- RSI(14): {rsi_val} | Trend: {trend_val} (EMA9: {ema9_val}, EMA21: {ema21_val})
-- Upper Wick: {context.get('upper_wick_pct', 0) * 100:.1f}% (sellers defending) | Lower Wick: {context.get('lower_wick_pct', 0) * 100:.1f}%
-- Suggested Wick SL: ${context.get('short_wick_sl')} ({context.get('short_sl_dist', 0) * 100:.2f}% distance above price)
+- Bounce: +{context.get('bounce_from_low_pct', 0) * 100:.2f}% | RSI(14): {rsi_val} | Trend: {trend_val} (EMA9: {ema9_val}, EMA21: {ema21_val})
+- Upper Wick: {context.get('upper_wick_pct', 0) * 100:.1f}% | Lower Wick: {context.get('lower_wick_pct', 0) * 100:.1f}%
+- Stop Loss: ${context.get('short_wick_sl')} ({context.get('short_sl_dist', 0) * 100:.2f}% distance above price)
 
-Respond STRICTLY with raw valid JSON:
+Respond ONLY with raw valid JSON:
 {{
+  "trap_risk": bool,
   "decision": "SHORT" or "SKIP",
   "confidence": float (0.0 to 1.0, >= 0.75 for approval),
-  "entry_price": float (price to short),
-  "stop_loss": float (tight above-wick stop loss, <= {max_sl:.1f}% distance),
+  "entry_price": float,
+  "stop_loss": float,
   "tp1": float (approx -1.5% to -2.0%, yielding +{tp1_min_roi}% to +{tp1_max_roi}% ROI on {lev}x),
   "tp2": float (approx -3.0% to -4.5%, yielding +{tp2_min_roi}% to +{tp2_max_roi}% ROI on {lev}x),
-  "reason": "1-2 sharp sentences of institutional trade thesis covering structure, RSI, and wick rejection"
+  "reason": "1-2 sharp sentences of institutional trade thesis analyzing volume conviction, trap risk, and level defense"
 }}
 """
 
@@ -162,7 +170,7 @@ Respond STRICTLY with raw valid JSON:
                     {"role": "user", "content": prompt}
                 ],
                 "temperature": 0.1,
-                "max_tokens": 180
+                "max_tokens": 220
             }
 
             try:
@@ -197,6 +205,7 @@ Respond STRICTLY with raw valid JSON:
 
         is_approved = (
             eval_result.get("decision") == expected_decision and
+            not eval_result.get("trap_risk", False) and
             float(eval_result.get("confidence", 0)) >= config.GROQ_MIN_CONFIDENCE and
             float(context.get(sl_key, 0)) <= config.MAX_ALLOWED_SL_PCT
         )
