@@ -15,10 +15,11 @@ class ExitManager:
          - При TP1: закрытие 50% позиции + гарантированный безубыток на остаток.
          - При TP2: закрытие 25% позиции.
          - Остаток: трейлинг-стоп за локальным ATH.
-      4. 'Momentum Death': ранний выход, если импульс затухает.
+      4. 'Live Price Tracking': непрерывный мониторинг рыночных цен.
     """
     def __init__(self):
         self.is_running = False
+        self._last_log_time = 0.0
 
     async def run_loop(self):
         self.is_running = True
@@ -27,19 +28,24 @@ class ExitManager:
             try:
                 positions = portfolio.open_positions
                 if not positions:
-                    await asyncio.sleep(1.5)
+                    await asyncio.sleep(2.0)
                     continue
 
                 # Обновляем цены для всех открытых позиций
                 symbols = list(positions.keys())
                 price_map = {}
                 for sym in symbols:
-                    ob = await binance_client.fetch_orderbook_spread(sym)
-                    bid, ask, _ = ob
-                    if bid > 0:
-                        price_map[sym] = (bid + ask) / 2.0
+                    p = await binance_client.fetch_price(sym)
+                    if p and p > 0:
+                        price_map[sym] = p
 
-                portfolio.update_position_prices(price_map)
+                if price_map:
+                    portfolio.update_position_prices(price_map)
+
+                now = time.time()
+                should_log = (now - self._last_log_time) >= 15.0
+                if should_log:
+                    self._last_log_time = now
 
                 # Проверяем каждую позицию на условия выхода
                 for sym in symbols:
@@ -51,6 +57,14 @@ class ExitManager:
                     wick_sl = pos["wick_sl"]
                     tp1 = pos["tp1"]
                     tp2 = pos["tp2"]
+
+                    if should_log:
+                        print(
+                            f"📊 [PRICE TRACKER] {sym}: ${cur_price:.4f} (Вход: ${entry:.4f}) | "
+                            f"PnL: {pos['pnl_pct']:+.2f}% (${pos['unrealized_pnl']:+.2f}) | "
+                            f"SL: ${wick_sl:.4f} | TP1: ${tp1:.4f}",
+                            flush=True
+                        )
 
                     # 1. СТОП-ЛОСС ПОД ФИТИЛЬ (WICK SL)
                     if cur_price <= wick_sl:
@@ -105,10 +119,9 @@ class ExitManager:
                             )
                             continue
 
-                await asyncio.sleep(2.0)
+                await asyncio.sleep(2.5)
             except Exception as e:
-                print(f"⚠️ Ошибка в ExitManager: {e}")
-                await asyncio.sleep(2.0)
+                print(f"⚠️ Ошибка в ExitManager: {e}", flush=True)
+                await asyncio.sleep(2.5)
 
 exit_manager = ExitManager()
-

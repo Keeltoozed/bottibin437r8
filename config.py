@@ -59,7 +59,7 @@ ENABLE_MOMENTUM_DEATH_EXIT = True
 # ==============================================================================
 # 5. MARKET SCANNER & THE FUNNEL (HARD GATES)
 # ==============================================================================
-MIN_24H_VOLUME_USDT = float(os.getenv("MIN_24H_VOLUME_USDT", "15000000"))  # $15M
+MIN_24H_VOLUME_USDT = float(os.getenv("MIN_24H_VOLUME_USDT", "8000000"))  # $8M
 MIN_5M_VOLUME_SURGE_RATIO = float(os.getenv("MIN_5M_VOLUME_SURGE_RATIO", "1.6"))  # 1.6x avg vol
 MAX_SPREAD_PCT = float(os.getenv("MAX_SPREAD_PCT", "0.001"))  # 0.1% max spread
 SCAN_INTERVAL_SECONDS = int(os.getenv("SCAN_INTERVAL_SECONDS", "12"))
