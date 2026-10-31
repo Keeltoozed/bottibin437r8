@@ -170,8 +170,8 @@ class MarketScanner:
             if approved:
                 portfolio.funnel_stats["passed"] += 1
 
-                # 1. Проверка дневного лимита Circuit Breaker (trader-risk)
-                if portfolio.get_daily_loss() >= config.MAX_DAILY_LOSS_USD:
+                # 1. Проверка дневного лимита Circuit Breaker (если включен)
+                if getattr(config, "ENABLE_CIRCUIT_BREAKER", False) and portfolio.get_daily_loss() >= config.MAX_DAILY_LOSS_USD:
                     print(f"🛑 [CIRCUIT BREAKER] Дневной лимит убытка (-${portfolio.get_daily_loss():.2f}) исчерпан. Защита депозита активна.", flush=True)
                     continue
 
@@ -195,12 +195,20 @@ class MarketScanner:
 
                 risk_pct = risk_per_coin / entry_p
 
-                # 2. Оптимальный расчет маржи для ощутимой прибыли ($3.00 - $7.00+ на сделку):
-                # На старте $20 используем рабочую маржу $6.00 (или 30-35% капитала при разгоне сложным процентом).
-                # Ограничиваем не более 45% от доступного свободного кеша, чтобы всегда помещались 2 сделки.
+                # 2. ИНСТИТУЦИОНАЛЬНЫЙ РАСЧЕТ РАЗМЕРА ОТ СТОП-ЛОССА (TRUE RISK-BASED SIZING):
+                # Маржа подбирается математически так, чтобы при срабатывании стопа терялась ровно сумма risk_usd (10% от депо)
                 lev_to_use = getattr(portfolio, "current_leverage", config.LEVERAGE)
-                target_margin = max(config.TRADE_AMOUNT_USDT, portfolio.cash * 0.35)
-                actual_margin = round(min(target_margin, max(portfolio.cash * 0.45, 3.0)), 2)
+                risk_pct = getattr(config, "COMPOUND_RISK_PCT", 0.10) if config.ENABLE_COMPOUNDING else 0.10
+                risk_usd = max(portfolio.cash * risk_pct, config.MAX_RISK_PER_TRADE_USD)
+
+                # Реальное расстояние до стопа (не менее 0.3% для безопасности)
+                stop_dist_pct = max(risk_per_coin / entry_p, 0.003)
+
+                # Формула: margin = risk_usd / (stop_dist_pct * leverage)
+                calc_margin = risk_usd / (stop_dist_pct * lev_to_use)
+
+                # Потолок: не более 45% от баланса портфеля и не менее $3.00 (минимальный лот биржи)
+                actual_margin = round(min(max(calc_margin, 3.0), portfolio.cash * 0.45), 2)
 
                 # Проверка лимитов портфеля и открытие позиции
                 if len(portfolio.open_positions) < config.MAX_CONCURRENT_POSITIONS and portfolio.cash >= actual_margin:
@@ -226,8 +234,12 @@ class MarketScanner:
                     "symbol": sym,
                     "side": cand_side,
                     "rejected_at_price": ctx["current_price"],
+                    "current_price": ctx["current_price"],
+                    "price_change_pct": 0.0,
+                    "outcome": "Ожидание хода...",
                     "reason": eval_entry["reason"],
                     "time": time.strftime("%H:%M:%S"),
+                    "timestamp": time.time(),
                     "score": eval_entry["confidence"]
                 })
                 if len(portfolio.shadow_trades) > 50:

@@ -21,12 +21,34 @@ class ExitManager:
     def __init__(self):
         self.is_running = False
         self._last_log_time = 0.0
+        self._last_shadow_check = 0.0
+
+    async def _check_shadow_outcomes(self):
+        """Проверяет цены для теневого трекера отклонённых сетапов."""
+        try:
+            shadow_syms = list({t["symbol"] for t in portfolio.shadow_trades[:15] if "symbol" in t})
+            if not shadow_syms:
+                return
+            shadow_prices = {}
+            for sym in shadow_syms:
+                p = await binance_client.fetch_price(sym)
+                if p and p > 0:
+                    shadow_prices[sym] = p
+            if shadow_prices:
+                portfolio.update_shadow_outcomes(shadow_prices)
+        except Exception:
+            pass
 
     async def run_loop(self):
         self.is_running = True
         print("🛡️ [ExitManager] Менеджер умного выхода активен (LONG + SHORT).", flush=True)
         while self.is_running:
             try:
+                now = time.time()
+                if (now - self._last_shadow_check) >= 45.0 and portfolio.shadow_trades:
+                    self._last_shadow_check = now
+                    await self._check_shadow_outcomes()
+
                 positions = portfolio.open_positions
                 if not positions:
                     await asyncio.sleep(2.0)

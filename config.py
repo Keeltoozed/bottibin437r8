@@ -41,11 +41,12 @@ INITIAL_BALANCE = float(os.getenv("INITIAL_BALANCE", "20.0"))
 # Дисциплина Day-Trader-Skill: динамический сложный процент (Compounding)
 # При росте баланса размер риска и прибыль растут автоматически!
 ENABLE_COMPOUNDING = os.getenv("ENABLE_COMPOUNDING", "true").lower() == "true"
-COMPOUND_RISK_PCT = float(os.getenv("COMPOUND_RISK_PCT", "0.05"))  # 5% от депозита на сделку ($1 при $20, $5 при $100)
-MAX_RISK_PER_TRADE_USD = float(os.getenv("MAX_RISK_PER_TRADE_USD", "0.80")) # минимум $0.80
-MAX_DAILY_LOSS_USD = float(os.getenv("MAX_DAILY_LOSS_USD", "6.00"))  # Дневной лимит убытка ($6.00 = 30% счета)
-TARGET_1_R = 2.0  # Цель 1: 2R (+10% к балансу)
-TARGET_2_R = 3.5  # Цель 2: 3.5R (+17.5% к балансу)
+COMPOUND_RISK_PCT = float(os.getenv("COMPOUND_RISK_PCT", "0.10"))  # 10% от депозита на сделку ($2 при $20, $2.70 при $27)
+MAX_RISK_PER_TRADE_USD = float(os.getenv("MAX_RISK_PER_TRADE_USD", "1.00")) # минимум $1.00
+ENABLE_CIRCUIT_BREAKER = os.getenv("ENABLE_CIRCUIT_BREAKER", "false").lower() == "true"  # Отключен стоп по торговле
+MAX_DAILY_LOSS_USD = float(os.getenv("MAX_DAILY_LOSS_USD", "999999.00"))  # Без дневной остановки бота
+TARGET_1_R = 2.0  # Цель 1: 2R
+TARGET_2_R = 3.5  # Цель 2: 3.5R
 ENABLE_SHORT = os.getenv("ENABLE_SHORT", "true").lower() == "true"  # Торговля в LONG и SHORT
 
 # Для капитала $20: $6 маржа на сделку (2 сделки = $12 в работе, $8 свободный резерв)

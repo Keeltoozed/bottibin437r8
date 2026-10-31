@@ -260,6 +260,61 @@ class PortfolioTracker:
         daily_losses = [abs(t["realized_pnl"]) for t in self.trade_history if t.get("closed_at", "").startswith(today_str) and t["realized_pnl"] < 0]
         return round(sum(daily_losses), 2)
 
+    def update_shadow_outcomes(self, price_map: Dict[str, float]):
+        """
+        Проверяет исход отклонённых сетапов: что цена сделала после отсева ИИ.
+        Позволяет оценить эффективность Groq (защитил от ловушки или упустил ракету).
+        """
+        now = time.time()
+        for item in self.shadow_trades:
+            sym = item.get("symbol")
+            rej_p = item.get("rejected_at_price", 0.0)
+            if not sym or rej_p <= 0 or sym not in price_map:
+                continue
+
+            cur_p = price_map[sym]
+            side = item.get("side", "LONG")
+
+            # Для LONG: падение цены означает, что ИИ спас депозит от ловушки
+            # Для SHORT: рост цены означает, что ИИ спас депозит от ложного шорта
+            if side == "LONG":
+                delta_pct = (cur_p - rej_p) / rej_p * 100.0
+            else:
+                delta_pct = (rej_p - cur_p) / rej_p * 100.0
+
+            item["current_price"] = cur_p
+            item["price_change_pct"] = round(delta_pct, 2)
+            elapsed_min = int((now - item.get("timestamp", now)) / 60)
+            item["elapsed_min"] = elapsed_min
+
+            if delta_pct <= -0.5:
+                item["outcome"] = f"🛡️ Groq спас депозит ({delta_pct:+.2f}%)"
+            elif delta_pct >= 1.5:
+                item["outcome"] = f"⚠️ Упущенный импульс ({delta_pct:+.2f}%)"
+            else:
+                item["outcome"] = f"⚖️ Боковик/флэт ({delta_pct:+.2f}%)"
+        self.save()
+
+    def get_shadow_stats(self) -> Dict[str, Any]:
+        """Возвращает статистику точности отсева Shadow Tracker."""
+        total = len(self.shadow_trades)
+        if total == 0:
+            return {"total": 0, "saved": 0, "missed": 0, "flat": 0, "accuracy": 0.0}
+
+        saved = sum(1 for t in self.shadow_trades if t.get("price_change_pct", 0) <= -0.5)
+        missed = sum(1 for t in self.shadow_trades if t.get("price_change_pct", 0) >= 1.5)
+        flat = total - saved - missed
+        decided = saved + missed
+        acc = round((saved / decided * 100), 1) if decided > 0 else 100.0
+
+        return {
+            "total": total,
+            "saved": saved,
+            "missed": missed,
+            "flat": flat,
+            "accuracy": acc
+        }
+
     def get_portfolio_summary(self) -> Dict[str, Any]:
         """Возвращает агрегированную сводку для веб-дашборда."""
         unrealized_sum = sum(p["unrealized_pnl"] for p in self.open_positions.values())

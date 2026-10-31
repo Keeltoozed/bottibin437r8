@@ -183,14 +183,14 @@ with st.sidebar:
         config.MAX_RISK_PER_TRADE_USD = 1.00
         config.TRADE_AMOUNT_USDT = 6.0
 
-    st.text(f"Маржа на сделку: ${config.TRADE_AMOUNT_USDT:.1f}")
     st.text(f"Плечо для новых входов: {portfolio.current_leverage}x 🚀")
     current_risk_usd = max(portfolio.cash * config.COMPOUND_RISK_PCT, config.MAX_RISK_PER_TRADE_USD) if config.ENABLE_COMPOUNDING else config.MAX_RISK_PER_TRADE_USD
     st.text(f"Сложный процент: 🟢 ВКЛ ({int(config.COMPOUND_RISK_PCT*100)}% депо)")
     st.text(f"Текущий риск на сделку: ${current_risk_usd:.2f}")
+    st.text(f"Расчет маржи: Динамический от стопа")
     st.text(f"Направления: 🟢 LONG + 🔻 SHORT")
     st.text(f"Цели профита: 2R / 3.5R")
-    st.text(f"Радар рынка: {config.SCAN_TICKERS_LIMIT} монет")
+    st.text(f"Радар рынка: {len(getattr(config, 'TOP_CRYPTO_UNIVERSE', []))} монет (Top-Tier)")
     st.text(f"Модель Groq: {config.GROQ_PRIMARY_MODEL}")
     has_key = bool(config.GROQ_API_KEY)
     st.text(f"ИИ Статус: {'🟢 Активен (Groq Cloud)' if has_key else '🟡 Резервный (Institutional)'}")
@@ -218,8 +218,8 @@ btc_regime_info = getattr(portfolio, "btc_regime_str", "🟡 Анализ Bitcoi
 st.caption(f"🌍 **Макро-щит (Защита от новостей/дампа BTC):** {btc_regime_info}")
 st.caption(f"Автономный торговый конвейер: Топ-30 Крипто-вселенная → Защита от ловушек ИИ (CT Anti-Trap) → Динамический трейлинг | Режим: {'🧪 Paper Trading (Симуляция)' if config.PAPER_TRADING else '⚡ Live Trading'} | Последний скан: {last_scan_info}")
 
-# Оповещение и ручной сброс Circuit Breaker
-if summary["circuit_breaker"]:
+# Оповещение и ручной сброс Circuit Breaker (если включен)
+if getattr(config, "ENABLE_CIRCUIT_BREAKER", False) and summary["circuit_breaker"]:
     cb_col1, cb_col2 = st.columns([3, 1])
     with cb_col1:
         st.error(f"🛑 **Защита депозита (Circuit Breaker):** Дневной лимит убытка (-${summary['daily_loss']:.2f}) исчерпан. Новые входы приостановлены.")
@@ -427,12 +427,26 @@ with tab_history:
 # 5. SHADOW TRACKER (ТЕНЕВОЙ ТРЕКЕР)
 # ------------------------------------------------------------------------------
 with tab_shadow:
-    st.subheader("👻 Shadow Tracker (Отклонённые сетапы)")
-    st.caption("Монеты, которые бот отфильтровал. Позволяет проверить качество работы AI-фильтров.")
+    st.subheader("👻 Shadow Tracker (Проверка исхода отклонённых сетапов)")
+    st.caption("Автоматически отслеживает, куда пошла цена после вердикта SKIP. Доказывает, спасает ли ИИ от ловушек.")
+    
+    sh_stats = portfolio.get_shadow_stats()
+    sc1, sc2, sc3, sc4 = st.columns(4)
+    with sc1:
+        st.metric("Отклонено ИИ", sh_stats["total"], help="Сетапы, которые Groq отклонил ради безопасности")
+    with sc2:
+        st.metric("🛡️ Спас от убытка", sh_stats["saved"], help="Монеты, которые после отсева действительно упали/слились")
+    with sc3:
+        st.metric("⚠️ Упущенный импульс", sh_stats["missed"], help="Монеты, которые все равно пошли в плюс")
+    with sc4:
+        st.metric("🎯 Точность отсева", f"{sh_stats['accuracy']}%", help="Процент верных отсевов ловушек ИИ")
+
     if not portfolio.shadow_trades:
         st.info("Пока нет отклонённых сетапов.")
     else:
-        st.dataframe(pd.DataFrame(portfolio.shadow_trades[:30]), use_container_width=True)
+        sdf = pd.DataFrame(portfolio.shadow_trades[:30])
+        cols = [c for c in ["symbol", "side", "rejected_at_price", "current_price", "price_change_pct", "outcome", "reason", "time"] if c in sdf.columns]
+        st.dataframe(sdf[cols], use_container_width=True)
 
 # ------------------------------------------------------------------------------
 # 6. TIME MACHINE (БЭКТЕСТ ЗА НЕДЕЛЮ ПО МЕТОДОЛОГИИ DAY-TRADER-SKILL)
