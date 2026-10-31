@@ -1,155 +1,218 @@
 import asyncio
 import time
-from typing import Callable
-from solana.rpc.async_api import AsyncClient
-from solders.pubkey import Pubkey
-
-# pump_fun_sniper передаёт это значение как "баланс дева неизвестен"
-_UNKNOWN_DEV_BALANCE = 1_000_000_000
-
+from typing import Dict, Any
+import config
+from binance_client import binance_client
+from tracker import portfolio
 
 class ExitManager:
     """
-    Интеллектуальный менеджер выхода из позиции (Smart Exit).
-    Следит за поведением Dev-кошелька и скоростью транзакций.
-
-    ИСПРАВЛЕНИЯ:
-    1) Velocity считался как len(sigs) - last_len, а getSignaturesForAddress(limit=50) отдаёт максимум 50.
-       У любого горячего токена (>=50 tx) на втором замере разница = 0 -> "MOMENTUM DEAD" и паник-сейл
-       через ~30-45с после входа. Именно ракеты и продавались первыми. Теперь считаем НОВЫЕ подписи
-       (множество уже виденных), cap 50 больше не мешает.
-    2) Если у дева нет токен-аккаунта (не покупал при создании), стартовый баланс оставался 1_000_000_000,
-       текущий = 0 -> мгновенный ложный "DEV DUMP". Теперь без известного баланса проверка дампа пропускается.
-    3) RPC-клиент закрывается при остановке мониторинга (раньше утекал по одному на сделку).
+    Интеллектуальный менеджер сопровождения и выхода из позиций (LONG и SHORT).
+    Реализует правила Day-Trader Discipline:
+      1. 'Stop lives under/above the wick': сделка свободно дышит в рамках исходного стоп-лосса.
+         Никаких преждевременных микро-безубытков, удушающих сделку из-за рыночного шума!
+      2. 'Tiered Take-Profit':
+         - При TP1 (+1.5% хода цены = +90.0% ROI на 60x): закрытие 50% объема с фиксацией реальной прибыли в депозит.
+         - Только ПОСЛЕ взятия TP1: стоп оставшейся части переносится в гарантированный безубыток с запасом на комиссию.
+         - При TP2 (+3.0% хода цены = +180.0% ROI): фиксация еще 25% объема.
+         - Остаток (25%): трейлинг-стоп для ловли мощных трендовых выносов.
+      3. 'Live Price Tracking': непрерывный мониторинг рыночных цен каждые 2 секунды.
     """
-    def __init__(self, rpc_url: str):
-        self.solana_client = AsyncClient(rpc_url)
-        self.active_trades = {}  # token_mint -> trade_info
+    def __init__(self):
+        self.is_running = False
+        self._last_log_time = 0.0
+        self._last_shadow_check = 0.0
 
-    async def start_monitoring(self, token_mint: str, dev_wallet: str, initial_dev_balance: int, on_panic_sell: Callable):
-        """
-        Запускает фоновый asyncio таск для мониторинга активной сделки.
-        """
-        # Динамически получаем стартовый баланс дева (с учётом 6 decimals).
-        # 0 = неизвестен / дев не держит токен -> дамп-проверка пропускается.
-        actual_initial_balance = initial_dev_balance
-        if initial_dev_balance == _UNKNOWN_DEV_BALANCE:
-            actual_initial_balance = 0
-            try:
-                dev_pubkey = Pubkey.from_string(dev_wallet)
-                mint_pubkey = Pubkey.from_string(token_mint)
-                response = await self.solana_client.get_token_accounts_by_owner(dev_pubkey, {"mint": mint_pubkey})
-                if response.value:
-                    account_info = await self.solana_client.get_account_info_json_parsed(response.value[0].pubkey)
-                    if account_info.value and hasattr(account_info.value.data, "parsed"):
-                        actual_initial_balance = int(account_info.value.data.parsed['info']['tokenAmount']['amount'])
-            except Exception as e:
-                print(f"⚠️ Не удалось получить стартовый баланс дева: {e}")
-
-        self.active_trades[token_mint] = {
-            "dev_wallet": dev_wallet,
-            "initial_dev_balance": actual_initial_balance,
-            "start_time": time.time(),
-            "seen_sigs": set(),
-            "last_check_time": time.time()
-        }
-
-        print(f"👁️ ExitManager started watching {token_mint}")
-
+    async def _check_shadow_outcomes(self):
+        """Проверяет свечи и экстремумы (High/Low) для теневого трекера отклонённых сетапов."""
         try:
-            while token_mint in self.active_trades:
-                # 1. Защита от дампа разработчиком
-                await self._check_dev_dump(token_mint, on_panic_sell)
-
-                # 2. Микро-трейлинг по velocity (затухание импульса)
-                await self._check_velocity_drop(token_mint, on_panic_sell)
-
-                await asyncio.sleep(1.5)  # Быстрый поллинг, но не спамим RPC
-        except asyncio.CancelledError:
-            pass
-        except Exception as e:
-            print(f"⚠️ Error in ExitManager for {token_mint}: {e}")
-        finally:
-            self.active_trades.pop(token_mint, None)
-            if not self.active_trades:
-                try:
-                    await self.solana_client.close()
-                except Exception:
-                    pass
-
-    async def stop_monitoring(self, token_mint: str):
-        if token_mint in self.active_trades:
-            del self.active_trades[token_mint]
-
-    async def _check_dev_dump(self, token_mint: str, on_panic_sell: Callable):
-        trade = self.active_trades.get(token_mint)
-        if not trade:
-            return
-
-        # Стартовый баланс дева неизвестен/нулевой — сравнивать не с чем, ложный дамп исключаем
-        if int(trade.get("initial_dev_balance", 0) or 0) <= 0:
-            return
-
-        dev_pubkey = Pubkey.from_string(trade["dev_wallet"])
-        mint_pubkey = Pubkey.from_string(token_mint)
-
-        # Получаем текущий баланс Dev-кошелька
-        try:
-            response = await self.solana_client.get_token_accounts_by_owner(
-                dev_pubkey,
-                {"mint": mint_pubkey}
-            )
-
-            current_balance = 0
-            if response.value:
-                account_info = await self.solana_client.get_account_info_json_parsed(response.value[0].pubkey)
-                if account_info.value and hasattr(account_info.value.data, "parsed"):
-                    current_balance = int(account_info.value.data.parsed['info']['tokenAmount']['amount'])
-
-            # Триггер: если Дев продал больше 10% своего изначального баланса
-            if current_balance < (trade["initial_dev_balance"] * 0.9):
-                print(f"🚨 DEV DUMP DETECTED ({token_mint})! Dev sold >10% of holdings.")
-                print("💥 Initiating Instant Panic Sell!")
-                del self.active_trades[token_mint]
-                await on_panic_sell(token_mint, "DEV_DUMP")
-        except Exception as e:
-            print(f"Error checking dev dump: {e}")
-
-    async def _check_velocity_drop(self, token_mint: str, on_panic_sell: Callable):
-        trade = self.active_trades.get(token_mint)
-        if not trade:
-            return
-
-        now = time.time()
-        time_diff = now - trade["last_check_time"]
-        if time_diff < 15.0:  # Оцениваем скорость раз в 15 секунд — не дёргаем RPC чаще
-            return
-
-        try:
-            # Последние транзакции токена (макс 50) — считаем только НОВЫЕ подписи с прошлого замера
-            sigs = await self.solana_client.get_signatures_for_address(Pubkey.from_string(token_mint), limit=50)
-            vals = sigs.value or []
-            current = [str(s.signature) for s in vals]
-            seen = trade["seen_sigs"]
-            new_txs = sum(1 for sg in current if sg not in seen)
-            seen.update(current)
-            if len(seen) > 1000:
-                trade["seen_sigs"] = set(current)
-
-            velocity = new_txs / time_diff  # Транзакции в секунду (Tx/s)
-
-            # Триггер: импульс пропал.
-            # Grace period 30 секунд после входа — мемкоины часто "замирают" на старте.
-            # Порог 0.2 tx/s — даже 1 транзакция за 5 секунд это нормально для мемкоинов.
-            if velocity < 0.2 and (now - trade["start_time"]) > 30.0:
-                print(f"📉 MOMENTUM DEAD ({token_mint}). Tx Velocity dropped to {velocity:.2f} tx/s.")
-                print("💥 Micro-trailing triggered. Initiating Panic Sell!")
-                del self.active_trades[token_mint]
-                await on_panic_sell(token_mint, "VELOCITY_DROP")
+            shadow_syms = list({t["symbol"] for t in portfolio.shadow_trades[:20] if "symbol" in t})
+            if not shadow_syms:
                 return
+            shadow_data = {}
+            for sym in shadow_syms:
+                # 60 5-минутных свечей = 5 полных часов истории для фиксации максимумов и минимумов
+                hl = await binance_client.fetch_recent_high_low(sym, limit=60)
+                if hl:
+                    cur, max_h, min_l = hl
+                    shadow_data[sym] = {"current": cur, "high": max_h, "low": min_l}
+                else:
+                    p = await binance_client.fetch_price(sym)
+                    if p and p > 0:
+                        shadow_data[sym] = {"current": p, "high": p, "low": p}
+            if shadow_data:
+                portfolio.update_shadow_outcomes(shadow_data)
+        except Exception:
+            pass
 
-            trade["last_check_time"] = now
-        except Exception as e:
-            print(f"Error checking tx velocity: {e}")
-            # при сбое RPC не копим time_diff бесконечно (иначе следующий замер будет за 100+ сек)
-            trade["last_check_time"] = now
+    async def run_loop(self):
+        self.is_running = True
+        print("🛡️ [ExitManager] Менеджер умного выхода активен (LONG + SHORT).", flush=True)
+        while self.is_running:
+            try:
+                now = time.time()
+                if (now - self._last_shadow_check) >= 45.0 and portfolio.shadow_trades:
+                    self._last_shadow_check = now
+                    await self._check_shadow_outcomes()
+
+                positions = portfolio.open_positions
+                if not positions:
+                    await asyncio.sleep(2.0)
+                    continue
+
+                # Обновляем цены для всех открытых позиций
+                symbols = list(positions.keys())
+                price_map = {}
+                for sym in symbols:
+                    p = await binance_client.fetch_price(sym)
+                    if p and p > 0:
+                        price_map[sym] = p
+
+                if price_map:
+                    portfolio.update_position_prices(price_map)
+
+                now = time.time()
+                should_log = (now - self._last_log_time) >= 15.0
+                if should_log:
+                    self._last_log_time = now
+
+                # Проверяем каждую позицию на условия выхода
+                for sym in symbols:
+                    if sym not in portfolio.open_positions:
+                        continue
+                    pos = portfolio.open_positions[sym]
+                    cur_price = pos.get("current_price", pos["entry_price"])
+                    entry = pos["entry_price"]
+                    wick_sl = pos["wick_sl"]
+                    tp1 = pos["tp1"]
+                    tp2 = pos["tp2"]
+                    side = pos.get("side", "LONG")
+
+                    if should_log:
+                        print(
+                            f"📊 [PRICE TRACKER] {sym} ({side} {pos['leverage']}x): ${cur_price:.4f} (Вход: ${entry:.4f}) | "
+                            f"PnL: {pos['pnl_pct']:+.2f}% (${pos['unrealized_pnl']:+.2f}) | "
+                            f"SL: ${wick_sl:.4f} | TP1: ${tp1:.4f}",
+                            flush=True
+                        )
+
+                    # ==========================================================
+                    # ЛОГИКА ВЫХОДА ДЛЯ LONG
+                    # ==========================================================
+                    if side == "LONG":
+                        # 1. СТОП-ЛОСС ПОД ФИТИЛЬ (ИЛИ БЕЗУБЫТОК ПОСЛЕ TP1)
+                        if cur_price <= wick_sl:
+                            reason_label = (
+                                f"🛡️ Breakeven Exit ({pos['pnl_pct']:+.1f}%)"
+                                if pos.get("breakeven_set")
+                                else f"🛑 Stop Under Wick ({pos['pnl_pct']:+.1f}%)"
+                            )
+                            portfolio.close_position(
+                                sym, cur_price,
+                                reason=reason_label
+                            )
+                            continue
+
+                        # 2. ТЕЙК-ПРОФИТ 1 (TP1): Фиксация 50% объема в плюс
+                        if not pos["tp1_hit"] and cur_price >= tp1:
+                            pos["tp1_hit"] = True
+                            # После взятия крупного профита TP1 переносим стоп на остаток в гарантированный плюс (+0.2%)
+                            pos["wick_sl"] = round(entry * 1.002, 6)
+                            pos["breakeven_set"] = True
+                            portfolio.close_position(
+                                sym, cur_price,
+                                reason=f"🎯 TP1 Hit (+{pos['pnl_pct']:.1f}%): Фиксация 50%",
+                                partial_pct=0.50
+                            )
+                            print(f"🎯 [TP1 HIT] {sym} (LONG): Зафиксировано 50% прибыли! Стоп на остаток в плюсе (${pos['wick_sl']:.4f}).", flush=True)
+                            continue
+
+                        # 3. ТЕЙК-ПРОФИТ 2 (TP2): Фиксация еще 25% объема
+                        if pos["tp1_hit"] and not pos["tp2_hit"] and cur_price >= tp2:
+                            pos["tp2_hit"] = True
+                            portfolio.close_position(
+                                sym, cur_price,
+                                reason=f"🎯 TP2 Hit (+{pos['pnl_pct']:.1f}%): Фиксация 25%",
+                                partial_pct=0.50
+                            )
+                            print(f"🎯 [TP2 HIT] {sym} (LONG): Зафиксировано еще 25% на цели 3R!", flush=True)
+                            continue
+
+                        # 4. ТРЕЙЛИНГ-СТОП ДЛЯ ОСТАТКА (активен только после взятия TP1)
+                        if pos["tp1_hit"]:
+                            highest = pos.get("highest_price", cur_price)
+                            trailing_sl_price = round(highest * (1.0 - config.TRAILING_STOP_PCT), 6)
+                            if trailing_sl_price > pos["wick_sl"]:
+                                pos["wick_sl"] = trailing_sl_price
+                                portfolio.save()
+
+                            if cur_price <= trailing_sl_price:
+                                portfolio.close_position(
+                                    sym, cur_price,
+                                    reason=f"🚀 Trailing SL Triggered (+{pos['pnl_pct']:.1f}%)"
+                                )
+                                continue
+
+                    # ==========================================================
+                    # ЛОГИКА ВЫХОДА ДЛЯ SHORT
+                    # ==========================================================
+                    else:
+                        # 1. СТОП-ЛОСС НАД ФИТИЛЕМ (ИЛИ БЕЗУБЫТОК ПОСЛЕ TP1)
+                        if cur_price >= wick_sl:
+                            reason_label = (
+                                f"🛡️ Breakeven Exit ({pos['pnl_pct']:+.1f}%)"
+                                if pos.get("breakeven_set")
+                                else f"🛑 Stop Above Wick ({pos['pnl_pct']:+.1f}%)"
+                            )
+                            portfolio.close_position(
+                                sym, cur_price,
+                                reason=reason_label
+                            )
+                            continue
+
+                        # 2. ТЕЙК-ПРОФИТ 1 (TP1): Фиксация 50% объема (цена упала до tp1)
+                        if not pos["tp1_hit"] and cur_price <= tp1:
+                            pos["tp1_hit"] = True
+                            # После взятия крупного профита TP1 переносим стоп на остаток в гарантированный плюс (+0.2% ниже входа)
+                            pos["wick_sl"] = round(entry * 0.998, 6)
+                            pos["breakeven_set"] = True
+                            portfolio.close_position(
+                                sym, cur_price,
+                                reason=f"🎯 TP1 Hit (+{pos['pnl_pct']:.1f}%): Фиксация 50%",
+                                partial_pct=0.50
+                            )
+                            print(f"🎯 [TP1 HIT] {sym} (SHORT): Зафиксировано 50% прибыли! Стоп на остаток в плюсе (${pos['wick_sl']:.4f}).", flush=True)
+                            continue
+
+                        # 3. ТЕЙК-ПРОФИТ 2 (TP2): Фиксация еще 25% объема
+                        if pos["tp1_hit"] and not pos["tp2_hit"] and cur_price <= tp2:
+                            pos["tp2_hit"] = True
+                            portfolio.close_position(
+                                sym, cur_price,
+                                reason=f"🎯 TP2 Hit (+{pos['pnl_pct']:.1f}%): Фиксация 25%",
+                                partial_pct=0.50
+                            )
+                            print(f"🎯 [TP2 HIT] {sym} (SHORT): Зафиксировано еще 25% на цели 3R!", flush=True)
+                            continue
+
+                        # 4. ТРЕЙЛИНГ-СТОП ДЛЯ ШОРТА (следует сверху за локальным минимумом, активен после TP1)
+                        if pos["tp1_hit"]:
+                            lowest = pos.get("lowest_price", cur_price)
+                            trailing_sl_price = round(lowest * (1.0 + config.TRAILING_STOP_PCT), 6)
+                            if trailing_sl_price < pos["wick_sl"]:
+                                pos["wick_sl"] = trailing_sl_price
+                                portfolio.save()
+
+                            if cur_price >= trailing_sl_price:
+                                portfolio.close_position(
+                                    sym, cur_price,
+                                    reason=f"🚀 Trailing SL Triggered (+{pos['pnl_pct']:.1f}%)"
+                                )
+                                continue
+
+                await asyncio.sleep(2.0)
+            except Exception as e:
+                print(f"⚠️ Ошибка в ExitManager: {e}", flush=True)
+                await asyncio.sleep(2.0)
+
+exit_manager = ExitManager()

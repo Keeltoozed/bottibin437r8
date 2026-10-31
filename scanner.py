@@ -162,6 +162,8 @@ class MarketScanner:
                 "tp1": groq_eval.get("tp1", default_tp1),
                 "surge": ctx["volume_surge_ratio"],
                 "pullback": round(ctx.get("pullback_from_high_pct", 0) * 100, 2) if cand_side == "LONG" else round(ctx.get("bounce_from_low_pct", 0) * 100, 2),
+                "model": groq_eval.get("model", "unknown"),
+                "finish_reason": groq_eval.get("finish_reason", "unknown"),
                 "time": time.strftime("%H:%M:%S")
             }
             portfolio.add_evaluation(eval_entry)

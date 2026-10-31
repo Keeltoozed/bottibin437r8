@@ -19,7 +19,7 @@ class GroqEngine:
     def __init__(self):
         self.api_key = config.GROQ_API_KEY
         self.url = "https://api.groq.com/openai/v1/chat/completions"
-        self.models = ["qwen/qwen3.8-27b", config.GROQ_PRIMARY_MODEL, config.GROQ_FALLBACK_MODEL, "openai/gpt-oss-120b"]
+        self.models = ["qwen/qwen3.8-27b", "openai/gpt-oss-120b", "openai/gpt-oss-20b"]
         self._last_call_ts = 0.0
         self._lock = asyncio.Lock()
         self._eval_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}  # {symbol_side: (ts, result)}
@@ -168,33 +168,48 @@ Respond ONLY with raw valid JSON:
             payload = {
                 "model": model,
                 "messages": [
-                    {"role": "system", "content": "You are a professional prop trading execution model. You output only raw valid JSON."},
+                    {"role": "system", "content": "You are a professional prop trading execution model. You output ONLY raw valid JSON."},
                     {"role": "user", "content": prompt}
                 ],
+                "response_format": {"type": "json_object"},
                 "temperature": 0.1,
-                "max_tokens": 220
+                "max_tokens": 1500
             }
 
             try:
-                timeout = aiohttp.ClientTimeout(total=8)
+                timeout = aiohttp.ClientTimeout(total=10)
                 async with aiohttp.ClientSession(timeout=timeout) as session:
                     async with session.post(self.url, headers=headers, json=payload) as resp:
                         if resp.status == 200:
                             data = await resp.json()
-                            content = data["choices"][0]["message"]["content"]
+                            choice = data.get("choices", [{}])[0]
+                            content = choice.get("message", {}).get("content", "")
+                            finish_reason = choice.get("finish_reason", "unknown")
                             parsed = self._clean_json_response(content)
                             if parsed and "decision" in parsed:
                                 eval_result = parsed
                                 eval_result["model"] = model
+                                eval_result["finish_reason"] = finish_reason
+                                print(f"🧠 [Groq API 200] {model} успешно оценил {symbol}: {parsed.get('decision')} (уверенность: {parsed.get('confidence')})", flush=True)
                                 break
+                            else:
+                                print(f"⚠️ [Groq API Warning] {model} вернул невалидный JSON (finish_reason={finish_reason}): {content[:100]}", flush=True)
                         elif resp.status == 429:
+                            print(f"⚠️ [Groq API 429] Rate limit hit на модели {model}", flush=True)
+                            continue
+                        else:
+                            err_txt = await resp.text()
+                            print(f"⚠️ [Groq API Error {resp.status}] {model}: {err_txt[:120]}", flush=True)
                             continue
             except Exception as e:
+                print(f"⚠️ [Groq Connection Error] {model}: {e}", flush=True)
                 continue
 
         if not eval_result:
+            print(f"⚠️ [Groq Fallback] Все модели недоступны для {symbol}, применен аварийный алгоритм fallback", flush=True)
             eval_result = self._algorithmic_eval(context)
             eval_result["model"] = "algorithmic_fallback"
+            eval_result["finish_reason"] = "fallback"
 
         eval_result["timestamp"] = now
         eval_result["symbol"] = symbol

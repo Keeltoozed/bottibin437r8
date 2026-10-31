@@ -165,15 +165,42 @@ class BinanceClient:
         recent_low = min(c["low"] for c in candles[-5:])
         bounce_from_low_pct = round((last_c["close"] - recent_low) / max(recent_low, 1e-9), 4)
 
+        # ======================================================================
+        # РАСЧЕТ ATR-14 (Average True Range) ДЛЯ ФИЛЬТРАЦИИ СЛУЧАЙНОГО ШУМА
+        # ======================================================================
+        true_ranges = []
+        for i in range(1, len(candles)):
+            c_curr = candles[i]
+            c_prev = candles[i-1]
+            tr = max(
+                c_curr["high"] - c_curr["low"],
+                abs(c_curr["high"] - c_prev["close"]),
+                abs(c_curr["low"] - c_prev["close"])
+            )
+            true_ranges.append(tr)
+
+        atr14 = (sum(true_ranges[-14:]) / min(len(true_ranges), 14)) if true_ranges else candle_range
+        atr14_pct = round(atr14 / last_c["close"], 4)
+
         # Скальп-стоп за фитилем: локальный экстремум последних 2 свечей (текущая + предыдущая)
         recent_wick_low = min(c["low"] for c in candles[-2:])
-        wick_stop_loss = round(recent_wick_low * (1.0 - config.WICK_BUFFER_PCT), 6)
-        sl_pct_distance = round((last_c["close"] - wick_stop_loss) / last_c["close"], 4)
+        raw_wick_sl = round(recent_wick_low * (1.0 - config.WICK_BUFFER_PCT), 6)
+        raw_sl_pct = (last_c["close"] - raw_wick_sl) / last_c["close"]
 
         # Расчет параметров для SHORT (стоп над верхним фитилем)
         recent_wick_high = max(c["high"] for c in candles[-2:])
-        short_wick_stop_loss = round(recent_wick_high * (1.0 + config.WICK_BUFFER_PCT), 6)
-        short_sl_pct_distance = round((short_wick_stop_loss - last_c["close"]) / last_c["close"], 4)
+        raw_short_sl = round(recent_wick_high * (1.0 + config.WICK_BUFFER_PCT), 6)
+        raw_short_sl_pct = (raw_short_sl - last_c["close"]) / last_c["close"]
+
+        # Институциональный стоп-лосс: max(за_фитиль, 1.0 * ATR14, 0.4%)
+        # Защищает позицию от выбивания микро-шумом одной 5m свечи!
+        safe_long_sl_pct = round(min(max(raw_sl_pct, atr14_pct, 0.004), config.MAX_ALLOWED_SL_PCT), 4)
+        wick_stop_loss = round(last_c["close"] * (1.0 - safe_long_sl_pct), 6)
+        sl_pct_distance = safe_long_sl_pct
+
+        safe_short_sl_pct = round(min(max(raw_short_sl_pct, atr14_pct, 0.004), config.MAX_ALLOWED_SL_PCT), 4)
+        short_wick_stop_loss = round(last_c["close"] * (1.0 + safe_short_sl_pct), 6)
+        short_sl_pct_distance = safe_short_sl_pct
 
         pct_5m = round((candles[-1]["close"] - candles[-2]["close"]) / candles[-2]["close"] * 100, 2)
         pct_15m = round((candles[-1]["close"] - candles[-4]["close"]) / candles[-4]["close"] * 100, 2) if len(candles) >= 4 else pct_5m
@@ -241,7 +268,8 @@ class BinanceClient:
             "rsi": rsi,
             "ema9": ema9,
             "ema21": ema21,
-            "trend": trend
+            "trend": trend,
+            "atr14_pct": atr14_pct
         }
 
     async def fetch_btc_regime(self) -> Dict[str, Any]:
@@ -303,6 +331,24 @@ class BinanceClient:
         except (ValueError, TypeError):
             pass
         return 0.0, 0.0, 1.0
+
+    async def fetch_recent_high_low(self, symbol: str, limit: int = 12) -> Optional[Tuple[float, float, float]]:
+        """
+        Возвращает (current_price, max_high, min_low) за последние limit 5m свечей.
+        Гарантирует, что даже кратковременный всплеск или пролив цены не будет упущен.
+        """
+        raw = await self._request_with_fallback("klines", params={"symbol": symbol, "interval": "5m", "limit": limit})
+        if not raw or not isinstance(raw, list):
+            return None
+        try:
+            highs = [float(c[2]) for c in raw if len(c) > 4]
+            lows = [float(c[3]) for c in raw if len(c) > 4]
+            cur = float(raw[-1][4])
+            if highs and lows:
+                return cur, max(highs), min(lows)
+        except Exception:
+            pass
+        return None
 
 # Глобальный экземпляр клиента
 binance_client = BinanceClient()

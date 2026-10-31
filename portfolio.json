@@ -1,1 +1,22 @@
-{}
+{
+  "cash": 20.0,
+  "initial_balance": 20.0,
+  "open_positions": {},
+  "trade_history": [],
+  "recent_evaluations": [],
+  "shadow_trades": [],
+  "funnel_stats": {
+    "universe": 0,
+    "gate_failed": 0,
+    "cooldown_blocked": 0,
+    "btc_blocked": 0,
+    "hard_gates": 0,
+    "groq_evaluated": 0,
+    "groq_skip": 0,
+    "low_conf": 0,
+    "passed": 0,
+    "filled": 0
+  },
+  "is_paused": false,
+  "current_leverage": 60
+}

@@ -372,6 +372,11 @@ with tab_radar:
                 with rc1:
                     st.markdown(f"**{ev['symbol']}** — {ev['time']}", unsafe_allow_html=True)
                     st.markdown(badge, unsafe_allow_html=True)
+                    m_name = ev.get('model', 'unknown')
+                    if 'fallback' in m_name:
+                        st.caption("🟡 Резервный fallback")
+                    else:
+                        st.caption(f"🟢 ИИ: {m_name.split('/')[-1]}")
                 with rc2:
                     st.metric("Уверенность AI", f"{conf}%")
                     st.caption(f"Всплеск: {ev.get('surge', 1)}x | Откат: {ev.get('pullback', 0)}%")
@@ -445,8 +450,28 @@ with tab_shadow:
         st.info("Пока нет отклонённых сетапов.")
     else:
         sdf = pd.DataFrame(portfolio.shadow_trades[:30])
-        cols = [c for c in ["symbol", "side", "rejected_at_price", "current_price", "price_change_pct", "outcome", "reason", "time"] if c in sdf.columns]
-        st.dataframe(sdf[cols], use_container_width=True)
+        desired_cols = [
+            ("symbol", "Монета"),
+            ("side", "Направление"),
+            ("rejected_at_price", "Вход (отсев)"),
+            ("current_price", "Текущая"),
+            ("price_change_pct", "Текущее (%)"),
+            ("max_profit_pct", "Пик взлета (%)"),
+            ("max_loss_pct", "Макс. просадка (%)"),
+            ("change_15m_pct", "15м (%)"),
+            ("change_1h_pct", "1ч (%)"),
+            ("change_2h_pct", "2ч (%)"),
+            ("change_3h_pct", "3ч (%)"),
+            ("change_4h_pct", "4ч (%)"),
+            ("change_5h_pct", "5ч (%)"),
+            ("outcome", "Исход"),
+            ("reason", "Причина отказа Groq"),
+            ("time", "Время")
+        ]
+        available_cols = [col for col, name in desired_cols if col in sdf.columns]
+        rename_map = {col: name for col, name in desired_cols if col in sdf.columns}
+        display_df = sdf[available_cols].rename(columns=rename_map)
+        st.dataframe(display_df, use_container_width=True)
 
 # ------------------------------------------------------------------------------
 # 6. TIME MACHINE (БЭКТЕСТ ЗА НЕДЕЛЮ ПО МЕТОДОЛОГИИ DAY-TRADER-SKILL)
