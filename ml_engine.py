@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 import joblib
 from typing import Dict, Any, Tuple, Optional
+import config
 
 class QuantMLEngine:
     """
@@ -41,7 +42,7 @@ class QuantMLEngine:
                 payload = joblib.load(self.model_path)
                 self.model = payload["model"]
                 self.feature_cols = payload["feature_cols"]
-                self.threshold = payload.get("threshold", 0.60)
+                self.threshold = float(getattr(config, "ML_CONFIDENCE_THRESHOLD", payload.get("threshold", 0.68)))
                 self.winrate = payload.get("winrate", 0.0)
                 self.profit_factor = payload.get("profit_factor", 0.0)
                 print(f"✅ [ML Engine] Обученная модель загружена: WR {self.winrate:.1f}%, PF {self.profit_factor:.2f}", flush=True)
@@ -59,7 +60,7 @@ class QuantMLEngine:
                 payload = joblib.load(self.model_path)
                 self.model = payload["model"]
                 self.feature_cols = payload["feature_cols"]
-                self.threshold = payload.get("threshold", 0.60)
+                self.threshold = float(getattr(config, "ML_CONFIDENCE_THRESHOLD", payload.get("threshold", 0.68)))
                 self.winrate = payload.get("winrate", 0.0)
                 self.profit_factor = payload.get("profit_factor", 0.0)
                 print(f"✅ [ML Engine] Авто-обучение завершено! Модель готова: WR {self.winrate:.1f}%, PF {self.profit_factor:.2f}", flush=True)
@@ -147,17 +148,40 @@ class QuantMLEngine:
             X = np.array([row])
 
             probs = self.model.predict_proba(X)[0]
-            prob_win = float(probs[1]) if len(probs) > 1 else float(probs[0])
+            raw_prob_win = float(probs[1]) if len(probs) > 1 else float(probs[0])
+            prob_win = raw_prob_win
+
+            # 1. ЗАЩИТА ОТ ЭКСТРАПОЛЯЦИИ В СПЯЩЕМ СТАКАНЕ (Chop Penalty):
+            # Модель обучалась на импульсных фазах. В спящем боковике она не должна выдавать ложные 80%+
+            penalties = []
+            if vol_surge < 1.30 and abs(p5m) < 0.0030:
+                prob_win = min(prob_win, 0.52)
+                penalties.append("сонный объем < 1.30x")
+
+            # 2. РИСК-ГАРМОНИЗАЦИЯ ПОД 60x ПЛЕЧО (Risk-Aware Scoring):
+            # Если реальная тень свечи требует стоп шире 0.75%, при 60x плече это риск мгновенной потери -70%..-100% маржи.
+            # Штрафуем вероятность, чтобы монеты с опасными стопами не висели в топе радара с ложными 80%.
+            side_check = context.get("candidate_side", "LONG")
+            sl_dist = context.get("sl_pct_distance", 0.0) if side_check == "LONG" else context.get("short_sl_dist", 0.0)
+            max_sl_cap = getattr(config, "MAX_ALLOWED_SL_PCT", 0.0075)
+            if sl_dist > max_sl_cap:
+                prob_win = min(prob_win, 0.49)
+                penalties.append(f"опасный стоп ({sl_dist*100:.2f}% > {max_sl_cap*100:.2f}%)")
 
             approved = prob_win >= self.threshold
+            reason_str = f"ML Вероятность: {int(prob_win*100)}% (порог {int(self.threshold*100)}%)"
+            if penalties:
+                reason_str += f" | {', '.join(penalties)}"
+
             return {
                 "ml_active": True,
                 "ml_probability": round(prob_win, 3),
+                "raw_ml_probability": round(raw_prob_win, 3),
                 "ml_approved": approved,
                 "threshold": self.threshold,
                 "winrate_backtest": self.winrate,
                 "profit_factor": self.profit_factor,
-                "reason": f"ML Вероятность: {int(prob_win*100)}% (порог {int(self.threshold*100)}%)"
+                "reason": reason_str
             }
         except Exception as e:
             return {

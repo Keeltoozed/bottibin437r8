@@ -81,42 +81,51 @@ BREAKEVEN_TRIGGER_RATIO = 0.40
 ENABLE_MOMENTUM_DEATH_EXIT = True
 
 # ==============================================================================
-# 5. MARKET SCANNER & ELITE CRYPTO WHITELIST (EXCLUSIVE PROP UNIVERSE)
+# 5. MARKET SCANNER & BROAD CRYPTO UNIVERSE (TOP 130+ ACTIVE COINS)
 # ==============================================================================
-MIN_24H_VOLUME_USDT = float(os.getenv("MIN_24H_VOLUME_USDT", "50000000"))  # $50M
+# Снижен минимальный суточный объем с $50M до $8M, чтобы ловить взрывные импульсы на 130+ монетах!
+MIN_24H_VOLUME_USDT = float(os.getenv("MIN_24H_VOLUME_USDT", "8000000"))  # $8M
+SCAN_TICKERS_LIMIT = int(os.getenv("SCAN_TICKERS_LIMIT", "130"))  # Сканируем 130 самых активных пар Binance
+STRICT_WHITELIST_ONLY = os.getenv("STRICT_WHITELIST_ONLY", "false").lower() == "true"  # Динамический отбор всех ликвидных пар
+ML_CONFIDENCE_THRESHOLD = float(os.getenv("ML_CONFIDENCE_THRESHOLD", "0.68"))  # 68% уверенность модели для входа
 
-# Жесткий режим белого списка: бот торгует ИСКЛЮЧИТЕЛЬНО проверенный топ-тир крипторынка.
-# Любой случайный токен, хакнутый протокол (как INIT) или щиткоин на 100% заблокирован!
-STRICT_WHITELIST_ONLY = True
-
-# Элитный институциональный юниверс проверенных криптовалют (высочайшая ликвидность, без скам-фитилей и хаков)
+# Элитный юниверс криптовалют (160+ проверенных монет)
 TOP_CRYPTO_UNIVERSE = [
     # Топ-10 Мажоры и L1 гиганты
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT", "ADAUSDT", "TRXUSDT", "AVAXUSDT", "SUIUSDT",
     # Топ L1/L2 и инфраструктурные лидеры
     "NEARUSDT", "LINKUSDT", "APTUSDT", "RENDERUSDT", "TIAUSDT", "SEIUSDT", "ENAUSDT", "JUPUSDT", "INJUSDT", "AAVEUSDT",
     "DOTUSDT", "LTCUSDT", "BCHUSDT", "OPUSDT", "ARBUSDT", "FILUSDT", "STXUSDT", "ONDOUSDT", "WLDUSDT", "TAOUSDT", "TONUSDT",
-    "ATOMUSDT", "XLMUSDT", "ETCUSDT", "KASUSDT", "ALGOUSDT", "THETAUSDT", "KAVAUSDT", "ZECUSDT", "XMRUSDT",
+    "ATOMUSDT", "XLMUSDT", "ETCUSDT", "KASUSDT", "ALGOUSDT", "THETAUSDT", "KAVAUSDT", "ZECUSDT", "XMRUSDT", "FTMUSDT", "EGLDUSDT",
     # Высоколиквидные мемкоины и импульсные активы
     "PEPEUSDT", "1000PEPEUSDT", "WIFUSDT", "SHIBUSDT", "1000SHIBUSDT", "BONKUSDT", "1000BONKUSDT", "FLOKIUSDT", "1000FLOKIUSDT",
-    "BOMEUSDT", "MEMEUSDT", "TURBOUSDT", "1000SATSUSDT", "NEIROUSDT", "PENGUUSDT",
+    "BOMEUSDT", "MEMEUSDT", "TURBOUSDT", "1000SATSUSDT", "NEIROUSDT", "PENGUUSDT", "POPCATUSDT", "MEWUSDT", "BRETTUSDT",
+    "MOODENGUSDT", "GOATUSDT", "ACTUSDT", "PNUTUSDT", "COWUSDT", "CETUSUSDT", "GRASSUSDT", "DRIFTUSDT", "VIRTUALUSDT", "AIXBTUSDT",
+    "DOGSUSDT", "NOTUSDT", "HMSTRUSDT", "CATIUSDT", "SLERFUSDT",
     # Топ DeFi, AI и Web3
-    "FETUSDT", "UNIUSDT", "PENDLEUSDT", "ZROUSDT", "STRKUSDT", "PYTHUSDT", "JTOUSDT", "NOTUSDT", "BLURUSDT",
+    "FETUSDT", "UNIUSDT", "PENDLEUSDT", "ZROUSDT", "STRKUSDT", "PYTHUSDT", "JTOUSDT", "BLURUSDT",
     "GALAUSDT", "SANDUSDT", "MANAUSDT", "AXSUSDT", "CHZUSDT", "DYDXUSDT", "GMXUSDT", "LDOUSDT", "RAYUSDT", "ORDIUSDT",
-    "BEAMXUSDT", "HYPEUSDT", "QNTUSDT"
+    "BEAMXUSDT", "HYPEUSDT", "QNTUSDT", "AINUSDT", "LSKUSDT", "QUSDT", "SOPHUSDT", "INTWUSDT", "BTWUSDT", "PUMPUSDT",
+    "BLESSUSDT", "AIOTUSDT", "MAGMAUSDT", "PARTIUSDT", "ETHFIUSDT", "REZUSDT", "BBUSDT", "IOUSDT", "ZKUSDT", "LISTAUSDT",
+    "WUSDT", "OMUSDT", "KAIAUSDT", "SAGAUSDT", "TNSRUSDT", "SAFEUSDT", "KMNOUSDT", "TRUUSDT", "LQTYUSDT", "SPELLUSDT",
+    "GASUSDT", "ARKUSDT", "LOOMUSDT", "HIFIUSDT", "POLUSDT", "BIGTIMEUSDT", "SUPERUSDT", "ARKMUSDT", "AIUSDT", "NFPUSDT",
+    "GLMUSDT", "ATHUSDT", "ARUSDT", "HNTUSDT", "MOBILEUSDT", "IOTXUSDT", "AIOZUSDT", "RONINUSDT", "METISUSDT", "MANTAUSDT", "SCRUSDT"
 ]
 
-# Черный список на случай любых попыток обращения
+# Черный список: стейблкоины, фиат, хаки и синтетические акции
 EXCLUDED_TICKERS = {
-    "INITUSDT", "CRVUSDT", "MEGAUSDT", "AVAUSDT", "SOLVUSDT", "BIRBUSDT",
-    "USDCUSDT", "FDUSDUSDT", "TUSDUSDT", "BUSDUSDT", "EURUSDT", "DAIUSDT", "USTCUSDT",
-    "PAXGUSDT", "XAUUSDT", "XAGUSDT", "SOXLUSDT", "INTCUSDT", "SNDKUSDT", "NVDAUSDT", 
-    "TSLAUSDT", "AAPLUSDT", "AMZNUSDT", "MSFTUSDT", "COINBUSDT"
+    # Стейблкоины и фиат
+    "USDCUSDT", "FDUSDUSDT", "TUSDUSDT", "BUSDUSDT", "EURUSDT", "DAIUSDT", "USTCUSDT", "PAXGUSDT", "XAUUSDT", "XAGUSDT",
+    # Традиционные акции и ETF
+    "GOOGLUSDT", "MSTRUSDT", "QQQUSDT", "MUUSDT", "SOXSUSDT", "SPYUSDT", "NVDAUSDT", 
+    "TSLAUSDT", "AAPLUSDT", "AMZNUSDT", "MSFTUSDT", "COINBUSDT", "SOXLUSDT", "INTCUSDT", "SNDKUSDT",
+    "SKHYNIXUSDT", "SKHYUSDT", "KORUUSDT", "SPCXUSDT", "AKEUSDT", "CRCLUSDT",
+    # Хакнутые/проблемные токены
+    "INITUSDT", "CRVUSDT", "MEGAUSDT", "AVAUSDT", "SOLVUSDT", "BIRBUSDT"
 }
 MIN_5M_VOLUME_SURGE_RATIO = float(os.getenv("MIN_5M_VOLUME_SURGE_RATIO", "1.50"))  # 1.50x реальный всплеск объёма
 MIN_5M_PRICE_IMPULSE_PCT = float(os.getenv("MIN_5M_PRICE_IMPULSE_PCT", "0.55"))  # 0.55% четкий импульс свечи (отсекает сонные боковики)
 MAX_SPREAD_PCT = float(os.getenv("MAX_SPREAD_PCT", "0.0015"))  # 0.15% max spread
-SCAN_TICKERS_LIMIT = int(os.getenv("SCAN_TICKERS_LIMIT", "100"))  # Сканируем топ-100 волатильных пар
 SCAN_INTERVAL_SECONDS = int(os.getenv("SCAN_INTERVAL_SECONDS", "10"))
 PAIR_COOLDOWN_MINUTES = int(os.getenv("PAIR_COOLDOWN_MINUTES", "5"))
 

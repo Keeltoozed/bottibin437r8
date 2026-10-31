@@ -64,8 +64,11 @@ class MarketScanner:
         async def check_ticker(t: Dict[str, Any]) -> Any:
             sym = t["symbol"]
 
-            # Строгий белый список: мгновенно отсекаем любой неизвестный токен или токен из черного списка
-            if sym not in getattr(config, "TOP_CRYPTO_UNIVERSE", []) or sym in getattr(config, "EXCLUDED_TICKERS", set()):
+            # Проверка белого и черного списков
+            strict = getattr(config, "STRICT_WHITELIST_ONLY", False)
+            if strict and sym not in getattr(config, "TOP_CRYPTO_UNIVERSE", []):
+                return None
+            if sym in getattr(config, "EXCLUDED_TICKERS", set()):
                 return None
 
             # Проверка кулдауна и открытых позиций
@@ -144,18 +147,26 @@ class MarketScanner:
 
             # Защита от опасных стопов (не более 0.75% для 60x плеча)
             if sl_dist > config.MAX_ALLOWED_SL_PCT:
+                if should_log:
+                    print(f"🛑 [СТОП-ФИЛЬТР] {sym} ({side}) ML {int(prob*100)}% отклонен: стоп {sl_dist*100:.2f}% > {config.MAX_ALLOWED_SL_PCT*100:.2f}% (риск -{int(sl_dist*config.LEVERAGE*100)}% маржи при {config.LEVERAGE}x)", flush=True)
                 continue
 
             # Проверка BTC-фильтра
             if side == "LONG" and btc_regime.get("is_dumping", False):
                 portfolio.funnel_stats["btc_blocked"] = portfolio.funnel_stats.get("btc_blocked", 0) + 1
+                if should_log:
+                    print(f"🛑 [BTC БЛОК] {sym} LONG ML {int(prob*100)}% отклонен: BTC сбрасывается", flush=True)
                 continue
             if side == "SHORT" and btc_regime.get("is_pumping", False):
                 portfolio.funnel_stats["btc_blocked"] = portfolio.funnel_stats.get("btc_blocked", 0) + 1
+                if should_log:
+                    print(f"🛑 [BTC БЛОК] {sym} SHORT ML {int(prob*100)}% отклонен: BTC растет", flush=True)
                 continue
 
             # Проверка минимальной активности (не спим в мертвом стакане)
             if surge < 1.30 and abs(pct_5m) < 0.30:
+                if should_log:
+                    print(f"🛑 [НЕТ ИМПУЛЬСА] {sym} ({side}) ML {int(prob*100)}% отклонен: всплеск {surge:.2f}x < 1.30x и ход 5m {pct_5m:+.2f}% < 0.30%", flush=True)
                 continue
 
             candidates_to_eval.append(cand)

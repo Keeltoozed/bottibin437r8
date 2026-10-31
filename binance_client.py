@@ -76,39 +76,51 @@ class BinanceClient:
     async def fetch_top_tickers(self, min_vol_usdt: float = config.MIN_24H_VOLUME_USDT, limit: int = config.SCAN_TICKERS_LIMIT) -> List[Dict[str, Any]]:
         """
         Формирует институциональный торговый радар:
-        Торгует ИСКЛЮЧИТЕЛЬНО утвержденный белый список топ-активов (BTC, ETH, SOL, SUI, DOGE, NEAR, RENDER...).
-        Любые случайные монеты, хаки/эксплойты протоколов (как INIT) на 100% заблокированы.
+        Сканирует самые ликвидные и волатильные пары Binance Futures (исключая стейблкоины и синтетические акции).
         """
         data = await self._request_with_fallback("ticker24")
         if not data or not isinstance(data, list):
             return []
 
-        item_map = {item.get("symbol", ""): item for item in data if isinstance(item, dict) and "symbol" in item}
-        selected = []
         excluded = getattr(config, "EXCLUDED_TICKERS", set())
+        strict = getattr(config, "STRICT_WHITELIST_ONLY", False)
+        whitelist = set(getattr(config, "TOP_CRYPTO_UNIVERSE", []))
 
-        # Сканируем ИСКЛЮЧИТЕЛЬНО утвержденный элитный белый список
-        for sym in getattr(config, "TOP_CRYPTO_UNIVERSE", []):
-            if sym in item_map and sym not in excluded:
-                item = item_map[sym]
-                try:
-                    vol = float(item.get("quoteVolume", 0) or 0)
-                    pct = float(item.get("priceChangePercent", 0) or 0)
-                    last_p = float(item.get("lastPrice", 0) or 0)
-                    high_p = float(item.get("highPrice", 0) or 0)
-                    low_p = float(item.get("lowPrice", 0) or 0)
-                    if last_p > 0:
-                        selected.append({
-                            "symbol": sym,
-                            "price": last_p,
-                            "volume_24h": vol,
-                            "price_change_24h_pct": pct,
-                            "high_24h": high_p,
-                            "low_24h": low_p
-                        })
-                except (ValueError, TypeError):
+        selected = []
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            sym = item.get("symbol", "")
+            if not sym.endswith("USDT"):
+                continue
+            if sym in excluded:
+                continue
+            if strict and sym not in whitelist:
+                continue
+
+            try:
+                vol = float(item.get("quoteVolume", 0) or 0)
+                if vol < min_vol_usdt:
                     continue
+                last_p = float(item.get("lastPrice", 0) or 0)
+                if last_p <= 0:
+                    continue
+                pct = float(item.get("priceChangePercent", 0) or 0)
+                high_p = float(item.get("highPrice", 0) or 0)
+                low_p = float(item.get("lowPrice", 0) or 0)
+                selected.append({
+                    "symbol": sym,
+                    "price": last_p,
+                    "volume_24h": vol,
+                    "price_change_24h_pct": pct,
+                    "high_24h": high_p,
+                    "low_24h": low_p
+                })
+            except (ValueError, TypeError):
+                continue
 
+        # Сортируем по суточному объему (самые ликвидные и активные в топе)
+        selected.sort(key=lambda x: x["volume_24h"], reverse=True)
         return selected[:limit]
 
     async def fetch_candles_analysis(self, symbol: str, interval: str = "5m", limit: int = 30) -> Optional[Dict[str, Any]]:

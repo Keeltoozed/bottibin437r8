@@ -371,21 +371,29 @@ with tab_radar:
             p_val = item.get("ml_prob", 0.0) * 100
             side_val = item.get("candidate_side", "LONG")
             side_str = "🟢 LONG" if side_val == 'LONG' else "🔻 SHORT"
-            if p_val >= 70.0:
-                stat_str = "🔥 A+ Кандидат"
+            sl_dist = item.get("sl_pct_distance", 0.0) if side_val == "LONG" else item.get("short_sl_dist", 0.0)
+            sl_pct = sl_dist * 100
+            
+            raw_reason = item.get("ml_reason", "")
+            if "опасный стоп" in raw_reason:
+                stat_str = f"❌ Опасный стоп ({sl_pct:.2f}% > 0.75%)"
+            elif "сонный объем" in raw_reason:
+                stat_str = "💤 Нет объёма (< 1.30x)"
+            elif p_val >= 70.0:
+                stat_str = "🔥 A+ Сетап (Проходит)"
             elif p_val >= 50.0:
                 stat_str = "⚡ В наблюдении"
             else:
-                stat_str = "💤 Боковик/Шум"
+                stat_str = "💤 Боковик"
                 
             rows_ml.append({
                 "Монета": item.get("symbol"),
                 "Сторона": side_str,
                 "Вероятность ML": f"{p_val:.1f}%",
+                "Дистанция SL": f"{sl_pct:.2f}%",
                 "Всплеск объема": f"{item.get('volume_surge_ratio', 1.0):.2f}x",
                 "Импульс 5m": f"{item.get('pct_5m', 0.0):+.2f}%",
                 "RSI": f"{item.get('rsi', 50.0):.1f}",
-                "Тренд": item.get("trend", "CHOP"),
                 "Статус": stat_str
             })
         st.dataframe(pd.DataFrame(rows_ml), width="stretch")

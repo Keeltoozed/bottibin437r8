@@ -1,22 +1,53 @@
 {
   "cash": 20.0,
   "initial_balance": 20.0,
+  "current_leverage": 60,
   "open_positions": {},
   "trade_history": [],
-  "recent_evaluations": [],
-  "shadow_trades": [],
   "funnel_stats": {
-    "universe": 0,
+    "universe": 200,
     "gate_failed": 0,
     "cooldown_blocked": 0,
     "btc_blocked": 0,
-    "hard_gates": 0,
-    "groq_evaluated": 0,
+    "hard_gates": 200,
+    "groq_evaluated": 1,
     "groq_skip": 0,
-    "low_conf": 0,
+    "low_conf": 1,
     "passed": 0,
     "filled": 0
   },
+  "recent_evaluations": [
+    {
+      "symbol": "STRKUSDT",
+      "side": "LONG",
+      "price": 0.04568,
+      "decision": "BUY",
+      "confidence": 0.73,
+      "ml_prob": 73.8,
+      "reason": "Strong bullish trend, real volume conviction, and strict base selection criteria met.",
+      "sl": 0.045351,
+      "tp1": 0.0466,
+      "surge": 0.78,
+      "pullback": -0.8,
+      "model": "allam-2-7b",
+      "finish_reason": "stop",
+      "time": "17:43:01"
+    }
+  ],
+  "shadow_trades": [
+    {
+      "symbol": "STRKUSDT",
+      "side": "LONG",
+      "rejected_at_price": 0.04568,
+      "current_price": 0.04568,
+      "price_change_pct": 0.0,
+      "outcome": "Ожидание хода...",
+      "reason": "Strong bullish trend, real volume conviction, and strict base selection criteria met.",
+      "time": "17:43:01",
+      "timestamp": 1793461381.526283,
+      "score": 0.73
+    }
+  ],
   "is_paused": false,
-  "current_leverage": 60
+  "last_updated": 1793461381.5262878
 }
