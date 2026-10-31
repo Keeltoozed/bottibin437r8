@@ -362,11 +362,42 @@ with tab_pos:
 # 2. GROQ LIVE RADAR (ОЦЕНКА МОНЕТ)
 # ------------------------------------------------------------------------------
 with tab_radar:
-    st.subheader("🤖 Живой радар Groq (Оценки сетапов в реальном времени)")
-    st.caption("Каждые несколько секунд бот опрашивает Groq через JEV Engine. Здесь отображается вердикт и объяснение AI.")
+    st.subheader("🧠 Живой радар Quant ML (Оценка всех 72 пар рынка)")
+    st.caption("Квантовая модель XGBoost непрерывно сканирует каждую пару на Binance Futures и оценивает 30 институциональных факторов в реальном времени.")
+    
+    if getattr(portfolio, "live_ml_ranking", None):
+        rows_ml = []
+        for item in portfolio.live_ml_ranking[:15]:
+            p_val = item.get("ml_prob", 0.0) * 100
+            side_val = item.get("candidate_side", "LONG")
+            side_str = "🟢 LONG" if side_val == 'LONG' else "🔻 SHORT"
+            if p_val >= 70.0:
+                stat_str = "🔥 A+ Кандидат"
+            elif p_val >= 50.0:
+                stat_str = "⚡ В наблюдении"
+            else:
+                stat_str = "💤 Боковик/Шум"
+                
+            rows_ml.append({
+                "Монета": item.get("symbol"),
+                "Сторона": side_str,
+                "Вероятность ML": f"{p_val:.1f}%",
+                "Всплеск объема": f"{item.get('volume_surge_ratio', 1.0):.2f}x",
+                "Импульс 5m": f"{item.get('pct_5m', 0.0):+.2f}%",
+                "RSI": f"{item.get('rsi', 50.0):.1f}",
+                "Тренд": item.get("trend", "CHOP"),
+                "Статус": stat_str
+            })
+        st.dataframe(pd.DataFrame(rows_ml), width="stretch")
+    else:
+        st.info("Квантовый ML сканер собирает метрики по парам рынка...")
+
+    st.markdown("---")
+    st.subheader("🤖 Решения Groq AI (JEV Engine)")
+    st.caption("Сюда передаются только монеты, получившие высокий математический перевес от модели ML.")
     
     if not portfolio.recent_evaluations:
-        st.info("Ожидание первых данных от сканера...")
+        st.info("Ожидание одобренных сетапов от квантовой модели...")
     else:
         for ev in portfolio.recent_evaluations[:15]:
             dec = ev.get('decision', 'SKIP')

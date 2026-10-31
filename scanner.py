@@ -82,80 +82,87 @@ class MarketScanner:
                     portfolio.funnel_stats["gate_failed"] = portfolio.funnel_stats.get("gate_failed", 0) + 1
                     return None
 
-                # 3. HARD GATE: Анализ свечей и объема (Институциональные фильтры A+)
+                # 3. Получаем 5m свечной анализ
                 analysis = await binance_client.fetch_candles_analysis(sym, interval="5m", limit=30)
                 if not analysis:
                     return None
 
-                surge = analysis["volume_surge_ratio"]
-                pct_5m = analysis["pct_5m"]
-                pct_15m = analysis.get("pct_15m", pct_5m)
-                sl_dist = analysis["sl_pct_distance"]
-                short_sl_dist = analysis.get("short_sl_dist", 0.05)
-                pullback = analysis.get("pullback_from_high_pct", 0.0)
-                bounce = analysis.get("bounce_from_low_pct", 0.0)
-                upper_wick = analysis.get("upper_wick_pct", 0.0)
-                lower_wick = analysis.get("lower_wick_pct", 0.0)
-                rsi = analysis.get("rsi", 50.0)
-                trend = analysis.get("trend", "CHOP")
+                # 4. НЕПРЕРЫВНЫЙ КВАНТОВЫЙ ML СКОРИНГ КАЖДОЙ ПАРЫ (XGBoost Alpha):
+                # Оцениваем монету на 30 институциональных факторов на LONG и на SHORT!
+                cand_long = {**t, **analysis, "candidate_side": "LONG"}
+                cand_short = {**t, **analysis, "candidate_side": "SHORT"}
 
-                # Базовый институциональный фильтр кандидатов для Groq AI:
-                # ОБЯЗАТЕЛЬНЫЙ всплеск объема (>= 1.5x) и РЕАЛЬНЫЙ 5m импульс (>= 0.40%)
-                has_vol = surge >= config.MIN_VOLUME_SURGE
-                has_long_momentum = pct_5m >= config.MIN_IMPULSE_PCT
-                has_short_momentum = pct_5m <= -config.MIN_IMPULSE_PCT
+                res_l = ml_engine.evaluate_candidate(cand_long)
+                res_s = ml_engine.evaluate_candidate(cand_short)
 
-                is_long_cand = has_vol and has_long_momentum and sl_dist <= config.MAX_ALLOWED_SL_PCT and trend != "BEARISH"
-                is_short_cand = config.ENABLE_SHORT and has_vol and has_short_momentum and short_sl_dist <= config.MAX_ALLOWED_SL_PCT and trend != "BULLISH"
+                # Выбираем сторону с наивысшей квантовой вероятностью
+                if res_l.get("ml_probability", 0.0) >= res_s.get("ml_probability", 0.0):
+                    chosen = cand_long
+                    ml_res = res_l
+                    side = "LONG"
+                else:
+                    chosen = cand_short
+                    ml_res = res_s
+                    side = "SHORT"
 
-                # Проверка BTC-фильтра
-                if is_long_cand and btc_regime.get("is_dumping", False):
-                    portfolio.funnel_stats["btc_blocked"] = portfolio.funnel_stats.get("btc_blocked", 0) + 1
-                    return None
-                if is_short_cand and btc_regime.get("is_pumping", False):
-                    portfolio.funnel_stats["btc_blocked"] = portfolio.funnel_stats.get("btc_blocked", 0) + 1
-                    return None
-
-                is_long = is_long_cand and not btc_regime.get("is_dumping", False)
-                is_short = is_short_cand and not btc_regime.get("is_pumping", False)
-
-                if not is_long and not is_short:
-                    portfolio.funnel_stats["gate_failed"] = portfolio.funnel_stats.get("gate_failed", 0) + 1
-                    return None
-
-                if is_long:
-                    print(f"🔥 [КАНДИДАТ - LONG] {sym}: всплеск {surge}x, +{pct_5m:.2f}%, 15m: +{pct_15m:.2f}%, RSI {rsi:.1f}...", flush=True)
-                    return {**t, **analysis, "candidate_side": "LONG", "btc_regime": btc_regime.get("status_str", "Neutral")}
-                elif is_short:
-                    print(f"🔻 [КАНДИДАТ - SHORT] {sym}: всплеск {surge}x, {pct_5m:.2f}%, 15m: {pct_15m:.2f}%, RSI {rsi:.1f}...", flush=True)
-                    return {**t, **analysis, "candidate_side": "SHORT", "btc_regime": btc_regime.get("status_str", "Neutral")}
-                return None
+                chosen["candidate_side"] = side
+                chosen["ml_prob"] = ml_res.get("ml_probability", 0.5)
+                chosen["ml_reason"] = ml_res.get("reason", "")
+                chosen["ml_approved"] = ml_res.get("ml_approved", False)
+                chosen["btc_regime"] = btc_regime.get("status_str", "Neutral")
+                return chosen
 
         tasks = [check_ticker(t) for t in tickers]
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        candidates_passed_hard = [r for r in results if r and isinstance(r, dict)]
+        all_scored = [r for r in results if r and isinstance(r, dict)]
+        portfolio.funnel_stats["hard_gates"] += len(all_scored)
 
-        portfolio.funnel_stats["hard_gates"] += len(candidates_passed_hard)
+        # Сохраняем полный живой рейтинг всех пар рынка в портфель
+        all_scored.sort(key=lambda x: x.get("ml_prob", 0.0), reverse=True)
+        portfolio.update_live_ml_ranking(all_scored)
 
-        # 3. КВАНТОВЫЙ ML СКОРИНГ (XGBoost Alpha): расчет вероятности успеха за 0.5 мс
-        for cand in candidates_passed_hard:
-            ml_res = ml_engine.evaluate_candidate(cand)
-            cand["ml_prob"] = ml_res.get("ml_probability", 0.5)
-            cand["ml_reason"] = ml_res.get("reason", "")
-            cand["ml_approved"] = ml_res.get("ml_approved", True)
+        # Выводим лог лидеров квантового радара раз в минуту
+        if should_log and all_scored:
+            top_3 = all_scored[:3]
+            top_str = ", ".join([f"{c['symbol']} {c['candidate_side']} ({int(c['ml_prob']*100)}%)" for c in top_3])
+            print(f"🧠 [QUANT ML] Все {len(all_scored)} пар оценены | Топ: {top_str} | Порог входа: {int(ml_engine.threshold*100)}%", flush=True)
 
-        # КВАНТОВЫЙ ФИЛЬТР: Отбираем только кандидатов с высоким математическим перевесом
-        # Это защищает баланс от ложных входов и экономит 80% лимитов Groq API
-        high_conviction = [c for c in candidates_passed_hard if c.get("ml_prob", 0.5) >= 0.65]
-        if not high_conviction and candidates_passed_hard:
-            leader = max(candidates_passed_hard, key=lambda x: x.get("ml_prob", 0.5))
-            if leader.get("ml_prob", 0.5) >= 0.60:
-                candidates_to_eval = [leader]
-            else:
-                candidates_to_eval = []
-        else:
-            high_conviction.sort(key=lambda x: x.get("ml_prob", 0.5) * abs(x["pct_5m"]) * x["volume_surge_ratio"], reverse=True)
-            candidates_to_eval = high_conviction[:1]
+        # 5. ОТБОР КАНДИДАТОВ ДЛЯ GROQ AI (A+ СЕКВЕНЦИЯ):
+        # Только монеты с подтвержденным математическим перевесом ML и строгим риск-профилем
+        candidates_to_eval = []
+        for cand in all_scored:
+            sym = cand["symbol"]
+            side = cand["candidate_side"]
+            prob = cand["ml_prob"]
+            sl_dist = cand["sl_pct_distance"] if side == "LONG" else cand.get("short_sl_dist", 0.05)
+            surge = cand.get("volume_surge_ratio", 1.0)
+            pct_5m = cand.get("pct_5m", 0.0)
+
+            # Требуем высокий перевес квантовой модели (от 70% или порог модели)
+            if prob < 0.70:
+                continue
+
+            # Защита от опасных стопов (не более 0.75% для 60x плеча)
+            if sl_dist > config.MAX_ALLOWED_SL_PCT:
+                continue
+
+            # Проверка BTC-фильтра
+            if side == "LONG" and btc_regime.get("is_dumping", False):
+                portfolio.funnel_stats["btc_blocked"] = portfolio.funnel_stats.get("btc_blocked", 0) + 1
+                continue
+            if side == "SHORT" and btc_regime.get("is_pumping", False):
+                portfolio.funnel_stats["btc_blocked"] = portfolio.funnel_stats.get("btc_blocked", 0) + 1
+                continue
+
+            # Проверка минимальной активности (не спим в мертвом стакане)
+            if surge < 1.30 and abs(pct_5m) < 0.30:
+                continue
+
+            candidates_to_eval.append(cand)
+            print(f"🔥 [A+ КАНДИДАТ - {side}] {sym}: ML {int(prob*100)}%, всплеск {surge:.2f}x, 5m: {pct_5m:+.2f}% | Передача в Groq AI...", flush=True)
+
+        # Фокусируемся на абсолютном лидере
+        candidates_to_eval = candidates_to_eval[:1]
 
         # 4. GROQ SOFT GATE (JEV AI ENGINE)
         for ctx in candidates_to_eval:
@@ -273,7 +280,7 @@ class MarketScanner:
                 except Exception:
                     pass
 
-        return candidates_passed_hard
+        return candidates_to_eval
 
     async def run_loop(self):
         self.is_running = True

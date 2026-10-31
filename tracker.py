@@ -36,6 +36,7 @@ class PortfolioTracker:
         }
         self.recent_evaluations: List[Dict[str, Any]] = []
         self.shadow_trades: List[Dict[str, Any]] = []
+        self.live_ml_ranking: List[Dict[str, Any]] = []
         self.is_paused = False
         self.current_leverage = getattr(config, "LEVERAGE", 60)
         self.btc_regime_str = "🟡 Анализ рынка BTC..."
@@ -88,6 +89,10 @@ class PortfolioTracker:
         if len(self.recent_evaluations) > 50:
             self.recent_evaluations = self.recent_evaluations[:50]
         self.save()
+
+    def update_live_ml_ranking(self, ranked_items: List[Dict[str, Any]]):
+        """Обновляет живой рейтинг всех пар рынка по оценке квантовой модели ML."""
+        self.live_ml_ranking = ranked_items[:25]
 
     def open_position(self, symbol: str, side: str, entry_price: float, size_usdt: float,
                       wick_sl: float, tp1: float, tp2: float, groq_reason: str, leverage: int = config.LEVERAGE) -> bool:
