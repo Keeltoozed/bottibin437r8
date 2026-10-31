@@ -542,7 +542,7 @@ with tab_brain:
         st.info(f"**Статус модели:** {ml_status}")
         st.metric("Винрейт на слепом тесте (Walk-Forward)", f"{ml_engine.winrate:.1f}%")
         st.metric("Профит-фактор (Profit Factor)", f"{ml_engine.profit_factor:.2f}")
-        st.caption("Обучена на 37,411 5m свечах (20 топ-пар Binance) с честным вычетом биржевых комиссий 0.10% за сделку.")
+        st.caption(f"Обучена на 25 топ-парах Binance Futures (30 альфа-факторов) с вычетом комиссий биржи 0.10% за сделку. Порог уверенности: {int(ml_engine.threshold * 100)}%.")
 
     with b_col2:
         st.markdown("### 📓 База знаний Obsidian Vault")

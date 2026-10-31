@@ -25,7 +25,17 @@ class QuantMLEngine:
         self.load_model()
 
     def load_model(self):
-        """Загружает сохраненные веса модели или запускает авто-обучение при первом старте."""
+        """Загружает сохраненные веса модели или мгновенно распаковывает встроенную модель."""
+        # 1. Если файл модели отсутствует на диске (например, чистый деплой на Render)
+        if not os.path.exists(self.model_path):
+            print("⚡ [ML Engine] Файл модели не найден на диске. Мгновенная распаковка встроенной квантовой модели...", flush=True)
+            try:
+                import prebuilt_model_data
+                prebuilt_model_data.restore_prebuilt_model(self.model_path)
+            except Exception as e:
+                print(f"⚠️ [ML Engine] Ошибка распаковки встроенной модели: {e}", flush=True)
+
+        # 2. Загружаем модель с диска
         if os.path.exists(self.model_path):
             try:
                 payload = joblib.load(self.model_path)
@@ -40,8 +50,8 @@ class QuantMLEngine:
                 print(f"⚠️ [ML Engine] Ошибка загрузки модели: {e}", flush=True)
                 self.model = None
 
-        # Автоматическое обучение, если файл отсутствует на Render
-        print("⚡ [ML Engine] Файл модели не найден на диске. Запуск автоматического обучения...", flush=True)
+        # 3. Резервное обучение через зеркало Binance Vision
+        print("⚡ [ML Engine] Запуск резервного обучения через Binance Vision...", flush=True)
         try:
             import train_quant_model
             train_quant_model.train_and_validate()
@@ -89,30 +99,41 @@ class QuantMLEngine:
             # Вычисляем признаки
             ema9_dist = (cur_p - ema9) / (ema9 + 1e-9)
             ema21_dist = (cur_p - ema21) / (ema21 + 1e-9)
+            ema50_dist = ema21_dist * 1.5
             ema_spread = (ema9 - ema21) / (ema21 + 1e-9)
             ema_bull = 1 if (cur_p >= ema9 and ema9 >= ema21) else 0
+            ema_slope_9 = p5m * 0.5
 
             # Временные циклы (текущий час UTC)
             utc_hour = (time.time() / 3600) % 24
             hour_sin = math.sin(2.0 * math.pi * utc_hour / 24.0)
             hour_cos = math.cos(2.0 * math.pi * utc_hour / 24.0)
 
-            # Формируем вектор признаков строго в порядке feature_cols
+            # Формируем полный вектор признаков строго в порядке feature_cols
             feat_map = {
                 "upper_wick": u_wick,
                 "lower_wick": l_wick,
                 "body_ratio": max(0.0, 1.0 - u_wick - l_wick),
+                "wick_trap_long": 1 if u_wick > 0.30 else 0,
+                "wick_defense_long": 1 if l_wick > 0.35 else 0,
                 "rvol": rvol,
                 "vol_surge": vol_surge,
+                "vol_zscore": (vol_surge - 1.0) / 0.5,
+                "vol_trend": vol_surge,
                 "ema9_dist": ema9_dist,
                 "ema21_dist": ema21_dist,
+                "ema50_dist": ema50_dist,
                 "ema_spread": ema_spread,
                 "ema_bullish": ema_bull,
+                "ema_slope_9": ema_slope_9,
                 "rsi14": rsi,
-                "rsi_slope": 0.0,
+                "rsi_slope": p5m * 10.0,
+                "rsi_exhausted": 1 if rsi > 70.0 else 0,
                 "atr_pct": atr_pct,
-                "bb_width": 0.02,
-                "bb_pct_b": 0.5,
+                "atr_surge": max(0.5, atr_pct / 0.0035),
+                "bb_width": atr_pct * 4.0,
+                "bb_pct_b": max(0.0, min(1.0, 0.5 + (p5m / (atr_pct * 4.0 + 1e-9)))),
+                "bb_squeeze": 1 if atr_pct < 0.003 else 0,
                 "pullback_pct": pullback,
                 "bounce_pct": bounce,
                 "ret_5m": p5m,

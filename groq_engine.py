@@ -21,7 +21,7 @@ class GroqEngine:
     def __init__(self):
         self.api_key = config.GROQ_API_KEY
         self.url = "https://api.groq.com/openai/v1/chat/completions"
-        self.models = ["qwen/qwen3.8-27b", "allam-2-7b", "openai/gpt-oss-120b", "openai/gpt-oss-20b"]
+        self.models = ["allam-2-7b", "openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"]
         self._last_call_ts = 0.0
         self._lock = asyncio.Lock()
         self._model_cooldowns: Dict[str, float] = {}  # {model_name: cooldown_until_ts}
@@ -146,7 +146,7 @@ Output JSON:
                 ],
                 "response_format": {"type": "json_object"},
                 "temperature": 0.1,
-                "max_tokens": 450
+                "max_tokens": 220
             }
 
             try:

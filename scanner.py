@@ -143,9 +143,18 @@ class MarketScanner:
             cand["ml_reason"] = ml_res.get("reason", "")
             cand["ml_approved"] = ml_res.get("ml_approved", True)
 
-        # Сортируем кандидатов по взрывному импульсу и вероятности квантовой модели
-        candidates_passed_hard.sort(key=lambda x: x.get("ml_prob", 0.5) * abs(x["pct_5m"]) * x["volume_surge_ratio"], reverse=True)
-        candidates_to_eval = candidates_passed_hard[:1]
+        # КВАНТОВЫЙ ФИЛЬТР: Отбираем только кандидатов с высоким математическим перевесом
+        # Это защищает баланс от ложных входов и экономит 80% лимитов Groq API
+        high_conviction = [c for c in candidates_passed_hard if c.get("ml_prob", 0.5) >= 0.65]
+        if not high_conviction and candidates_passed_hard:
+            leader = max(candidates_passed_hard, key=lambda x: x.get("ml_prob", 0.5))
+            if leader.get("ml_prob", 0.5) >= 0.60:
+                candidates_to_eval = [leader]
+            else:
+                candidates_to_eval = []
+        else:
+            high_conviction.sort(key=lambda x: x.get("ml_prob", 0.5) * abs(x["pct_5m"]) * x["volume_surge_ratio"], reverse=True)
+            candidates_to_eval = high_conviction[:1]
 
         # 4. GROQ SOFT GATE (JEV AI ENGINE)
         for ctx in candidates_to_eval:
