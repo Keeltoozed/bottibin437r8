@@ -10,7 +10,7 @@ GROQ_API_KEY = (os.getenv("GROQ_API_KEY") or "").strip().strip('"').strip("'")
 GROQ_PRIMARY_MODEL = os.getenv("GROQ_MODEL", "allam-2-7b").strip()
 GROQ_FALLBACK_MODEL = os.getenv("GROQ_MODEL_FALLBACK", "openai/gpt-oss-120b").strip()
 GROQ_RPM_LIMIT = int(os.getenv("GROQ_RPM_LIMIT", "25"))  # Safe rate limit for free tier (max 30 RPM)
-GROQ_MIN_CONFIDENCE = float(os.getenv("GROQ_MIN_CONFIDENCE", "0.75"))  # Повышен порог для отсева мусора (только A+ сетапы)
+GROQ_MIN_CONFIDENCE = float(os.getenv("GROQ_MIN_CONFIDENCE", "0.68"))  # Повышен порог для отсева мусора (только A+ сетапы)
 
 # Институциональные фильтры входа (High-Conviction A+ Scanners)
 # Отсекаем вялый боковик: всплеск объема строго от 1.50x, чистый импульс от 0.40%
