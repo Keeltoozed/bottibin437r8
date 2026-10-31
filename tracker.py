@@ -37,6 +37,7 @@ class PortfolioTracker:
         self.recent_evaluations: List[Dict[str, Any]] = []
         self.shadow_trades: List[Dict[str, Any]] = []
         self.live_ml_ranking: List[Dict[str, Any]] = []
+        self.symbol_lockouts: Dict[str, float] = {}
         self.is_paused = False
         self.current_leverage = getattr(config, "LEVERAGE", 60)
         self.btc_regime_str = "🟡 Анализ рынка BTC..."
@@ -54,6 +55,7 @@ class PortfolioTracker:
             "funnel_stats": self.funnel_stats,
             "recent_evaluations": self.recent_evaluations[-30:],  # последние 30 оценок
             "shadow_trades": self.shadow_trades[-50:],
+            "symbol_lockouts": self.symbol_lockouts,
             "is_paused": self.is_paused,
             "last_updated": time.time()
         }
@@ -76,6 +78,7 @@ class PortfolioTracker:
                 self.funnel_stats = state.get("funnel_stats", self.funnel_stats)
                 self.recent_evaluations = state.get("recent_evaluations", [])
                 self.shadow_trades = state.get("shadow_trades", [])
+                self.symbol_lockouts = state.get("symbol_lockouts", {})
                 self.is_paused = state.get("is_paused", False)
                 self.current_leverage = int(state.get("current_leverage", getattr(config, "LEVERAGE", 60)))
                 config.LEVERAGE = self.current_leverage
@@ -261,6 +264,11 @@ class PortfolioTracker:
 
         if partial_pct >= 0.99:
             del self.open_positions[symbol]
+            # Защита от повторных сливов (Anti-Revenge Lockout):
+            # Если монета выбита по стопу или в минус — 45 минут карантина
+            if realized_pnl < 0 or "Stop" in reason:
+                self.symbol_lockouts[symbol] = time.time() + (45 * 60)
+                print(f"🔒 [КАРАНТИН] {symbol} помещен в карантин на 45 минут после стоп-лосса.", flush=True)
         else:
             pos["margin_usdt"] -= closed_margin
             pos["coins_qty"] *= (1.0 - partial_pct)

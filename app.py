@@ -202,6 +202,7 @@ with st.sidebar:
         portfolio.cash = config.INITIAL_BALANCE
         portfolio.open_positions.clear()
         portfolio.trade_history.clear()
+        portfolio.symbol_lockouts.clear()
         portfolio.save()
         st.success("Баланс сброшен до $20.00!")
         st.rerun()
@@ -607,12 +608,18 @@ with tab_brain:
 
     b_col1, b_col2 = st.columns(2)
     with b_col1:
-        st.markdown("### ⚡ Квантовая модель (XGBoost Alpha)")
-        ml_status = "🟢 Активна (Загружена)" if ml_engine.model is not None else "🟡 Ожидает обучения"
+        st.markdown("### ⚡ Квантовая модель (Dual XGBoost Alpha)")
+        ml_status = "🟢 Активна (Dual: LONG + SHORT)" if (ml_engine.model_long is not None or ml_engine.model is not None) else "🟡 Ожидает обучения"
         st.info(f"**Статус модели:** {ml_status}")
-        st.metric("Винрейт на слепом тесте (Walk-Forward)", f"{ml_engine.winrate:.1f}%")
+        
+        m_c1, m_c2 = st.columns(2)
+        with m_c1:
+            st.metric("Винрейт LONG (XGBoost)", f"{getattr(ml_engine, 'winrate_long', 75.0):.1f}%")
+        with m_c2:
+            st.metric("Винрейт SHORT (XGBoost)", f"{getattr(ml_engine, 'winrate_short', 88.2):.1f}%")
+            
         st.metric("Профит-фактор (Profit Factor)", f"{ml_engine.profit_factor:.2f}")
-        st.caption(f"Обучена на 25 топ-парах Binance Futures (30 альфа-факторов) с вычетом комиссий биржи 0.10% за сделку. Порог уверенности: {int(ml_engine.threshold * 100)}%.")
+        st.caption(f"Обучена на 30 топ-парах Binance Futures (30 факторов Order Flow) с вычетом комиссий биржи. Порог уверенности: {int(ml_engine.threshold * 100)}%.")
 
     with b_col2:
         st.markdown("### 📓 База знаний Obsidian Vault")

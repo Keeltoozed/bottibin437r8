@@ -71,7 +71,13 @@ class MarketScanner:
             if sym in getattr(config, "EXCLUDED_TICKERS", set()):
                 return None
 
-            # Проверка кулдауна и открытых позиций
+            # Проверка кулдауна, карантина и открытых позиций
+            lock_until = portfolio.symbol_lockouts.get(sym, 0.0)
+            if now < lock_until:
+                return None
+            elif sym in portfolio.symbol_lockouts:
+                del portfolio.symbol_lockouts[sym]
+
             if sym in self.cooldowns and (now - self.cooldowns[sym]) < (config.PAIR_COOLDOWN_MINUTES * 60):
                 portfolio.funnel_stats["cooldown_blocked"] = portfolio.funnel_stats.get("cooldown_blocked", 0) + 1
                 return None
@@ -183,15 +189,16 @@ class MarketScanner:
                     print(f"🛑 [НЕТ ИМПУЛЬСА] {sym} ({side}) ML {int(prob*100)}% отклонен: всплеск {surge:.2f}x < 1.30x и ход 5m {pct_5m:+.2f}% < 0.30%", flush=True)
                 continue
 
-            # Защита от контртрендовых сделок (не шортим пампы и не лонгуем дампы)
+            # Защита от контртрендовых сделок (Мульти-таймфрейм 5m + 15m Trend Alignment)
             trend = cand.get("trend", "CHOP")
-            if side == "SHORT" and (trend == "BULLISH" or pct_5m > 0.40):
+            pct_15m = cand.get("pct_15m", 0.0)
+            if side == "SHORT" and (trend == "BULLISH" or pct_5m > 0.40 or pct_15m > 0.40):
                 if should_log:
-                    print(f"🛑 [ТРЕНД-БЛОК] {sym} SHORT ML {int(prob*100)}% отклонен: монета в бычьем тренде ({pct_5m:+.2f}%)", flush=True)
+                    print(f"🛑 [ТРЕНД-БЛОК] {sym} SHORT ML {int(prob*100)}% отклонен: монета растет (5m: {pct_5m:+.2f}%, 15m: {pct_15m:+.2f}%)", flush=True)
                 continue
-            if side == "LONG" and (trend == "BEARISH" or pct_5m < -0.40):
+            if side == "LONG" and (trend == "BEARISH" or pct_5m < -0.40 or pct_15m < -0.40):
                 if should_log:
-                    print(f"🛑 [ТРЕНД-БЛОК] {sym} LONG ML {int(prob*100)}% отклонен: монета в медвежьем тренде ({pct_5m:+.2f}%)", flush=True)
+                    print(f"🛑 [ТРЕНД-БЛОК] {sym} LONG ML {int(prob*100)}% отклонен: монета падает (5m: {pct_5m:+.2f}%, 15m: {pct_15m:+.2f}%)", flush=True)
                 continue
 
             candidates_to_eval.append(cand)

@@ -10,7 +10,7 @@ GROQ_API_KEY = (os.getenv("GROQ_API_KEY") or "").strip().strip('"').strip("'")
 GROQ_PRIMARY_MODEL = os.getenv("GROQ_MODEL", "allam-2-7b").strip()
 GROQ_FALLBACK_MODEL = os.getenv("GROQ_MODEL_FALLBACK", "openai/gpt-oss-120b").strip()
 GROQ_RPM_LIMIT = int(os.getenv("GROQ_RPM_LIMIT", "25"))  # Safe rate limit for free tier (max 30 RPM)
-GROQ_MIN_CONFIDENCE = float(os.getenv("GROQ_MIN_CONFIDENCE", "0.68"))  # Повышен порог для отсева мусора (только A+ сетапы)
+GROQ_MIN_CONFIDENCE = float(os.getenv("GROQ_MIN_CONFIDENCE", "0.75"))  # Повышен порог для отсева мусора (только A+ сетапы)
 
 # Институциональные фильтры входа (High-Conviction A+ Scanners)
 # Отсекаем вялый боковик: всплеск объема строго от 1.50x, чистый импульс от 0.40%
@@ -67,15 +67,15 @@ WICK_BUFFER_PCT = float(os.getenv("WICK_BUFFER_PCT", "0.0008"))
 MAX_ALLOWED_SL_PCT = float(os.getenv("MAX_ALLOWED_SL_PCT", "0.0075"))  # Макс. 0.75% SL (строгое ограничение убытка на 60x)
 
 # Multi-tier Take Profit (с плечом 60x):
-# +1.5% ход цены = +90.0% ROI (TP1: фиксация 50% + мгновенный безубыток)
-# +3.0% ход цены = +180.0% ROI (TP2: фиксация 25%)
-# Остаток 25%: трейлинг-стоп 0.8%
-TP1_PCT = float(os.getenv("TP1_PCT", "0.015"))
-TP2_PCT = float(os.getenv("TP2_PCT", "0.030"))
-TRAILING_STOP_PCT = float(os.getenv("TRAILING_STOP_PCT", "0.008"))  # 0.8% trailing
+# +1.2% ход цены = +72.0% ROI (TP1: фиксация 50% + мгновенный безубыток)
+# +2.8% ход цены = +168.0% ROI (TP2: фиксация 25%)
+# Остаток 25%: динамический трейлинг-стоп 0.7%
+TP1_PCT = float(os.getenv("TP1_PCT", "0.012"))
+TP2_PCT = float(os.getenv("TP2_PCT", "0.028"))
+TRAILING_STOP_PCT = float(os.getenv("TRAILING_STOP_PCT", "0.007"))  # 0.7% trailing
 
-# Быстрый перевод в безубыток при прохождении 40% пути до TP1 (+0.6% ход = +45% прибыли)
-BREAKEVEN_TRIGGER_RATIO = 0.40
+# Быстрый перевод в безубыток при прохождении 45% пути до TP1 (+0.54% ход = +32.4% ROI)
+BREAKEVEN_TRIGGER_RATIO = float(os.getenv("BREAKEVEN_TRIGGER_RATIO", "0.45"))
 
 # Momentum Death: early exit if 1m volume collapses and price stalls
 ENABLE_MOMENTUM_DEATH_EXIT = True
