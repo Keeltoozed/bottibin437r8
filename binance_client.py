@@ -192,13 +192,13 @@ class BinanceClient:
         raw_short_sl = round(recent_wick_high * (1.0 + config.WICK_BUFFER_PCT), 6)
         raw_short_sl_pct = (raw_short_sl - last_c["close"]) / last_c["close"]
 
-        # Институциональный стоп-лосс: max(за_фитиль, 1.0 * ATR14, 0.4%)
-        # Защищает позицию от выбивания микро-шумом одной 5m свечи!
-        safe_long_sl_pct = round(min(max(raw_sl_pct, atr14_pct, 0.004), config.MAX_ALLOWED_SL_PCT), 4)
+        # Институциональный стоп-лосс: max(за_фитиль, 1.0 * ATR14, 0.35%)
+        # Отражает РЕАЛЬНУЮ дистанцию до фитиля. Если она шире MAX_ALLOWED_SL_PCT (0.75%), сканер отсеет сетап!
+        safe_long_sl_pct = round(max(raw_sl_pct, atr14_pct, 0.0035), 4)
         wick_stop_loss = round(last_c["close"] * (1.0 - safe_long_sl_pct), 6)
         sl_pct_distance = safe_long_sl_pct
 
-        safe_short_sl_pct = round(min(max(raw_short_sl_pct, atr14_pct, 0.004), config.MAX_ALLOWED_SL_PCT), 4)
+        safe_short_sl_pct = round(max(raw_short_sl_pct, atr14_pct, 0.0035), 4)
         short_wick_stop_loss = round(last_c["close"] * (1.0 + safe_short_sl_pct), 6)
         short_sl_pct_distance = safe_short_sl_pct
 

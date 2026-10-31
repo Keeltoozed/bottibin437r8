@@ -7,14 +7,15 @@ load_dotenv()
 # 1. GROQ AI ENGINE CONFIG (JEV ENGINE)
 # ==============================================================================
 GROQ_API_KEY = (os.getenv("GROQ_API_KEY") or "").strip().strip('"').strip("'")
-GROQ_PRIMARY_MODEL = os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b").strip()
-GROQ_FALLBACK_MODEL = os.getenv("GROQ_MODEL_FALLBACK", "openai/gpt-oss-20b").strip()
+GROQ_PRIMARY_MODEL = os.getenv("GROQ_MODEL", "allam-2-7b").strip()
+GROQ_FALLBACK_MODEL = os.getenv("GROQ_MODEL_FALLBACK", "openai/gpt-oss-120b").strip()
 GROQ_RPM_LIMIT = int(os.getenv("GROQ_RPM_LIMIT", "25"))  # Safe rate limit for free tier (max 30 RPM)
 GROQ_MIN_CONFIDENCE = float(os.getenv("GROQ_MIN_CONFIDENCE", "0.75"))  # Повышен порог для отсева мусора (только A+ сетапы)
 
 # Институциональные фильтры входа (High-Conviction A+ Scanners)
-MIN_VOLUME_SURGE = float(os.getenv("MIN_VOLUME_SURGE", "1.20"))  # Всплеск объема от 1.20x
-MIN_IMPULSE_PCT = float(os.getenv("MIN_IMPULSE_PCT", "0.30"))    # Импульс свечи от 0.30%
+# Отсекаем вялый боковик: всплеск объема строго от 1.50x, чистый импульс от 0.40%
+MIN_VOLUME_SURGE = float(os.getenv("MIN_VOLUME_SURGE", "1.50"))  # Всплеск объема от 1.50x
+MIN_IMPULSE_PCT = float(os.getenv("MIN_IMPULSE_PCT", "0.40"))    # Импульс свечи от 0.40%
 MIN_RSI_LONG = 35.0
 MAX_RSI_LONG = 75.0
 MIN_RSI_SHORT = 25.0
@@ -60,9 +61,10 @@ MAX_CONCURRENT_POSITIONS = int(os.getenv("MAX_POSITIONS", "2"))
 # "We bid the flush, not the candle": pullback required before entry
 MIN_PULLBACK_PCT = float(os.getenv("MIN_PULLBACK_PCT", "0.0005"))  # 0.05% pullback
 
-# "The stop lives under the wick": ultra-tight wick buffer for 60x leverage
-WICK_BUFFER_PCT = float(os.getenv("WICK_BUFFER_PCT", "0.001"))
-MAX_ALLOWED_SL_PCT = float(os.getenv("MAX_ALLOWED_SL_PCT", "0.012"))  # Макс. 1.2% SL (защита от ликвидации на 60x)
+# "The stop lives under the wick": жесткий снайперский стоп для 60x плеча (не более 0.75%)
+# Запрещает сделки с широкими размашистыми фитилями вроде STX (где стоп был 1.2% и привел к убытку 84%)
+WICK_BUFFER_PCT = float(os.getenv("WICK_BUFFER_PCT", "0.0008"))
+MAX_ALLOWED_SL_PCT = float(os.getenv("MAX_ALLOWED_SL_PCT", "0.0075"))  # Макс. 0.75% SL (строгое ограничение убытка на 60x)
 
 # Multi-tier Take Profit (с плечом 60x):
 # +1.5% ход цены = +90.0% ROI (TP1: фиксация 50% + мгновенный безубыток)

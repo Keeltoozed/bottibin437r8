@@ -100,12 +100,13 @@ class MarketScanner:
                 trend = analysis.get("trend", "CHOP")
 
                 # Базовый институциональный фильтр кандидатов для Groq AI:
+                # ОБЯЗАТЕЛЬНЫЙ всплеск объема (>= 1.5x) и РЕАЛЬНЫЙ 5m импульс (>= 0.40%)
                 has_vol = surge >= config.MIN_VOLUME_SURGE
-                has_long_momentum = (pct_5m >= config.MIN_IMPULSE_PCT or pct_15m >= 0.40)
-                has_short_momentum = (pct_5m <= -config.MIN_IMPULSE_PCT or pct_15m <= -0.40)
+                has_long_momentum = pct_5m >= config.MIN_IMPULSE_PCT
+                has_short_momentum = pct_5m <= -config.MIN_IMPULSE_PCT
 
-                is_long_cand = (has_vol or pct_15m >= 0.40) and has_long_momentum and sl_dist <= config.MAX_ALLOWED_SL_PCT and trend != "BEARISH"
-                is_short_cand = config.ENABLE_SHORT and (has_vol or pct_15m <= -0.40) and has_short_momentum and short_sl_dist <= config.MAX_ALLOWED_SL_PCT and trend != "BULLISH"
+                is_long_cand = has_vol and has_long_momentum and sl_dist <= config.MAX_ALLOWED_SL_PCT and trend != "BEARISH"
+                is_short_cand = config.ENABLE_SHORT and has_vol and has_short_momentum and short_sl_dist <= config.MAX_ALLOWED_SL_PCT and trend != "BULLISH"
 
                 # Проверка BTC-фильтра
                 if is_long_cand and btc_regime.get("is_dumping", False):
@@ -177,8 +178,8 @@ class MarketScanner:
                 "confidence": groq_eval.get("confidence", 0.0),
                 "ml_prob": round(ctx.get("ml_prob", 0.5) * 100, 1),
                 "reason": groq_eval.get("reason", ""),
-                "sl": groq_eval.get("stop_loss", default_sl),
-                "tp1": groq_eval.get("tp1", default_tp1),
+                "sl": groq_eval.get("stop_loss") or default_sl,
+                "tp1": groq_eval.get("tp1") or default_tp1,
                 "surge": ctx["volume_surge_ratio"],
                 "pullback": round(ctx.get("pullback_from_high_pct", 0) * 100, 2) if cand_side == "LONG" else round(ctx.get("bounce_from_low_pct", 0) * 100, 2),
                 "model": groq_eval.get("model", "unknown"),

@@ -302,20 +302,27 @@ with tab_pos:
                 col_a, col_b, col_c, col_d, col_e = st.columns([2, 2, 2, 2, 1])
                 with col_a:
                     st.markdown(f"### {sym} <span class='{side_badge_cls}'>{side} {pos['leverage']}x</span>", unsafe_allow_html=True)
-                    st.caption(f"Вход: ${pos['entry_price']:.4f} • Маржа: ${pos['margin_usdt']:.2f}")
+                    ep_pos = pos.get('entry_price', 0.0) or 0.0
+                    mg_pos = pos.get('margin_usdt', 0.0) or 0.0
+                    st.caption(f"Вход: ${ep_pos:.4f} • Маржа: ${mg_pos:.2f}")
                 with col_b:
-                    st.metric("Текущая цена", f"${pos['current_price']:.4f}")
+                    cp_pos = pos.get('current_price', 0.0) or 0.0
+                    st.metric("Текущая цена", f"${cp_pos:.4f}")
                 with col_c:
-                    pnl_usd = pos['unrealized_pnl']
+                    pnl_usd = pos.get('unrealized_pnl', 0.0) or 0.0
+                    pnl_pct = pos.get('pnl_pct', 0.0) or 0.0
                     delta_display = f"+${pnl_usd:.2f}" if pnl_usd >= 0 else f"-${abs(pnl_usd):.2f}"
-                    st.metric("PnL (%)", f"{pos['pnl_pct']:+.2f}%", delta=delta_display)
+                    st.metric("PnL (%)", f"{pnl_pct:+.2f}%", delta=delta_display)
                 with col_d:
-                    st.markdown(f"**{stop_label}:** `${pos['wick_sl']:.4f}`")
-                    st.markdown(f"**TP1:** `${pos['tp1']:.4f}` | **TP2:** `${pos['tp2']:.4f}`")
+                    sl_pos = pos.get('wick_sl', 0.0) or 0.0
+                    tp1_pos = pos.get('tp1', 0.0) or 0.0
+                    tp2_pos = pos.get('tp2', 0.0) or 0.0
+                    st.markdown(f"**{stop_label}:** `${sl_pos:.4f}`")
+                    st.markdown(f"**TP1:** `${tp1_pos:.4f}` | **TP2:** `${tp2_pos:.4f}`")
                     st.caption(be_badge)
                 with col_e:
                     if st.button("Закрыть", key=f"close_{sym}"):
-                        portfolio.close_position(sym, pos['current_price'], "Ручное закрытие из интерфейса")
+                        portfolio.close_position(sym, pos.get('current_price', 0.0), "Ручное закрытие из интерфейса")
                         st.rerun()
                 st.caption(f"🧠 Логика Groq: {pos.get('groq_reason', 'N/A')}")
                 st.divider()
@@ -328,7 +335,7 @@ with tab_pos:
         st.caption("Здесь фиксируются все завершенные сделки (TP1, TP2, Stop-Loss или Trailing). История сохраняется персистентно.")
     else:
         for t in reversed(portfolio.trade_history[-10:]):
-            is_win = t["realized_pnl"] >= 0
+            is_win = t.get("realized_pnl", 0.0) >= 0
             pnl_color = "#3fb950" if is_win else "#f85149"
             side = t.get("side", "LONG")
             side_badge_cls = "badge-long" if side == 'LONG' else "badge-short"
@@ -339,8 +346,10 @@ with tab_pos:
                     st.markdown(f"**{t['symbol']}** <span class='{side_badge_cls}'>{side} {t.get('leverage', config.LEVERAGE)}x</span>", unsafe_allow_html=True)
                     st.caption(f"Закрыто: {t.get('closed_at', 'N/A')}")
                 with rc2:
-                    st.markdown(f"Вход: **${t['entry_price']:.4f}**")
-                    st.markdown(f"Выход: **${t['exit_price']:.4f}**")
+                    ep_t = t.get('entry_price', 0.0) or 0.0
+                    xp_t = t.get('exit_price', 0.0) or 0.0
+                    st.markdown(f"Вход: **${ep_t:.4f}**")
+                    st.markdown(f"Выход: **${xp_t:.4f}**")
                 with rc3:
                     st.markdown(f"<span style='color: {pnl_color}; font-size: 17px; font-weight: bold;'>{t['realized_pnl']:+.2f} USDT ({t['roi_pct']:+.1f}%)</span>", unsafe_allow_html=True)
                     st.caption(f"Маржа: ${t.get('margin_usdt', 0):.2f}")
@@ -390,7 +399,13 @@ with tab_radar:
                 with rc3:
                     st.markdown(f"**Анализ Groq:** {ev.get('reason', 'N/A')}")
                     if dec in ['BUY', 'SHORT']:
-                        st.markdown(f"🎯 *Вход: ${ev.get('price'):.4f} | SL: ${ev.get('sl'):.4f} | TP1: ${ev.get('tp1'):.4f}*")
+                        p_val = ev.get('price')
+                        sl_val = ev.get('sl')
+                        tp1_val = ev.get('tp1')
+                        p_str = f"${p_val:.4f}" if p_val is not None else "N/A"
+                        sl_str = f"${sl_val:.4f}" if sl_val is not None else "N/A"
+                        tp1_str = f"${tp1_val:.4f}" if tp1_val is not None else "N/A"
+                        st.markdown(f"🎯 *Вход: {p_str} | SL: {sl_str} | TP1: {tp1_str}*")
                 st.divider()
 
 # ------------------------------------------------------------------------------
