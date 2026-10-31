@@ -6,6 +6,8 @@ import re
 import aiohttp
 from typing import Dict, Any, Tuple, Optional
 import config
+from obsidian_vault import obsidian_vault
+from ml_engine import ml_engine
 
 class GroqEngine:
     """
@@ -19,9 +21,10 @@ class GroqEngine:
     def __init__(self):
         self.api_key = config.GROQ_API_KEY
         self.url = "https://api.groq.com/openai/v1/chat/completions"
-        self.models = ["qwen/qwen3.8-27b", "openai/gpt-oss-120b", "openai/gpt-oss-20b"]
+        self.models = ["qwen/qwen3.8-27b", "allam-2-7b", "openai/gpt-oss-120b", "openai/gpt-oss-20b"]
         self._last_call_ts = 0.0
         self._lock = asyncio.Lock()
+        self._model_cooldowns: Dict[str, float] = {}  # {model_name: cooldown_until_ts}
         self._eval_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}  # {symbol_side: (ts, result)}
         self.calls_count = 0
         self.approved_count = 0
@@ -88,74 +91,40 @@ class GroqEngine:
         ema9_val = context.get('ema9', 0)
         ema21_val = context.get('ema21', 0)
 
+        cur_p = context.get('current_price', 0)
+        vol_surge = context.get('volume_surge_ratio', 1.0)
+        p5m = context.get('pct_5m', 0)
+        p15m = context.get('pct_15m', 0)
+        atr_pct = context.get('atr14_pct', 0.004) * 100.0
+        btc_reg = context.get('btc_regime', 'Neutral')
+        u_wick = context.get('upper_wick_pct', 0) * 100.0
+        l_wick = context.get('lower_wick_pct', 0) * 100.0
+
+        # Получаем память актива из Obsidian и скоринг Quant ML
+        token_mem = obsidian_vault.get_token_memory(symbol, cand_side)
+        ml_res = ml_engine.evaluate_candidate(context)
+        ml_prob_str = f"ML Win Prob: {int(ml_res['ml_probability']*100)}%" if ml_res.get('ml_active') else "ML: Standby"
+
         if cand_side == "LONG":
-            prompt = f"""You are the Chief Quantitative Risk Officer at an elite crypto proprietary trading desk.
-You are evaluating a 60x leverage momentum breakout ('rocket') on Binance Futures.
-
-CORE MANDATE:
-1. Capital preservation is priority #1. YOUR DEFAULT BIAS IS TO SKIP.
-2. Only approve rare, undeniable A+ institutional breakouts.
-
-ADVERSARIAL TRAP FILTERS:
-- Bull Trap: If upper wick > 30% or RSI > 70 or volume is fading on the push, set trap_risk = true and decision = SKIP.
-- No FOMO: Price must be on a pullback (-0.2% to -2.0% from high) to support. Never buy the peak candle.
-- Stop Distance: Must be <= {max_sl:.1f}% behind extreme wick.
-- Structure: Trend must be Bullish (Price >= EMA9 >= EMA21).
-
-CANDIDATE:
-- Symbol: {symbol} | Side: LONG | Price: ${context.get('current_price')}
-- Macro / Bitcoin Regime: {context.get('btc_regime', 'Neutral')}
-- 5m Volume Surge: {context.get('volume_surge_ratio')}x | 5m Move: {context.get('pct_5m'):+.2f}% | 15m Move: {context.get('pct_15m'):+.2f}%
-- Pullback: {context.get('pullback_from_high_pct', 0) * 100:+.2f}% | RSI(14): {rsi_val} | Trend: {trend_val} (EMA9: {ema9_val}, EMA21: {ema21_val})
-- Upper Wick: {context.get('upper_wick_pct', 0) * 100:.1f}% | Lower Wick: {context.get('lower_wick_pct', 0) * 100:.1f}%
-- Stop Loss: ${context.get('wick_stop_loss')} ({context.get('sl_pct_distance', 0) * 100:.2f}% distance)
-
-Respond ONLY with raw valid JSON:
-{{
-  "trap_risk": bool,
-  "decision": "BUY" or "SKIP",
-  "confidence": float (0.0 to 1.0, >= 0.75 for approval),
-  "entry_price": float,
-  "stop_loss": float,
-  "tp1": float (approx +1.5% to +2.0%, yielding +{tp1_min_roi}% to +{tp1_max_roi}% ROI on {lev}x),
-  "tp2": float (approx +3.0% to +4.5%, yielding +{tp2_min_roi}% to +{tp2_max_roi}% ROI on {lev}x),
-  "reason": "1-2 sharp sentences of institutional trade thesis analyzing volume conviction, trap risk, and level defense"
-}}
-"""
-        else:  # SHORT
-            prompt = f"""You are the Chief Quantitative Risk Officer at an elite crypto proprietary trading desk.
-You are evaluating a 60x leverage breakdown scalp on Binance Futures.
-
-CORE MANDATE:
-1. Capital preservation is priority #1. YOUR DEFAULT BIAS IS TO SKIP.
-2. Only approve rare, undeniable A+ institutional breakdowns.
-
-ADVERSARIAL TRAP FILTERS:
-- Bear Trap: If lower wick > 30% or RSI < 30 or price is on the very bottom of the dump, set trap_risk = true and decision = SKIP.
-- No Floor Selling: Price must be on a micro-bounce (+0.2% to +2.0% from low) into resistance. Never short the lowest tick.
-- Stop Distance: Must be <= {max_sl:.1f}% behind extreme wick.
-- Structure: Trend must be Bearish (Price <= EMA9 <= EMA21).
-
-CANDIDATE:
-- Symbol: {symbol} | Side: SHORT | Price: ${context.get('current_price')}
-- Macro / Bitcoin Regime: {context.get('btc_regime', 'Neutral')}
-- 5m Volume Surge: {context.get('volume_surge_ratio')}x | 5m Move: {context.get('pct_5m'):+.2f}% | 15m Move: {context.get('pct_15m'):+.2f}%
-- Bounce: +{context.get('bounce_from_low_pct', 0) * 100:.2f}% | RSI(14): {rsi_val} | Trend: {trend_val} (EMA9: {ema9_val}, EMA21: {ema21_val})
-- Upper Wick: {context.get('upper_wick_pct', 0) * 100:.1f}% | Lower Wick: {context.get('lower_wick_pct', 0) * 100:.1f}%
-- Stop Loss: ${context.get('short_wick_sl')} ({context.get('short_sl_dist', 0) * 100:.2f}% distance above price)
-
-Respond ONLY with raw valid JSON:
-{{
-  "trap_risk": bool,
-  "decision": "SHORT" or "SKIP",
-  "confidence": float (0.0 to 1.0, >= 0.75 for approval),
-  "entry_price": float,
-  "stop_loss": float,
-  "tp1": float (approx -1.5% to -2.0%, yielding +{tp1_min_roi}% to +{tp1_max_roi}% ROI on {lev}x),
-  "tp2": float (approx -3.0% to -4.5%, yielding +{tp2_min_roi}% to +{tp2_max_roi}% ROI on {lev}x),
-  "reason": "1-2 sharp sentences of institutional trade thesis analyzing volume conviction, trap risk, and level defense"
-}}
-"""
+            pullback_pct = context.get('pullback_from_high_pct', 0) * 100.0
+            sl_price = context.get('wick_stop_loss', cur_p * 0.99)
+            sl_dist = context.get('sl_pct_distance', 0.008) * 100.0
+            prompt = f"""Evaluate LONG setup for {symbol} on Binance Futures ({lev}x leverage).
+Metrics: Price ${cur_p}, 5m Vol: {vol_surge}x, 5m: {p5m:+.2f}%, 15m: {p15m:+.2f}%, Pullback: {pullback_pct:+.2f}%, RSI14: {rsi_val}, Trend: {trend_val}, Wick U/L: {u_wick:.1f}%/{l_wick:.1f}%, ATR: {atr_pct:.2f}%, BTC: {btc_reg}, SL: ${sl_price} ({sl_dist:.2f}% dist).
+Quant & Memory: {ml_prob_str} | {token_mem}
+Rules: Default is SKIP. Approve (BUY) ONLY if volume conviction is real and no trap (upper wick <= 30%, RSI <= 70, trend Bullish).
+Output JSON:
+{{"trap_risk": bool, "decision": "BUY"|"SKIP", "confidence": float, "entry_price": float, "stop_loss": float, "tp1": float, "tp2": float, "reason": "1-2 sentences with trade thesis"}}"""
+        else:
+            bounce_pct = context.get('bounce_from_low_pct', 0) * 100.0
+            sl_price = context.get('short_wick_sl', cur_p * 1.01)
+            sl_dist = context.get('short_sl_dist', 0.008) * 100.0
+            prompt = f"""Evaluate SHORT setup for {symbol} on Binance Futures ({lev}x leverage).
+Metrics: Price ${cur_p}, 5m Vol: {vol_surge}x, 5m: {p5m:+.2f}%, 15m: {p15m:+.2f}%, Bounce: +{bounce_pct:.2f}%, RSI14: {rsi_val}, Trend: {trend_val}, Wick U/L: {u_wick:.1f}%/{l_wick:.1f}%, ATR: {atr_pct:.2f}%, BTC: {btc_reg}, SL: ${sl_price} ({sl_dist:.2f}% dist).
+Quant & Memory: {ml_prob_str} | {token_mem}
+Rules: Default is SKIP. Approve (SHORT) ONLY if breakdown volume is real and no trap (lower wick <= 30%, RSI >= 30, trend Bearish).
+Output JSON:
+{{"trap_risk": bool, "decision": "SHORT"|"SKIP", "confidence": float, "entry_price": float, "stop_loss": float, "tp1": float, "tp2": float, "reason": "1-2 sentences with trade thesis"}}"""
 
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -165,6 +134,10 @@ Respond ONLY with raw valid JSON:
 
         eval_result = None
         for model in self.models:
+            # Пропускаем модель, если на ней активен временный кулдаун после 429
+            if now < self._model_cooldowns.get(model, 0.0):
+                continue
+
             payload = {
                 "model": model,
                 "messages": [
@@ -173,11 +146,11 @@ Respond ONLY with raw valid JSON:
                 ],
                 "response_format": {"type": "json_object"},
                 "temperature": 0.1,
-                "max_tokens": 1500
+                "max_tokens": 450
             }
 
             try:
-                timeout = aiohttp.ClientTimeout(total=10)
+                timeout = aiohttp.ClientTimeout(total=8)
                 async with aiohttp.ClientSession(timeout=timeout) as session:
                     async with session.post(self.url, headers=headers, json=payload) as resp:
                         if resp.status == 200:
@@ -195,7 +168,10 @@ Respond ONLY with raw valid JSON:
                             else:
                                 print(f"⚠️ [Groq API Warning] {model} вернул невалидный JSON (finish_reason={finish_reason}): {content[:100]}", flush=True)
                         elif resp.status == 429:
-                            print(f"⚠️ [Groq API 429] Rate limit hit на модели {model}", flush=True)
+                            err_txt = await resp.text()
+                            # Устанавливаем кулдаун 90 секунд для этой модели
+                            self._model_cooldowns[model] = time.time() + 90.0
+                            print(f"⚠️ [Groq API 429] Rate limit hit на {model} (кулдаун 90с): {err_txt[:100]}", flush=True)
                             continue
                         else:
                             err_txt = await resp.text()

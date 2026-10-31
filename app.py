@@ -22,6 +22,8 @@ from tracker import portfolio
 import config
 from main_bot import run_in_background
 from scanner import market_scanner
+from obsidian_vault import obsidian_vault
+from ml_engine import ml_engine
 
 # ==============================================================================
 # НАСТРОЙКА СТРАНИЦЫ
@@ -271,13 +273,14 @@ with c5:
 # ==============================================================================
 # ВКЛАДКИ
 # ==============================================================================
-tab_pos, tab_radar, tab_funnel, tab_history, tab_shadow, tab_timemachine = st.tabs([
+tab_pos, tab_radar, tab_funnel, tab_history, tab_shadow, tab_timemachine, tab_brain = st.tabs([
     "🟢 Открытые позиции",
     "🤖 Groq Live Radar",
     "📊 Воронка The Funnel",
     "📓 История сделок",
     "👻 Shadow Tracker",
-    "🔬 Time Machine (Бэктест)"
+    "🔬 Time Machine (Бэктест)",
+    "🧠 Второй мозг (Obsidian & ML)"
 ])
 
 # ------------------------------------------------------------------------------
@@ -378,7 +381,11 @@ with tab_radar:
                     else:
                         st.caption(f"🟢 ИИ: {m_name.split('/')[-1]}")
                 with rc2:
-                    st.metric("Уверенность AI", f"{conf}%")
+                    ml_p = ev.get('ml_prob', None)
+                    if ml_p is not None:
+                        st.metric("Уверенность AI", f"{conf}%", delta=f"ML: {ml_p}%", delta_color="normal")
+                    else:
+                        st.metric("Уверенность AI", f"{conf}%")
                     st.caption(f"Всплеск: {ev.get('surge', 1)}x | Откат: {ev.get('pullback', 0)}%")
                 with rc3:
                     st.markdown(f"**Анализ Groq:** {ev.get('reason', 'N/A')}")
@@ -520,6 +527,88 @@ with tab_timemachine:
                 
             st.dataframe(pd.DataFrame(rows), use_container_width=True)
             st.success("🏆 Победитель: **60x Optimal Sniper** (+93.1% ROI за 7 дней, баланс вырос с $20.00 до $38.62 при винрейте 75.0% и сниженной просадке)!")
+
+# ------------------------------------------------------------------------------
+# 7. ВТОРОЙ МОЗГ (OBSIDIAN VAULT & QUANT ML)
+# ------------------------------------------------------------------------------
+with tab_brain:
+    st.subheader("🧠 Второй мозг торгового бота (Obsidian Vault & Квантовый ML)")
+    st.markdown("Архитектура долговременной памяти: бот ведёт торговый журнал в Markdown, профилирует повадки монет и использует предобученный квантовый классификатор для фильтрации ловушек.")
+
+    b_col1, b_col2 = st.columns(2)
+    with b_col1:
+        st.markdown("### ⚡ Квантовая модель (XGBoost Alpha)")
+        ml_status = "🟢 Активна (Загружена)" if ml_engine.model is not None else "🟡 Ожидает обучения"
+        st.info(f"**Статус модели:** {ml_status}")
+        st.metric("Винрейт на слепом тесте (Walk-Forward)", f"{ml_engine.winrate:.1f}%")
+        st.metric("Профит-фактор (Profit Factor)", f"{ml_engine.profit_factor:.2f}")
+        st.caption("Обучена на 37,411 5m свечах (20 топ-пар Binance) с честным вычетом биржевых комиссий 0.10% за сделку.")
+
+    with b_col2:
+        st.markdown("### 📓 База знаний Obsidian Vault")
+        st.success(f"**Путь к хранилищу:** `{obsidian_vault.vault_path}`")
+        st.caption("Синхронизируется с вашим iCloud Obsidian — заметки мгновенно открываются в приложении Obsidian на Mac и iPhone!")
+        
+        # Кнопка скачивания хранилища прямо с сервера Render
+        import io, zipfile
+        def get_vault_zip():
+            buf = io.BytesIO()
+            v_dir = obsidian_vault.vault_path if os.path.exists(obsidian_vault.vault_path) else obsidian_vault.secondary_path
+            if v_dir and os.path.exists(v_dir):
+                with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                    for root, _, files in os.walk(v_dir):
+                        for f in files:
+                            full_p = os.path.join(root, f)
+                            rel_p = os.path.relpath(full_p, v_dir)
+                            zf.write(full_p, rel_p)
+            buf.seek(0)
+            return buf.getvalue()
+
+        st.download_button(
+            label="📥 Скачать базу Obsidian Vault с Render (ZIP)",
+            data=get_vault_zip(),
+            file_name="Binance_AI_Trader_Vault.zip",
+            mime="application/zip",
+            use_container_width=True
+        )
+
+        st.markdown("""
+        **Структура разделов Vault:**
+        - 📖 `Playbooks/` — Институциональные правила входа (Rocket Long, Breakdown Short, Trap Matrix).
+        - 📁 `Token_Dossiers/` — Досье на каждую монету с памятью ошибок и винрейтом.
+        - ⚡ `Journal/` — Автоматический журнал всех сделок с пост-мортем анализом.
+        - 🛡️ `Shadow_Audits/` — Аудит отклонённых сетапов.
+        """)
+
+    st.markdown("---")
+    st.markdown("### 📖 Интерактивный просмотр заметок из Obsidian")
+    vault_dir = obsidian_vault.vault_path
+    if not os.path.exists(vault_dir) and obsidian_vault.secondary_path:
+        vault_dir = obsidian_vault.secondary_path
+
+    if os.path.exists(vault_dir):
+        all_notes = []
+        for root, _, files in os.walk(vault_dir):
+            for f in files:
+                if f.endswith(".md"):
+                    rel = os.path.relpath(os.path.join(root, f), vault_dir)
+                    all_notes.append(rel)
+        all_notes.sort()
+
+        if all_notes:
+            selected_note = st.selectbox("Выберите заметку из базы Obsidian для чтения:", all_notes)
+            note_full_path = os.path.join(vault_dir, selected_note)
+            try:
+                with open(note_full_path, "r", encoding="utf-8") as nf:
+                    note_content = nf.read()
+                st.markdown(f"#### 📄 `{selected_note}`")
+                st.code(note_content, language="markdown")
+            except Exception as e:
+                st.error(f"Не удалось прочитать заметку: {e}")
+        else:
+            st.info("В хранилище пока нет заметок.")
+    else:
+        st.warning("Хранилище Obsidian пока инициализируется.")
 
 # ==============================================================================
 # АВТООБНОВЛЕНИЕ СТРАНИЦЫ (В САМОМ КОНЦЕ СКРИПТА ПОСЛЕ ОТРИСОВКИ ВСЕГО UI)

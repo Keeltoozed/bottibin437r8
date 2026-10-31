@@ -3,6 +3,7 @@ import json
 import time
 from typing import Dict, List, Any, Optional
 import config
+from obsidian_vault import obsidian_vault
 
 PORTFOLIO_FILE = "portfolio.json"
 
@@ -136,6 +137,23 @@ class PortfolioTracker:
         self.open_positions[symbol] = pos
         self.funnel_stats["filled"] += 1
         self.save()
+
+        # Автоматическая запись новой сделки в Obsidian Vault (Журнал сделок)
+        try:
+            obsidian_vault.log_trade_entry({
+                "symbol": symbol,
+                "side": side,
+                "entry_price": entry_price,
+                "stop_loss": wick_sl,
+                "tp1": tp1,
+                "tp2": tp2,
+                "margin": margin_usdt,
+                "leverage": leverage,
+                "reason": groq_reason
+            })
+        except Exception as e:
+            print(f"⚠️ [Obsidian Log Error] {e}", flush=True)
+
         print(f"🟢 [TRADE OPEN] {side} {symbol} по ${entry_price:.4f} (Маржа: ${margin_usdt:.2f}, Плечо: {leverage}x)", flush=True)
         return True
 
@@ -239,6 +257,21 @@ class PortfolioTracker:
             pos["coins_qty"] *= (1.0 - partial_pct)
 
         self.save()
+
+        # Автоматическая запись закрытия и пост-мортем урока в Obsidian Vault
+        try:
+            obsidian_vault.log_trade_exit({
+                "symbol": symbol,
+                "side": pos["side"],
+                "entry_price": entry,
+                "exit_price": exit_price,
+                "realized_pnl": realized_pnl,
+                "realized_pnl_pct": trade_record["roi_pct"],
+                "exit_reason": reason
+            })
+        except Exception as e:
+            print(f"⚠️ [Obsidian Exit Log Error] {e}", flush=True)
+
         print(f"🔴 [TRADE CLOSED] {symbol} по ${exit_price:.4f} | PnL: ${realized_pnl:+.2f} ({trade_record['roi_pct']:+.1f}%) | Причина: {reason}", flush=True)
 
     def close_all(self, reason: str = "Ручное закрытие (Panic Close)"):

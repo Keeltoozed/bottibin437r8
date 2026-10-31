@@ -15,6 +15,8 @@ import asyncio
 import time
 from typing import Dict, Any, List
 import config
+from obsidian_vault import obsidian_vault
+from ml_engine import ml_engine
 from binance_client import binance_client
 from groq_engine import groq_engine
 from tracker import portfolio
@@ -134,8 +136,15 @@ class MarketScanner:
 
         portfolio.funnel_stats["hard_gates"] += len(candidates_passed_hard)
 
-        # Сортируем кандидатов по взрывному импульсу и направляем ТОП-1 на глубокий AI-анализ в Groq
-        candidates_passed_hard.sort(key=lambda x: abs(x["pct_5m"]) * x["volume_surge_ratio"], reverse=True)
+        # 3. КВАНТОВЫЙ ML СКОРИНГ (XGBoost Alpha): расчет вероятности успеха за 0.5 мс
+        for cand in candidates_passed_hard:
+            ml_res = ml_engine.evaluate_candidate(cand)
+            cand["ml_prob"] = ml_res.get("ml_probability", 0.5)
+            cand["ml_reason"] = ml_res.get("reason", "")
+            cand["ml_approved"] = ml_res.get("ml_approved", True)
+
+        # Сортируем кандидатов по взрывному импульсу и вероятности квантовой модели
+        candidates_passed_hard.sort(key=lambda x: x.get("ml_prob", 0.5) * abs(x["pct_5m"]) * x["volume_surge_ratio"], reverse=True)
         candidates_to_eval = candidates_passed_hard[:1]
 
         # 4. GROQ SOFT GATE (JEV AI ENGINE)
@@ -157,6 +166,7 @@ class MarketScanner:
                 "price": ctx["current_price"],
                 "decision": groq_eval.get("decision", "SKIP"),
                 "confidence": groq_eval.get("confidence", 0.0),
+                "ml_prob": round(ctx.get("ml_prob", 0.5) * 100, 1),
                 "reason": groq_eval.get("reason", ""),
                 "sl": groq_eval.get("stop_loss", default_sl),
                 "tp1": groq_eval.get("tp1", default_tp1),
@@ -247,6 +257,11 @@ class MarketScanner:
                 if len(portfolio.shadow_trades) > 50:
                     portfolio.shadow_trades = portfolio.shadow_trades[:50]
                 portfolio.save()
+
+                try:
+                    obsidian_vault.log_shadow_decision(eval_entry)
+                except Exception:
+                    pass
 
         return candidates_passed_hard
 
