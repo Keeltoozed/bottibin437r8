@@ -151,7 +151,7 @@ with st.sidebar:
     st.markdown("### 🎯 Параметры стратегии ($20)")
     
     # Выбор кредитного плеча
-    lev_options = [60, 75, 50, 35, 25, 20, 10, 5]
+    lev_options = [20, 25, 35, 50, 60, 10, 5]
     cur_lev = getattr(portfolio, "current_leverage", config.LEVERAGE)
     cur_idx = lev_options.index(cur_lev) if cur_lev in lev_options else 0
     chosen_leverage = st.selectbox("⚡ Кредитное плечо (для новых сделок):", lev_options, index=cur_idx)
@@ -166,23 +166,24 @@ with st.sidebar:
     risk_mode = st.radio(
         "Режим доходности:",
         [
-            "⚡ Оптимал 60x (Высокий профит +93%, сниженная просадка)",
-            "🔥 Турбо 75x (Максимальный разгон)",
-            "🎯 Стандарт 25x (Консервативный разгон)"
+            "🛡️ Институциональный 20x (Умный вход, защита от шума, стоп 1.8%)",
+            "🎯 Стандарт 25x (Умеренный разгон)",
+            "⚡ Скальпинг 60x (Узкий стоп 0.75%, высокий риск)"
         ],
         index=0
     )
-    if "Оптимал 60x" in risk_mode:
-        config.COMPOUND_RISK_PCT = 0.10
-        config.MAX_RISK_PER_TRADE_USD = 1.50
-        config.TRADE_AMOUNT_USDT = 6.0
-    elif "Турбо" in risk_mode:
-        config.COMPOUND_RISK_PCT = 0.10
-        config.MAX_RISK_PER_TRADE_USD = 1.50
-        config.TRADE_AMOUNT_USDT = 6.0
-    else:
+    if "Институциональный 20x" in risk_mode:
         config.COMPOUND_RISK_PCT = 0.05
+        config.MAX_RISK_PER_TRADE_USD = 0.80
+        config.TRADE_AMOUNT_USDT = 4.0
+    elif "Стандарт 25x" in risk_mode:
+        config.COMPOUND_RISK_PCT = 0.06
         config.MAX_RISK_PER_TRADE_USD = 1.00
+        config.TRADE_AMOUNT_USDT = 5.0
+    else:
+        config.COMPOUND_RISK_PCT = 0.08
+        config.MAX_RISK_PER_TRADE_USD = 1.20
+        config.TRADE_AMOUNT_USDT = 5.0
         config.TRADE_AMOUNT_USDT = 6.0
 
     st.text(f"Плечо для новых входов: {portfolio.current_leverage}x 🚀")
@@ -376,7 +377,7 @@ with tab_radar:
             
             raw_reason = item.get("ml_reason", "")
             if "опасный стоп" in raw_reason:
-                stat_str = f"❌ Опасный стоп ({sl_pct:.2f}% > 0.75%)"
+                stat_str = f"❌ Опасный стоп ({sl_pct:.2f}% > {config.MAX_ALLOWED_SL_PCT*100:.2f}%)"
             elif "сонный объем" in raw_reason:
                 stat_str = "💤 Нет объёма (< 1.30x)"
             elif p_val >= 70.0:
@@ -486,7 +487,7 @@ with tab_history:
         df = pd.DataFrame(portfolio.trade_history)
         st.dataframe(
             df[["symbol", "side", "entry_price", "exit_price", "margin_usdt", "realized_pnl", "roi_pct", "reason", "closed_at"]],
-            use_container_width=True
+            width="stretch"
         )
 
 # ------------------------------------------------------------------------------
@@ -532,7 +533,7 @@ with tab_shadow:
         available_cols = [col for col, name in desired_cols if col in sdf.columns]
         rename_map = {col: name for col, name in desired_cols if col in sdf.columns}
         display_df = sdf[available_cols].rename(columns=rename_map)
-        st.dataframe(display_df, use_container_width=True)
+        st.dataframe(display_df, width="stretch")
 
 # ------------------------------------------------------------------------------
 # 6. TIME MACHINE (БЭКТЕСТ ЗА НЕДЕЛЮ ПО МЕТОДОЛОГИИ DAY-TRADER-SKILL)
@@ -579,7 +580,7 @@ with tab_timemachine:
                     "Комиссии биржи": f"${res['total_commission']:.2f}"
                 })
                 
-            st.dataframe(pd.DataFrame(rows), use_container_width=True)
+            st.dataframe(pd.DataFrame(rows), width="stretch")
             st.success("🏆 Победитель: **60x Optimal Sniper** (+93.1% ROI за 7 дней, баланс вырос с $20.00 до $38.62 при винрейте 75.0% и сниженной просадке)!")
 
 # ------------------------------------------------------------------------------

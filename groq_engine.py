@@ -110,21 +110,31 @@ class GroqEngine:
             sl_price = context.get('wick_stop_loss', cur_p * 0.99)
             sl_dist = context.get('sl_pct_distance', 0.008) * 100.0
             prompt = f"""Evaluate LONG setup for {symbol} on Binance Futures ({lev}x leverage).
-Metrics: Price ${cur_p}, 5m Vol: {vol_surge}x, 5m: {p5m:+.2f}%, 15m: {p15m:+.2f}%, Pullback: {pullback_pct:+.2f}%, RSI14: {rsi_val}, Trend: {trend_val}, Wick U/L: {u_wick:.1f}%/{l_wick:.1f}%, ATR: {atr_pct:.2f}%, BTC: {btc_reg}, SL: ${sl_price} ({sl_dist:.2f}% dist).
+Metrics: Price ${cur_p}, 5m Vol Surge: {vol_surge:.2f}x, 5m Change: {p5m:+.2f}%, 15m: {p15m:+.2f}%, Pullback: {pullback_pct:+.2f}%, RSI14: {rsi_val:.1f}, Trend: {trend_val}, Wick U/L: {u_wick:.1f}%/{l_wick:.1f}%, ATR: {atr_pct:.2f}%, BTC: {btc_reg}, SL: ${sl_price} ({sl_dist:.2f}% dist).
 Quant & Memory: {ml_prob_str} | {token_mem}
-Rules: Default is SKIP. Approve (BUY) ONLY if volume conviction is real and no trap (upper wick <= 30%, RSI <= 70, trend Bullish).
+Strict Rules:
+- Default is SKIP.
+- Reject (SKIP) if 5m change < +0.55% (sleepy flat chop, not a real impulse).
+- Reject (SKIP) if volume surge < 1.70x (no institutional conviction).
+- Reject (SKIP) if RSI > 68 or upper wick > 25% (exhaustion / bull trap).
+- Approve (BUY) ONLY if 5m change >= +0.55%, volume >= 1.70x, clear bullish structure, and safe stop.
 Output JSON:
-{{"trap_risk": bool, "decision": "BUY"|"SKIP", "confidence": float, "entry_price": float, "stop_loss": float, "tp1": float, "tp2": float, "reason": "1-2 sentences with trade thesis"}}"""
+{{"trap_risk": bool, "decision": "BUY"|"SKIP", "confidence": float, "entry_price": float, "stop_loss": float, "tp1": float, "tp2": float, "reason": "1-2 sentences with cynical trade thesis"}}"""
         else:
             bounce_pct = context.get('bounce_from_low_pct', 0) * 100.0
             sl_price = context.get('short_wick_sl', cur_p * 1.01)
             sl_dist = context.get('short_sl_dist', 0.008) * 100.0
             prompt = f"""Evaluate SHORT setup for {symbol} on Binance Futures ({lev}x leverage).
-Metrics: Price ${cur_p}, 5m Vol: {vol_surge}x, 5m: {p5m:+.2f}%, 15m: {p15m:+.2f}%, Bounce: +{bounce_pct:.2f}%, RSI14: {rsi_val}, Trend: {trend_val}, Wick U/L: {u_wick:.1f}%/{l_wick:.1f}%, ATR: {atr_pct:.2f}%, BTC: {btc_reg}, SL: ${sl_price} ({sl_dist:.2f}% dist).
+Metrics: Price ${cur_p}, 5m Vol Surge: {vol_surge:.2f}x, 5m Change: {p5m:+.2f}%, 15m: {p15m:+.2f}%, Bounce: +{bounce_pct:.2f}%, RSI14: {rsi_val:.1f}, Trend: {trend_val}, Wick U/L: {u_wick:.1f}%/{l_wick:.1f}%, ATR: {atr_pct:.2f}%, BTC: {btc_reg}, SL: ${sl_price} ({sl_dist:.2f}% dist).
 Quant & Memory: {ml_prob_str} | {token_mem}
-Rules: Default is SKIP. Approve (SHORT) ONLY if breakdown volume is real and no trap (lower wick <= 30%, RSI >= 30, trend Bearish).
+Strict Rules:
+- Default is SKIP.
+- Reject (SKIP) if 5m change > -0.55% (weak breakdown, not an aggressive impulse).
+- Reject (SKIP) if volume surge < 1.70x (no institutional selling).
+- Reject (SKIP) if RSI < 32 or lower wick > 25% (oversold bounce trap).
+- Approve (SHORT) ONLY if 5m change <= -0.55%, volume >= 1.70x, clear bearish breakdown, and safe stop.
 Output JSON:
-{{"trap_risk": bool, "decision": "SHORT"|"SKIP", "confidence": float, "entry_price": float, "stop_loss": float, "tp1": float, "tp2": float, "reason": "1-2 sentences with trade thesis"}}"""
+{{"trap_risk": bool, "decision": "SHORT"|"SKIP", "confidence": float, "entry_price": float, "stop_loss": float, "tp1": float, "tp2": float, "reason": "1-2 sentences with cynical trade thesis"}}"""
 
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -141,12 +151,12 @@ Output JSON:
             payload = {
                 "model": model,
                 "messages": [
-                    {"role": "system", "content": "You are a professional prop trading execution model. You output ONLY raw valid JSON."},
+                    {"role": "system", "content": "You are the Chief Risk Officer and Senior Algorithmic Execution Trader at an elite quantitative prop fund. Your primary directive is CAPITAL PROTECTION. 95% of retail setups are traps. You are extremely cynical and demanding. Default verdict is ALWAYS SKIP. Only approve if momentum and volume are undeniable. Output raw valid JSON only."},
                     {"role": "user", "content": prompt}
                 ],
                 "response_format": {"type": "json_object"},
                 "temperature": 0.1,
-                "max_tokens": 220
+                "max_tokens": 650
             }
 
             try:

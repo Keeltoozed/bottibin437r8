@@ -158,12 +158,12 @@ class QuantMLEngine:
                 prob_win = min(prob_win, 0.52)
                 penalties.append("сонный объем < 1.30x")
 
-            # 2. РИСК-ГАРМОНИЗАЦИЯ ПОД 60x ПЛЕЧО (Risk-Aware Scoring):
-            # Если реальная тень свечи требует стоп шире 0.75%, при 60x плече это риск мгновенной потери -70%..-100% маржи.
-            # Штрафуем вероятность, чтобы монеты с опасными стопами не висели в топе радара с ложными 80%.
+            # 2. РИСК-ГАРМОНИЗАЦИЯ ПОД КРЕДИТНОЕ ПЛЕЧО (Risk-Aware Scoring):
+            # Если реальная тень свечи требует стоп шире допустимого (MAX_ALLOWED_SL_PCT),
+            # штрафуем вероятность, чтобы монеты с опасными стопами не висели в топе радара с ложными 80%.
             side_check = context.get("candidate_side", "LONG")
             sl_dist = context.get("sl_pct_distance", 0.0) if side_check == "LONG" else context.get("short_sl_dist", 0.0)
-            max_sl_cap = getattr(config, "MAX_ALLOWED_SL_PCT", 0.0075)
+            max_sl_cap = getattr(config, "MAX_ALLOWED_SL_PCT", 0.0180)
             if sl_dist > max_sl_cap:
                 prob_win = min(prob_win, 0.49)
                 penalties.append(f"опасный стоп ({sl_dist*100:.2f}% > {max_sl_cap*100:.2f}%)")

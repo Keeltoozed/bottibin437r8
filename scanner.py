@@ -163,10 +163,22 @@ class MarketScanner:
                     print(f"🛑 [BTC БЛОК] {sym} SHORT ML {int(prob*100)}% отклонен: BTC растет", flush=True)
                 continue
 
-            # Проверка минимальной активности (не спим в мертвом стакане)
-            if surge < 1.30 and abs(pct_5m) < 0.30:
+            # 1. Требование институциональной силы (никаких сонных микро-свечей +0.2%..+0.3%)
+            if surge < 1.50 or abs(pct_5m) < 0.50:
                 if should_log:
-                    print(f"🛑 [НЕТ ИМПУЛЬСА] {sym} ({side}) ML {int(prob*100)}% отклонен: всплеск {surge:.2f}x < 1.30x и ход 5m {pct_5m:+.2f}% < 0.30%", flush=True)
+                    print(f"🛑 [СЛАБЫЙ ИМПУЛЬС] {sym} ({side}) ML {int(prob*100)}% отклонен: всплеск {surge:.2f}x (надо >=1.50x) или ход 5m {pct_5m:+.2f}% (надо >=0.50%)", flush=True)
+                continue
+
+            # 2. Защита от контртрендовых сделок (не шортим пампы и не лонгуем дампы)
+            trend = cand.get("trend", "CHOP")
+            pct_15m = cand.get("pct_15m", 0.0)
+            if side == "SHORT" and (trend == "BULLISH" or pct_5m > 0.30 or pct_15m > 0.50):
+                if should_log:
+                    print(f"🛑 [ТРЕНД-БЛОК] {sym} SHORT ML {int(prob*100)}% отклонен: монета в бычьем тренде ({pct_5m:+.2f}%, 15m: {pct_15m:+.2f}%)", flush=True)
+                continue
+            if side == "LONG" and (trend == "BEARISH" or pct_5m < -0.30 or pct_15m < -0.50):
+                if should_log:
+                    print(f"🛑 [ТРЕНД-БЛОК] {sym} LONG ML {int(prob*100)}% отклонен: монета в медвежьем тренде ({pct_5m:+.2f}%, 15m: {pct_15m:+.2f}%)", flush=True)
                 continue
 
             candidates_to_eval.append(cand)

@@ -39,40 +39,40 @@ BINANCE_TESTNET_FUTURES_URL = "https://testnet.binancefuture.com"
 PAPER_TRADING = os.getenv("PAPER_TRADING", "true").lower() == "true"
 INITIAL_BALANCE = float(os.getenv("INITIAL_BALANCE", "20.0"))
 
-# Дисциплина Day-Trader-Skill: динамический сложный процент (Compounding)
-# При росте баланса размер риска и прибыль растут автоматически!
+# Дисциплина Day-Trader-Skill: институциональный риск-менеджмент
+# При росте баланса размер риска и прибыль растут автоматически
 ENABLE_COMPOUNDING = os.getenv("ENABLE_COMPOUNDING", "true").lower() == "true"
-COMPOUND_RISK_PCT = float(os.getenv("COMPOUND_RISK_PCT", "0.10"))  # 10% от депозита на сделку ($2 при $20, $2.70 при $27)
-MAX_RISK_PER_TRADE_USD = float(os.getenv("MAX_RISK_PER_TRADE_USD", "1.00")) # минимум $1.00
-ENABLE_CIRCUIT_BREAKER = os.getenv("ENABLE_CIRCUIT_BREAKER", "false").lower() == "true"  # Отключен стоп по торговле
-MAX_DAILY_LOSS_USD = float(os.getenv("MAX_DAILY_LOSS_USD", "999999.00"))  # Без дневной остановки бота
+COMPOUND_RISK_PCT = float(os.getenv("COMPOUND_RISK_PCT", "0.05"))  # 5% от депозита на сделку (безопасный проп-стандарт)
+MAX_RISK_PER_TRADE_USD = float(os.getenv("MAX_RISK_PER_TRADE_USD", "0.80")) # базовый риск $0.80 при $20 депо
+ENABLE_CIRCUIT_BREAKER = os.getenv("ENABLE_CIRCUIT_BREAKER", "false").lower() == "true"
+MAX_DAILY_LOSS_USD = float(os.getenv("MAX_DAILY_LOSS_USD", "999999.00"))
 TARGET_1_R = 2.0  # Цель 1: 2R
 TARGET_2_R = 3.5  # Цель 2: 3.5R
-ENABLE_SHORT = os.getenv("ENABLE_SHORT", "true").lower() == "true"  # Торговля в LONG и SHORT
+ENABLE_SHORT = os.getenv("ENABLE_SHORT", "true").lower() == "true"
 
-# Для капитала $20: $6 маржа на сделку (2 сделки = $12 в работе, $8 свободный резерв)
-TRADE_AMOUNT_USDT = float(os.getenv("TRADE_AMOUNT_USDT", "6.0"))
-LEVERAGE = 60  # Значение по умолчанию: 60x (Оптимальный баланс высокой прибыли и сниженной просадки)
+# Плечо 20x — институциональный оптимум для скальпинга альткоинов:
+# Дает стопу свободно дышать (1.5%..1.8% без выбивания рыночным шумом) и приносит +50%..+90% ROI на тейках!
+TRADE_AMOUNT_USDT = float(os.getenv("TRADE_AMOUNT_USDT", "4.0"))
+LEVERAGE = int(os.getenv("LEVERAGE", "20"))
 MAX_CONCURRENT_POSITIONS = int(os.getenv("MAX_POSITIONS", "2"))
 
 # ==============================================================================
-# 4. EXIT STRATEGY & "THE LINE" (GROK x JEV RULES DEDICATED FOR 60x LEVERAGE)
+# 4. EXIT STRATEGY & "THE LINE" (PROFESSIONAL PROP RISK RULES)
 # ==============================================================================
-# "We bid the flush, not the candle": pullback required before entry
-MIN_PULLBACK_PCT = float(os.getenv("MIN_PULLBACK_PCT", "0.0005"))  # 0.05% pullback
+MIN_PULLBACK_PCT = float(os.getenv("MIN_PULLBACK_PCT", "0.0005"))
 
-# "The stop lives under the wick": жесткий снайперский стоп для 60x плеча (не более 0.75%)
-# Запрещает сделки с широкими размашистыми фитилями вроде STX (где стоп был 1.2% и привел к убытку 84%)
-WICK_BUFFER_PCT = float(os.getenv("WICK_BUFFER_PCT", "0.0008"))
-MAX_ALLOWED_SL_PCT = float(os.getenv("MAX_ALLOWED_SL_PCT", "0.0075"))  # Макс. 0.75% SL (строгое ограничение убытка на 60x)
+# "The stop lives under the swing": стоп за реальный локальный уровень (до 1.8% при 20x плече)
+# Защищает от выбивания микро-шумом 5-минуток!
+WICK_BUFFER_PCT = float(os.getenv("WICK_BUFFER_PCT", "0.0010"))
+MAX_ALLOWED_SL_PCT = float(os.getenv("MAX_ALLOWED_SL_PCT", "0.0180"))  # До 1.80% SL (при 20x плече риск всего 36% маржи)
 
-# Multi-tier Take Profit (с плечом 60x):
-# +1.5% ход цены = +90.0% ROI (TP1: фиксация 50% + мгновенный безубыток)
-# +3.0% ход цены = +180.0% ROI (TP2: фиксация 25%)
-# Остаток 25%: трейлинг-стоп 0.8%
-TP1_PCT = float(os.getenv("TP1_PCT", "0.015"))
-TP2_PCT = float(os.getenv("TP2_PCT", "0.030"))
-TRAILING_STOP_PCT = float(os.getenv("TRAILING_STOP_PCT", "0.008"))  # 0.8% trailing
+# Multi-tier Take Profit (с плечом 20x):
+# +2.5% ход цены = +50.0% ROI (TP1: фиксация 50% + безубыток)
+# +4.5% ход цены = +90.0% ROI (TP2: фиксация 25%)
+# Остаток 25%: трейлинг-стоп 1.2%
+TP1_PCT = float(os.getenv("TP1_PCT", "0.025"))
+TP2_PCT = float(os.getenv("TP2_PCT", "0.045"))
+TRAILING_STOP_PCT = float(os.getenv("TRAILING_STOP_PCT", "0.012"))
 
 # Быстрый перевод в безубыток при прохождении 40% пути до TP1 (+0.6% ход = +45% прибыли)
 BREAKEVEN_TRIGGER_RATIO = 0.40
@@ -81,15 +81,15 @@ BREAKEVEN_TRIGGER_RATIO = 0.40
 ENABLE_MOMENTUM_DEATH_EXIT = True
 
 # ==============================================================================
-# 5. MARKET SCANNER & BROAD CRYPTO UNIVERSE (TOP 130+ ACTIVE COINS)
+# 5. MARKET SCANNER & ELITE CRYPTO UNIVERSE (TOP LIQUID PAIRS)
 # ==============================================================================
-# Снижен минимальный суточный объем с $50M до $8M, чтобы ловить взрывные импульсы на 130+ монетах!
-MIN_24H_VOLUME_USDT = float(os.getenv("MIN_24H_VOLUME_USDT", "8000000"))  # $8M
-SCAN_TICKERS_LIMIT = int(os.getenv("SCAN_TICKERS_LIMIT", "130"))  # Сканируем 130 самых активных пар Binance
-STRICT_WHITELIST_ONLY = os.getenv("STRICT_WHITELIST_ONLY", "false").lower() == "true"  # Динамический отбор всех ликвидных пар
+# Минимальный суточный объем $30M: гарантирует плотный стакан, нулевой спред и отсутствие микро-пенни манипуляций
+MIN_24H_VOLUME_USDT = float(os.getenv("MIN_24H_VOLUME_USDT", "30000000"))  # $30M
+SCAN_TICKERS_LIMIT = int(os.getenv("SCAN_TICKERS_LIMIT", "80"))  # Сканируем топ-80 самых ликвидных пар Binance
+STRICT_WHITELIST_ONLY = os.getenv("STRICT_WHITELIST_ONLY", "false").lower() == "true"
 ML_CONFIDENCE_THRESHOLD = float(os.getenv("ML_CONFIDENCE_THRESHOLD", "0.68"))  # 68% уверенность модели для входа
 
-# Элитный юниверс криптовалют (160+ проверенных монет)
+# Элитный юниверс криптовалют с глубокой ликвидностью
 TOP_CRYPTO_UNIVERSE = [
     # Топ-10 Мажоры и L1 гиганты
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT", "ADAUSDT", "TRXUSDT", "AVAXUSDT", "SUIUSDT",
@@ -101,18 +101,17 @@ TOP_CRYPTO_UNIVERSE = [
     "PEPEUSDT", "1000PEPEUSDT", "WIFUSDT", "SHIBUSDT", "1000SHIBUSDT", "BONKUSDT", "1000BONKUSDT", "FLOKIUSDT", "1000FLOKIUSDT",
     "BOMEUSDT", "MEMEUSDT", "TURBOUSDT", "1000SATSUSDT", "NEIROUSDT", "PENGUUSDT", "POPCATUSDT", "MEWUSDT", "BRETTUSDT",
     "MOODENGUSDT", "GOATUSDT", "ACTUSDT", "PNUTUSDT", "COWUSDT", "CETUSUSDT", "GRASSUSDT", "DRIFTUSDT", "VIRTUALUSDT", "AIXBTUSDT",
-    "DOGSUSDT", "NOTUSDT", "HMSTRUSDT", "CATIUSDT", "SLERFUSDT",
+    "DOGSUSDT", "NOTUSDT",
     # Топ DeFi, AI и Web3
     "FETUSDT", "UNIUSDT", "PENDLEUSDT", "ZROUSDT", "STRKUSDT", "PYTHUSDT", "JTOUSDT", "BLURUSDT",
     "GALAUSDT", "SANDUSDT", "MANAUSDT", "AXSUSDT", "CHZUSDT", "DYDXUSDT", "GMXUSDT", "LDOUSDT", "RAYUSDT", "ORDIUSDT",
-    "BEAMXUSDT", "HYPEUSDT", "QNTUSDT", "AINUSDT", "LSKUSDT", "QUSDT", "SOPHUSDT", "INTWUSDT", "BTWUSDT", "PUMPUSDT",
-    "BLESSUSDT", "AIOTUSDT", "MAGMAUSDT", "PARTIUSDT", "ETHFIUSDT", "REZUSDT", "BBUSDT", "IOUSDT", "ZKUSDT", "LISTAUSDT",
-    "WUSDT", "OMUSDT", "KAIAUSDT", "SAGAUSDT", "TNSRUSDT", "SAFEUSDT", "KMNOUSDT", "TRUUSDT", "LQTYUSDT", "SPELLUSDT",
-    "GASUSDT", "ARKUSDT", "LOOMUSDT", "HIFIUSDT", "POLUSDT", "BIGTIMEUSDT", "SUPERUSDT", "ARKMUSDT", "AIUSDT", "NFPUSDT",
+    "BEAMXUSDT", "HYPEUSDT", "QNTUSDT", "ETHFIUSDT", "REZUSDT", "BBUSDT", "IOUSDT", "ZKUSDT", "LISTAUSDT",
+    "WUSDT", "OMUSDT", "KAIAUSDT", "SAGAUSDT", "TNSRUSDT", "SAFEUSDT", "KMNOUSDT", "TRUUSDT", "LQTYUSDT",
+    "GASUSDT", "ARKUSDT", "POLUSDT", "BIGTIMEUSDT", "SUPERUSDT", "ARKMUSDT", "AIUSDT", "NFPUSDT",
     "GLMUSDT", "ATHUSDT", "ARUSDT", "HNTUSDT", "MOBILEUSDT", "IOTXUSDT", "AIOZUSDT", "RONINUSDT", "METISUSDT", "MANTAUSDT", "SCRUSDT"
 ]
 
-# Черный список: стейблкоины, фиат, хаки и синтетические акции
+# Черный список: стейблкоины, фиат, хаки, синтетические акции и неликвидные микро-пенни шиткоины
 EXCLUDED_TICKERS = {
     # Стейблкоины и фиат
     "USDCUSDT", "FDUSDUSDT", "TUSDUSDT", "BUSDUSDT", "EURUSDT", "DAIUSDT", "USTCUSDT", "PAXGUSDT", "XAUUSDT", "XAGUSDT",
@@ -121,7 +120,9 @@ EXCLUDED_TICKERS = {
     "TSLAUSDT", "AAPLUSDT", "AMZNUSDT", "MSFTUSDT", "COINBUSDT", "SOXLUSDT", "INTCUSDT", "SNDKUSDT",
     "SKHYNIXUSDT", "SKHYUSDT", "KORUUSDT", "SPCXUSDT", "AKEUSDT", "CRCLUSDT",
     # Хакнутые/проблемные токены
-    "INITUSDT", "CRVUSDT", "MEGAUSDT", "AVAUSDT", "SOLVUSDT", "BIRBUSDT"
+    "INITUSDT", "CRVUSDT", "MEGAUSDT", "AVAUSDT", "SOLVUSDT", "BIRBUSDT",
+    # Микро-пенни и неликвидные шиткоины с огромным спредом и дикими шпильками
+    "PUMPUSDT", "EDENUSDT", "CAPUSDT", "WETUSDT", "BLESSUSDT", "IDOLUSDT", "AIOTUSDT", "MAGMAUSDT", "EVAAUSDT", "SWARMSUSDT"
 }
 MIN_5M_VOLUME_SURGE_RATIO = float(os.getenv("MIN_5M_VOLUME_SURGE_RATIO", "1.50"))  # 1.50x реальный всплеск объёма
 MIN_5M_PRICE_IMPULSE_PCT = float(os.getenv("MIN_5M_PRICE_IMPULSE_PCT", "0.55"))  # 0.55% четкий импульс свечи (отсекает сонные боковики)

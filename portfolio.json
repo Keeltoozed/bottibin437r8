@@ -1,7 +1,7 @@
 {
   "cash": 20.0,
   "initial_balance": 20.0,
-  "current_leverage": 60,
+  "current_leverage": 20,
   "open_positions": {},
   "trade_history": [],
   "funnel_stats": {
@@ -41,7 +41,7 @@
       "rejected_at_price": 0.04568,
       "current_price": 0.04568,
       "price_change_pct": 0.0,
-      "outcome": "Ожидание хода...",
+      "outcome": "\u041e\u0436\u0438\u0434\u0430\u043d\u0438\u0435 \u0445\u043e\u0434\u0430...",
       "reason": "Strong bullish trend, real volume conviction, and strict base selection criteria met.",
       "time": "17:43:01",
       "timestamp": 1793461381.526283,
