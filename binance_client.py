@@ -306,18 +306,18 @@ class BinanceClient:
         trend = analysis.get("trend", "CHOP")
         rsi = analysis.get("rsi", 50.0)
 
-        # Мягкий институциональный макро-фильтр:
-        # Блокируем лонги по альтам ТОЛЬКО при реальном резком дампе BTC (15m свеча <= -0.60%).
-        # Убраны триггеры по 5m RSI (35/65), которые вызывали ложные блокировки во время обычного боковика.
-        is_dumping = p15 <= -0.60
-        is_pumping = p15 >= 0.80
+        # Институциональный фильтр режима Bitcoin (Directional Market Lock):
+        # В крипте бета альткоинов к BTC составляет 1.5x - 3.0x.
+        # Если BTC в нисходящем тренде (ниже EMA9/EMA21) или сливается — ЛОНГИ ПО АЛЬТАМ КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНЫ.
+        is_dumping = (trend == "BEARISH" and p15 <= -0.05) or (p15 <= -0.25) or (p5 <= -0.20) or (rsi < 40.0 and p5 < -0.05)
+        is_pumping = (trend == "BULLISH" and p15 >= +0.05) or (p15 >= +0.25) or (p5 >= +0.20) or (rsi > 60.0 and p5 > +0.05)
 
         if is_dumping:
-            status_str = f"🔴 Медвежий сброс BTC ({p15:+.2f}%) — Лонги по альтам временно ЗАБЛОКИРОВАНЫ"
+            status_str = f"🔴 Медвежий BTC ({p15:+.2f}%, {trend}) — ЛОНГИ ЗАБЛОКИРОВАНЫ | Приоритет: SHORT"
         elif is_pumping:
-            status_str = f"🟢 Сильный импульс BTC ({p15:+.2f}%)"
+            status_str = f"🟢 Бычий BTC ({p15:+.2f}%, {trend}) — ШОРТЫ ЗАБЛОКИРОВАНЫ | Приоритет: LONG"
         else:
-            status_str = f"🟡 Нейтральный (BTC: {p15:+.2f}%, тренд: {trend})"
+            status_str = f"🟡 Боковик BTC ({p15:+.2f}%, тренд: {trend}) — Разрешены LONG и SHORT"
 
         return {
             "trend": trend,

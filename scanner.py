@@ -90,23 +90,36 @@ class MarketScanner:
                 if not analysis:
                     return None
 
-                # 4. НЕПРЕРЫВНЫЙ КВАНТОВЫЙ ML СКОРИНГ КАЖДОЙ ПАРЫ (XGBoost Alpha):
-                # Оцениваем монету на 30 институциональных факторов на LONG и на SHORT!
+                # 4. НЕПРЕРЫВНЫЙ КВАНТОВЫЙ ML СКОРИНГ КАЖДОЙ ПАРЫ (Dual XGBoost Alpha):
+                # Оцениваем монету на 30 институциональных факторов под режимы LONG и SHORT
                 cand_long = {**t, **analysis, "candidate_side": "LONG"}
                 cand_short = {**t, **analysis, "candidate_side": "SHORT"}
 
-                res_l = ml_engine.evaluate_candidate(cand_long)
-                res_s = ml_engine.evaluate_candidate(cand_short)
+                btc_dump = btc_regime.get("is_dumping", False)
+                btc_pump = btc_regime.get("is_pumping", False)
 
-                # Выбираем сторону с наивысшей квантовой вероятностью
-                if res_l.get("ml_probability", 0.0) >= res_s.get("ml_probability", 0.0):
+                if btc_dump:
+                    # Рынок падает: оцениваем строго SHORT сетапы
+                    chosen = cand_short
+                    ml_res = ml_engine.evaluate_candidate(cand_short)
+                    side = "SHORT"
+                elif btc_pump:
+                    # Рынок растет: оцениваем строго LONG сетапы
                     chosen = cand_long
-                    ml_res = res_l
+                    ml_res = ml_engine.evaluate_candidate(cand_long)
                     side = "LONG"
                 else:
-                    chosen = cand_short
-                    ml_res = res_s
-                    side = "SHORT"
+                    # Боковик: оцениваем оба направления и выбираем наивысшую вероятность
+                    res_l = ml_engine.evaluate_candidate(cand_long)
+                    res_s = ml_engine.evaluate_candidate(cand_short)
+                    if res_s.get("ml_probability", 0.0) > res_l.get("ml_probability", 0.0):
+                        chosen = cand_short
+                        ml_res = res_s
+                        side = "SHORT"
+                    else:
+                        chosen = cand_long
+                        ml_res = res_l
+                        side = "LONG"
 
                 chosen["candidate_side"] = side
                 chosen["ml_prob"] = ml_res.get("ml_probability", 0.5)
@@ -141,8 +154,9 @@ class MarketScanner:
             surge = cand.get("volume_surge_ratio", 1.0)
             pct_5m = cand.get("pct_5m", 0.0)
 
-            # Требуем высокий перевес квантовой модели (от 70% или порог модели)
-            if prob < 0.70:
+            # Требуем подтвержденный перевес квантовой модели
+            min_ml_thresh = getattr(config, "ML_CONFIDENCE_THRESHOLD", 0.68)
+            if prob < min_ml_thresh:
                 continue
 
             # Защита от опасных стопов (не более 0.75% для 60x плеча)
@@ -151,34 +165,33 @@ class MarketScanner:
                     print(f"🛑 [СТОП-ФИЛЬТР] {sym} ({side}) ML {int(prob*100)}% отклонен: стоп {sl_dist*100:.2f}% > {config.MAX_ALLOWED_SL_PCT*100:.2f}% (риск -{int(sl_dist*config.LEVERAGE*100)}% маржи при {config.LEVERAGE}x)", flush=True)
                 continue
 
-            # Проверка BTC-фильтра
+            # Проверка BTC-фильтра (Directional Lock)
             if side == "LONG" and btc_regime.get("is_dumping", False):
                 portfolio.funnel_stats["btc_blocked"] = portfolio.funnel_stats.get("btc_blocked", 0) + 1
                 if should_log:
-                    print(f"🛑 [BTC БЛОК] {sym} LONG ML {int(prob*100)}% отклонен: BTC сбрасывается", flush=True)
+                    print(f"🛑 [BTC БЛОК] {sym} LONG ML {int(prob*100)}% отклонен: BTC падает — ЛОНГИ ЗАБЛОКИРОВАНЫ", flush=True)
                 continue
             if side == "SHORT" and btc_regime.get("is_pumping", False):
                 portfolio.funnel_stats["btc_blocked"] = portfolio.funnel_stats.get("btc_blocked", 0) + 1
                 if should_log:
-                    print(f"🛑 [BTC БЛОК] {sym} SHORT ML {int(prob*100)}% отклонен: BTC растет", flush=True)
+                    print(f"🛑 [BTC БЛОК] {sym} SHORT ML {int(prob*100)}% отклонен: BTC растет — ШОРТЫ ЗАБЛОКИРОВАНЫ", flush=True)
                 continue
 
-            # 1. Требование институциональной силы (никаких сонных микро-свечей +0.2%..+0.3%)
-            if surge < 1.50 or abs(pct_5m) < 0.50:
+            # Проверка минимальной активности (не спим в мертвом стакане)
+            if surge < 1.30 and abs(pct_5m) < 0.30:
                 if should_log:
-                    print(f"🛑 [СЛАБЫЙ ИМПУЛЬС] {sym} ({side}) ML {int(prob*100)}% отклонен: всплеск {surge:.2f}x (надо >=1.50x) или ход 5m {pct_5m:+.2f}% (надо >=0.50%)", flush=True)
+                    print(f"🛑 [НЕТ ИМПУЛЬСА] {sym} ({side}) ML {int(prob*100)}% отклонен: всплеск {surge:.2f}x < 1.30x и ход 5m {pct_5m:+.2f}% < 0.30%", flush=True)
                 continue
 
-            # 2. Защита от контртрендовых сделок (не шортим пампы и не лонгуем дампы)
+            # Защита от контртрендовых сделок (не шортим пампы и не лонгуем дампы)
             trend = cand.get("trend", "CHOP")
-            pct_15m = cand.get("pct_15m", 0.0)
-            if side == "SHORT" and (trend == "BULLISH" or pct_5m > 0.30 or pct_15m > 0.50):
+            if side == "SHORT" and (trend == "BULLISH" or pct_5m > 0.40):
                 if should_log:
-                    print(f"🛑 [ТРЕНД-БЛОК] {sym} SHORT ML {int(prob*100)}% отклонен: монета в бычьем тренде ({pct_5m:+.2f}%, 15m: {pct_15m:+.2f}%)", flush=True)
+                    print(f"🛑 [ТРЕНД-БЛОК] {sym} SHORT ML {int(prob*100)}% отклонен: монета в бычьем тренде ({pct_5m:+.2f}%)", flush=True)
                 continue
-            if side == "LONG" and (trend == "BEARISH" or pct_5m < -0.30 or pct_15m < -0.50):
+            if side == "LONG" and (trend == "BEARISH" or pct_5m < -0.40):
                 if should_log:
-                    print(f"🛑 [ТРЕНД-БЛОК] {sym} LONG ML {int(prob*100)}% отклонен: монета в медвежьем тренде ({pct_5m:+.2f}%, 15m: {pct_15m:+.2f}%)", flush=True)
+                    print(f"🛑 [ТРЕНД-БЛОК] {sym} LONG ML {int(prob*100)}% отклонен: монета в медвежьем тренде ({pct_5m:+.2f}%)", flush=True)
                 continue
 
             candidates_to_eval.append(cand)

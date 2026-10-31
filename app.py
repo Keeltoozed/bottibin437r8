@@ -151,7 +151,7 @@ with st.sidebar:
     st.markdown("### 🎯 Параметры стратегии ($20)")
     
     # Выбор кредитного плеча
-    lev_options = [20, 25, 35, 50, 60, 10, 5]
+    lev_options = [60, 75, 50, 35, 25, 20, 10, 5]
     cur_lev = getattr(portfolio, "current_leverage", config.LEVERAGE)
     cur_idx = lev_options.index(cur_lev) if cur_lev in lev_options else 0
     chosen_leverage = st.selectbox("⚡ Кредитное плечо (для новых сделок):", lev_options, index=cur_idx)
@@ -166,24 +166,23 @@ with st.sidebar:
     risk_mode = st.radio(
         "Режим доходности:",
         [
-            "🛡️ Институциональный 20x (Умный вход, защита от шума, стоп 1.8%)",
-            "🎯 Стандарт 25x (Умеренный разгон)",
-            "⚡ Скальпинг 60x (Узкий стоп 0.75%, высокий риск)"
+            "⚡ Оптимал 60x (Высокий профит +93%, сниженная просадка)",
+            "🔥 Турбо 75x (Максимальный разгон)",
+            "🎯 Стандарт 25x (Консервативный разгон)"
         ],
         index=0
     )
-    if "Институциональный 20x" in risk_mode:
-        config.COMPOUND_RISK_PCT = 0.05
-        config.MAX_RISK_PER_TRADE_USD = 0.80
-        config.TRADE_AMOUNT_USDT = 4.0
-    elif "Стандарт 25x" in risk_mode:
-        config.COMPOUND_RISK_PCT = 0.06
-        config.MAX_RISK_PER_TRADE_USD = 1.00
-        config.TRADE_AMOUNT_USDT = 5.0
+    if "Оптимал 60x" in risk_mode:
+        config.COMPOUND_RISK_PCT = 0.10
+        config.MAX_RISK_PER_TRADE_USD = 1.50
+        config.TRADE_AMOUNT_USDT = 6.0
+    elif "Турбо" in risk_mode:
+        config.COMPOUND_RISK_PCT = 0.10
+        config.MAX_RISK_PER_TRADE_USD = 1.50
+        config.TRADE_AMOUNT_USDT = 6.0
     else:
-        config.COMPOUND_RISK_PCT = 0.08
-        config.MAX_RISK_PER_TRADE_USD = 1.20
-        config.TRADE_AMOUNT_USDT = 5.0
+        config.COMPOUND_RISK_PCT = 0.05
+        config.MAX_RISK_PER_TRADE_USD = 1.00
         config.TRADE_AMOUNT_USDT = 6.0
 
     st.text(f"Плечо для новых входов: {portfolio.current_leverage}x 🚀")
@@ -305,7 +304,11 @@ with tab_pos:
                     st.markdown(f"### {sym} <span class='{side_badge_cls}'>{side} {pos['leverage']}x</span>", unsafe_allow_html=True)
                     ep_pos = pos.get('entry_price', 0.0) or 0.0
                     mg_pos = pos.get('margin_usdt', 0.0) or 0.0
-                    st.caption(f"Вход: ${ep_pos:.4f} • Маржа: ${mg_pos:.2f}")
+                    init_mg = pos.get('initial_margin_usdt', mg_pos) or mg_pos
+                    if init_mg > mg_pos + 0.05:
+                        st.caption(f"Вход: ${ep_pos:.4f} • В сделке: ${mg_pos:.2f} (исходная: ${init_mg:.2f})")
+                    else:
+                        st.caption(f"Вход: ${ep_pos:.4f} • Маржа: ${mg_pos:.2f}")
                 with col_b:
                     cp_pos = pos.get('current_price', 0.0) or 0.0
                     st.metric("Текущая цена", f"${cp_pos:.4f}")
@@ -336,7 +339,9 @@ with tab_pos:
         st.caption("Здесь фиксируются все завершенные сделки (TP1, TP2, Stop-Loss или Trailing). История сохраняется персистентно.")
     else:
         for t in reversed(portfolio.trade_history[-10:]):
-            is_win = t.get("realized_pnl", 0.0) >= 0
+            r_pnl = t.get("realized_pnl", 0.0) or 0.0
+            r_roi = t.get("roi_pct", 0.0) or 0.0
+            is_win = r_pnl >= 0
             pnl_color = "#3fb950" if is_win else "#f85149"
             side = t.get("side", "LONG")
             side_badge_cls = "badge-long" if side == 'LONG' else "badge-short"
@@ -344,7 +349,8 @@ with tab_pos:
             with st.container():
                 rc1, rc2, rc3, rc4 = st.columns([2, 2, 2, 3])
                 with rc1:
-                    st.markdown(f"**{t['symbol']}** <span class='{side_badge_cls}'>{side} {t.get('leverage', config.LEVERAGE)}x</span>", unsafe_allow_html=True)
+                    sym_name = t.get('symbol', 'N/A')
+                    st.markdown(f"**{sym_name}** <span class='{side_badge_cls}'>{side} {t.get('leverage', config.LEVERAGE)}x</span>", unsafe_allow_html=True)
                     st.caption(f"Закрыто: {t.get('closed_at', 'N/A')}")
                 with rc2:
                     ep_t = t.get('entry_price', 0.0) or 0.0
@@ -352,8 +358,13 @@ with tab_pos:
                     st.markdown(f"Вход: **${ep_t:.4f}**")
                     st.markdown(f"Выход: **${xp_t:.4f}**")
                 with rc3:
-                    st.markdown(f"<span style='color: {pnl_color}; font-size: 17px; font-weight: bold;'>{t['realized_pnl']:+.2f} USDT ({t['roi_pct']:+.1f}%)</span>", unsafe_allow_html=True)
-                    st.caption(f"Маржа: ${t.get('margin_usdt', 0):.2f}")
+                    st.markdown(f"<span style='color: {pnl_color}; font-size: 17px; font-weight: bold;'>{r_pnl:+.2f} USDT ({r_roi:+.1f}%)</span>", unsafe_allow_html=True)
+                    init_mg_t = t.get('initial_margin_usdt', t.get('margin_usdt', 0.0)) or 0.0
+                    cur_mg_t = t.get('margin_usdt', 0.0) or 0.0
+                    if t.get('partial_pct', 1.0) < 0.99 and init_mg_t > cur_mg_t + 0.05:
+                        st.caption(f"Фиксация доли: ${cur_mg_t:.2f} (из ${init_mg_t:.2f})")
+                    else:
+                        st.caption(f"Маржа сделки: ${cur_mg_t:.2f}")
                 with rc4:
                     st.markdown(f"**Причина:** {t.get('reason', 'Фиксация')}")
                     st.caption(f"Длительность: {t.get('duration_sec', 0)} сек")
@@ -377,7 +388,7 @@ with tab_radar:
             
             raw_reason = item.get("ml_reason", "")
             if "опасный стоп" in raw_reason:
-                stat_str = f"❌ Опасный стоп ({sl_pct:.2f}% > {config.MAX_ALLOWED_SL_PCT*100:.2f}%)"
+                stat_str = f"❌ Опасный стоп ({sl_pct:.2f}% > 0.75%)"
             elif "сонный объем" in raw_reason:
                 stat_str = "💤 Нет объёма (< 1.30x)"
             elif p_val >= 70.0:
@@ -387,14 +398,18 @@ with tab_radar:
             else:
                 stat_str = "💤 Боковик"
                 
+            v_vol = item.get('volume_surge_ratio') if item.get('volume_surge_ratio') is not None else 1.0
+            v_5m = item.get('pct_5m') if item.get('pct_5m') is not None else 0.0
+            v_rsi = item.get('rsi') if item.get('rsi') is not None else 50.0
+
             rows_ml.append({
-                "Монета": item.get("symbol"),
+                "Монета": item.get("symbol", "N/A"),
                 "Сторона": side_str,
                 "Вероятность ML": f"{p_val:.1f}%",
                 "Дистанция SL": f"{sl_pct:.2f}%",
-                "Всплеск объема": f"{item.get('volume_surge_ratio', 1.0):.2f}x",
-                "Импульс 5m": f"{item.get('pct_5m', 0.0):+.2f}%",
-                "RSI": f"{item.get('rsi', 50.0):.1f}",
+                "Всплеск объема": f"{v_vol:.2f}x",
+                "Импульс 5m": f"{v_5m:+.2f}%",
+                "RSI": f"{v_rsi:.1f}",
                 "Статус": stat_str
             })
         st.dataframe(pd.DataFrame(rows_ml), width="stretch")

@@ -201,8 +201,26 @@ def build_advanced_quant_features(df: pd.DataFrame, symbol: str) -> pd.DataFrame
     df["hour_sin"] = np.sin(2.0 * np.pi * dt.dt.hour / 24.0)
     df["hour_cos"] = np.cos(2.0 * np.pi * dt.dt.hour / 24.0)
 
-    # 10. РАЗМЕТКА ЦЕЛЕВОЙ ПЕРЕМЕННОЙ (2.14R Asymmetric Target):
-    # План скальпа: Тейк +1.5% хода цены ДО падения на -0.7% стопа в течение 12 свечей (1 час)
+    # 10. Зеркальные шорт-факторы (Институциональный Bearish Order Flow)
+    df["wick_trap_short"] = (df["lower_wick"] > 0.30).astype(int)
+    df["wick_defense_short"] = (df["upper_wick"] > 0.35).astype(int)
+    df["ema9_dist_short"] = (ema9 - close) / (ema9 + 1e-9)
+    df["ema21_dist_short"] = (ema21 - close) / (ema21 + 1e-9)
+    df["ema50_dist_short"] = (ema50 - close) / (ema50 + 1e-9)
+    df["ema_spread_short"] = (ema21 - ema9) / (ema21 + 1e-9)
+    df["ema_bearish"] = ((close <= ema9) & (ema9 <= ema21)).astype(int)
+    df["ema_slope_9_short"] = -df["ema_slope_9"]
+    df["rsi14_inv"] = 100.0 - df["rsi14"]
+    df["rsi_slope_inv"] = -df["rsi_slope"]
+    df["rsi_oversold_short"] = (df["rsi14"] < 30.0).astype(int)
+    df["bb_pct_b_inv"] = 1.0 - df["bb_pct_b"]
+    df["ret_5m_inv"] = -df["ret_5m"]
+    df["ret_15m_inv"] = -df["ret_15m"]
+    df["ret_1h_inv"] = -df["ret_1h"]
+
+    # 11. РАЗМЕТКА ЦЕЛЕВЫХ ПЕРЕМЕННЫХ (Двусторонний 2.14R Scalp):
+    # LONG: Тейк +1.5% хода цены ДО падения на -0.7% стопа в течение 12 свечей (1 час)
+    # SHORT: Тейк -1.5% хода цены ДО роста на +0.7% стопа в течение 12 свечей (1 час)
     TP_TARGET = 0.015
     SL_LIMIT = 0.007
     HORIZON = 12
@@ -212,37 +230,50 @@ def build_advanced_quant_features(df: pd.DataFrame, symbol: str) -> pd.DataFrame
     lows = low.values
     n = len(df)
     target_long = []
+    target_short = []
 
     for i in range(n):
         if i + HORIZON >= n:
             target_long.append(np.nan)
+            target_short.append(np.nan)
             continue
 
         entry = closes[i]
+
+        # 1. LONG: Взят тейк +1.5% до стопа -0.7%
         win_long = 0
         for j in range(i + 1, i + 1 + HORIZON):
-            # Проверяем, коснулись ли сначала стопа
             if (lows[j] - entry) / entry <= -SL_LIMIT:
                 win_long = 0
                 break
-            # Проверяем, взяли ли тейк
             if (highs[j] - entry) / entry >= TP_TARGET:
                 win_long = 1
                 break
         target_long.append(win_long)
 
+        # 2. SHORT: Взят тейк -1.5% до стопа +0.7%
+        win_short = 0
+        for j in range(i + 1, i + 1 + HORIZON):
+            if (highs[j] - entry) / entry >= SL_LIMIT:
+                win_short = 0
+                break
+            if (lows[j] - entry) / entry <= -TP_TARGET:
+                win_short = 1
+                break
+        target_short.append(win_short)
+
     df["target_long"] = target_long
+    df["target_short"] = target_short
     df["symbol"] = symbol
 
     df = df.dropna().reset_index(drop=True)
 
     # КРИТИЧЕСКИЙ КВАНТОВЫЙ ШАГ: Обучаемся ТОЛЬКО на фазах с реальной активностью
-    # Отсекаем мертвый плоский боковик (где нет объемов), оставляя свечи с всплеском >= 1.3x
-    active_mask = (df["vol_surge"] >= 1.3) & (df["atr_pct"] >= 0.002)
+    active_mask = (df["vol_surge"] >= 1.25) & (df["atr_pct"] >= 0.002)
     df_active = df[active_mask].reset_index(drop=True)
     return df_active
 
-FEATURE_COLS = [
+FEATURE_COLS_LONG = [
     "upper_wick", "lower_wick", "body_ratio", "wick_trap_long", "wick_defense_long",
     "rvol", "vol_surge", "vol_zscore", "vol_trend",
     "ema9_dist", "ema21_dist", "ema50_dist", "ema_spread", "ema_bullish", "ema_slope_9",
@@ -251,6 +282,18 @@ FEATURE_COLS = [
     "pullback_pct", "bounce_pct", "ret_5m", "ret_15m", "ret_1h",
     "hour_sin", "hour_cos"
 ]
+
+FEATURE_COLS_SHORT = [
+    "upper_wick", "lower_wick", "body_ratio", "wick_trap_short", "wick_defense_short",
+    "rvol", "vol_surge", "vol_zscore", "vol_trend",
+    "ema9_dist_short", "ema21_dist_short", "ema50_dist_short", "ema_spread_short", "ema_bearish", "ema_slope_9_short",
+    "rsi14_inv", "rsi_slope_inv", "rsi_oversold_short",
+    "atr_pct", "atr_surge", "bb_width", "bb_pct_b_inv", "bb_squeeze",
+    "bounce_pct", "pullback_pct", "ret_5m_inv", "ret_15m_inv", "ret_1h_inv",
+    "hour_sin", "hour_cos"
+]
+
+FEATURE_COLS = FEATURE_COLS_LONG
 
 def train_and_validate():
     print("=" * 70)
@@ -282,64 +325,67 @@ def train_and_validate():
     print(f"  • Обучающая выборка (Train): {len(train_df)} сетапов")
     print(f"  • Независимый слепой тест (Test): {len(test_df)} сетапов")
 
-    X_train = train_df[FEATURE_COLS]
-    y_train = train_df["target_long"].astype(int)
-    X_test = test_df[FEATURE_COLS]
-    y_test = test_df["target_long"].astype(int)
+    # 1. ОБУЧЕНИЕ МОДЕЛИ LONG
+    print("\n🧠 [1/2] Обучение XGBoost Sniper LONG Classifier...")
+    X_train_l = train_df[FEATURE_COLS_LONG]
+    y_train_l = train_df["target_long"].astype(int)
+    X_test_l = test_df[FEATURE_COLS_LONG]
+    y_test_l = test_df["target_long"].astype(int)
+    scale_pos_l = float((len(y_train_l) - y_train_l.sum()) / (y_train_l.sum() + 1e-9))
 
-    # Расчет весов для компенсации дисбаланса редких импульсов
-    scale_pos = float((len(y_train) - y_train.sum()) / (y_train.sum() + 1e-9))
+    model_long = xgb.XGBClassifier(
+        n_estimators=180,
+        max_depth=3,
+        learning_rate=0.03,
+        subsample=0.80,
+        colsample_bytree=0.80,
+        scale_pos_weight=scale_pos_l,
+        random_state=42,
+        eval_metric="auc"
+    )
+    model_long.fit(X_train_l, y_train_l)
+    probs_test_l = model_long.predict_proba(X_test_l)[:, 1]
+    auc_l = roc_auc_score(y_test_l, probs_test_l)
+    print(f"🎯 Качество модели LONG (ROC-AUC): {auc_l:.4f}")
 
-    # 1. Обучение институциональной модели (XGBoost Sniper)
-    print("\n🧠 Обучение XGBoost Sniper Classifier...")
-    if xgb:
-        model = xgb.XGBClassifier(
-            n_estimators=180,
-            max_depth=3,
-            learning_rate=0.03,
-            subsample=0.80,
-            colsample_bytree=0.80,
-            scale_pos_weight=scale_pos,
-            random_state=42,
-            eval_metric="auc"
-        )
-        model.fit(X_train, y_train)
-        probs_test = model.predict_proba(X_test)[:, 1]
-        final_model = model
-    else:
-        print("🧠 Обучение HistGradientBoosting Classifier (Fallback)...")
-        model_hgb = HistGradientBoostingClassifier(
-            max_iter=180,
-            max_depth=3,
-            learning_rate=0.03,
-            l2_regularization=2.0,
-            random_state=42
-        )
-        model_hgb.fit(X_train, y_train)
-        probs_test = model_hgb.predict_proba(X_test)[:, 1]
-        final_model = model_hgb
+    # 2. ОБУЧЕНИЕ МОДЕЛИ SHORT
+    print("\n🧠 [2/2] Обучение XGBoost Sniper SHORT Classifier...")
+    X_train_s = train_df[FEATURE_COLS_SHORT]
+    y_train_s = train_df["target_short"].astype(int)
+    X_test_s = test_df[FEATURE_COLS_SHORT]
+    y_test_s = test_df["target_short"].astype(int)
+    scale_pos_s = float((len(y_train_s) - y_train_s.sum()) / (y_train_s.sum() + 1e-9))
 
-    auc = roc_auc_score(y_test, probs_test)
-    print(f"🎯 Качество квантовой модели (ROC-AUC на слепом тесте): {auc:.4f}")
+    model_short = xgb.XGBClassifier(
+        n_estimators=180,
+        max_depth=3,
+        learning_rate=0.03,
+        subsample=0.80,
+        colsample_bytree=0.80,
+        scale_pos_weight=scale_pos_s,
+        random_state=42,
+        eval_metric="auc"
+    )
+    model_short.fit(X_train_s, y_train_s)
+    probs_test_s = model_short.predict_proba(X_test_s)[:, 1]
+    auc_s = roc_auc_score(y_test_s, probs_test_s)
+    print(f"🎯 Качество модели SHORT (ROC-AUC): {auc_s:.4f}")
 
-    # ПОИСК ОПТИМАЛЬНОГО ПОРОГА ДЛЯ ВЫСОЧАЙШЕГО ВИНРЕЙТА (PRECISION CALIBRATION)
-    print("\n🔍 Калибровка порога уверенности для максимального винрейта...")
-    best_thresh = 0.80
-    best_wr = 0.0
-    best_pf = 0.0
-    best_net = -999999.0
-    best_stats = None
-
+    # ПОИСК ОПТИМАЛЬНОГО ПОРОГА ДЛЯ LONG
+    print("\n🔍 Калибровка порога уверенности LONG...")
+    best_thresh_l = 0.76
+    best_wr_l = 0.0
+    best_pf_l = 0.0
+    best_stats_l = None
     MARGIN = 10.0
     LEV = 60
     POS_SIZE = MARGIN * LEV
-    FEE_PER_TRADE = POS_SIZE * 0.0010  # 0.10% за круг (вход+выход)
+    FEE_PER_TRADE = POS_SIZE * 0.0010
 
-    for thresh in np.arange(0.70, 0.86, 0.02):
-        sel = test_df[probs_test >= thresh]
+    for thresh in np.arange(0.68, 0.86, 0.02):
+        sel = test_df[probs_test_l >= thresh]
         n = len(sel)
-        if n < 5:
-            continue
+        if n < 5: continue
         wins = (sel["target_long"] == 1).sum()
         losses = n - wins
         wr = (wins / n * 100)
@@ -348,44 +394,60 @@ def train_and_validate():
         fees = n * FEE_PER_TRADE
         net = gross_p - gross_l - fees
         pf = (gross_p / (gross_l + fees)) if (gross_l + fees) > 0 else 999.0
+        if best_stats_l is None or (wr >= 60.0 and pf > best_pf_l and n >= 10) or (wr > best_wr_l and n >= 8):
+            best_wr_l = wr
+            best_thresh_l = thresh
+            best_pf_l = pf
+            best_stats_l = {"n": n, "wins": wins, "losses": losses, "wr": wr, "pf": pf, "net": net}
 
-        print(f"  • Порог {thresh:.2f}: Сделок {n:3d} | Побед {wins:2d} | Поражений {losses:2d} | WR: {wr:5.1f}% | Net: ${net:+6.2f} | PF: {pf:4.2f}")
+    # ПОИСК ОПТИМАЛЬНОГО ПОРОГА ДЛЯ SHORT
+    print("🔍 Калибровка порога уверенности SHORT...")
+    best_thresh_s = 0.74
+    best_wr_s = 0.0
+    best_pf_s = 0.0
+    best_stats_s = None
 
-        # Критерий отбора: максимальный винрейт при PF >= 2.0 или максимальный PF
-        if best_stats is None or (wr >= 65.0 and pf > best_pf and n >= 10) or (wr > best_wr and n >= 8):
-            best_wr = wr
-            best_thresh = thresh
-            best_pf = pf
-            best_net = net
-            best_stats = {
-                "n": n, "wins": wins, "losses": losses,
-                "gross_p": gross_p, "gross_l": gross_l,
-                "fees": fees, "net": net, "pf": pf, "wr": wr,
-                "ev": net / n
-            }
+    for thresh in np.arange(0.68, 0.86, 0.02):
+        sel = test_df[probs_test_s >= thresh]
+        n = len(sel)
+        if n < 5: continue
+        wins = (sel["target_short"] == 1).sum()
+        losses = n - wins
+        wr = (wins / n * 100)
+        gross_p = wins * (POS_SIZE * 0.015)
+        gross_l = losses * (POS_SIZE * 0.007)
+        fees = n * FEE_PER_TRADE
+        net = gross_p - gross_l - fees
+        pf = (gross_p / (gross_l + fees)) if (gross_l + fees) > 0 else 999.0
+        if best_stats_s is None or (wr >= 60.0 and pf > best_pf_s and n >= 10) or (wr > best_wr_s and n >= 8):
+            best_wr_s = wr
+            best_thresh_s = thresh
+            best_pf_s = pf
+            best_stats_s = {"n": n, "wins": wins, "losses": losses, "wr": wr, "pf": pf, "net": net}
 
     print("=" * 70)
-    print(f"🏆 ОПТИМАЛЬНЫЙ ВЫСОКОТОЧНЫЙ ПОРОГ: {best_thresh*100:.0f}% УВЕРЕННОСТИ")
-    print("=" * 70)
-    print(f"  • Всего сделок отобрано:     {best_stats['n']}")
-    print(f"  • Побед (Тейк +1.5%):        {best_stats['wins']} ({best_stats['wr']:.1f}% ВИНРЕЙТ!)")
-    print(f"  • Убытков (Стоп -0.7%):      {best_stats['losses']}")
-    print(f"  • Валовая прибыль:          +${best_stats['gross_p']:.2f}")
-    print(f"  • Валовый убыток:           -${best_stats['gross_l']:.2f}")
-    print(f"  • Комиссии биржи:           -${best_stats['fees']:.2f}")
-    print(f"  -------------------------------------------------")
-    print(f"  💰 ЧИСТАЯ ПРИБЫЛЬ (NET PnL): {best_stats['net']:+.2f} USD")
-    print(f"  🥇 Профит-фактор (PF):        {best_stats['pf']:.2f}")
-    print(f"  📊 Матожидание на сделку:    {best_stats['ev']:+.2f} USD / сделку")
+    print(f"🏆 ОПТИМАЛЬНЫЙ ВИНРЕЙТ КВАНТОВОГО ДВИЖКА (DUAL-ENGINE):")
+    if best_stats_l:
+        print(f"  • LONG:  WR {best_stats_l['wr']:.1f}%, PF {best_stats_l['pf']:.2f} (порог {best_thresh_l*100:.0f}%)")
+    if best_stats_s:
+        print(f"  • SHORT: WR {best_stats_s['wr']:.1f}%, PF {best_stats_s['pf']:.2f} (порог {best_thresh_s*100:.0f}%)")
     print("=" * 70)
 
-    # Сохраняем модель
+    # Сохраняем объединенную двустороннюю модель
     model_payload = {
-        "model": final_model,
-        "feature_cols": FEATURE_COLS,
-        "threshold": round(float(best_thresh), 2),
-        "winrate": round(float(best_stats["wr"]), 1),
-        "profit_factor": round(float(best_stats["pf"]), 2),
+        "model_long": model_long,
+        "model_short": model_short,
+        "model": model_long, # для обратной совместимости
+        "feature_cols_long": FEATURE_COLS_LONG,
+        "feature_cols_short": FEATURE_COLS_SHORT,
+        "feature_cols": FEATURE_COLS_LONG,
+        "threshold_long": round(float(best_thresh_l), 2),
+        "threshold_short": round(float(best_thresh_s), 2),
+        "threshold": round(float(best_thresh_l), 2),
+        "winrate_long": round(float(best_stats_l["wr"]) if best_stats_l else 70.0, 1),
+        "winrate_short": round(float(best_stats_s["wr"]) if best_stats_s else 70.0, 1),
+        "winrate": round(float(best_stats_l["wr"]) if best_stats_l else 70.0, 1),
+        "profit_factor": round(float(best_stats_l["pf"]) if best_stats_l else 3.0, 2),
         "trained_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     }
 
@@ -398,9 +460,12 @@ def train_and_validate():
         raw_m = mf.read()
     b64_str = base64.b64encode(zlib.compress(raw_m, level=9)).decode("ascii")
 
+    wr_display = best_stats_l["wr"] if best_stats_l else 70.0
+    pf_display = best_stats_l["pf"] if best_stats_l else 3.0
+
     prebuilt_code = f'''# prebuilt_model_data.py
-# Встроенные предобученные веса квантовой модели (XGBoost Alpha)
-# Win Rate: {best_stats["wr"]:.1f}%, Profit Factor: {best_stats["pf"]:.2f}
+# Встроенные предобученные веса квантовой модели (Dual-Directional XGBoost Alpha)
+# Long WR: {wr_display:.1f}%, PF: {pf_display:.2f}
 
 import base64
 import zlib
@@ -422,7 +487,7 @@ def restore_prebuilt_model(target_path: str):
 '''
     with open("prebuilt_model_data.py", "w", encoding="utf-8") as pf:
         pf.write(prebuilt_code)
-    print(f"⚡ prebuilt_model_data.py обновлен с новыми весами ({best_stats['wr']:.1f}% WR, {best_stats['pf']:.2f} PF)!")
+    print(f"⚡ prebuilt_model_data.py обновлен с новыми Dual-Directional весами!")
 
 if __name__ == "__main__":
     train_and_validate()

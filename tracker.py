@@ -120,6 +120,7 @@ class PortfolioTracker:
             "entry_price": entry_price,
             "current_price": entry_price,
             "margin_usdt": margin_usdt,
+            "initial_margin_usdt": margin_usdt,
             "notional_value": notional_value,
             "coins_qty": coins_qty,
             "leverage": leverage,
@@ -237,12 +238,15 @@ class PortfolioTracker:
 
         self.cash += max(return_to_cash, 0.0)
 
+        initial_mg = pos.get("initial_margin_usdt", pos["margin_usdt"])
         trade_record = {
             "symbol": symbol,
             "side": pos["side"],
             "entry_price": entry,
             "exit_price": exit_price,
             "margin_usdt": round(closed_margin, 2),
+            "initial_margin_usdt": round(initial_mg, 2),
+            "partial_pct": partial_pct,
             "leverage": lev,
             "gross_pnl": round(gross_pnl, 3),
             "fees_paid": fees_and_slippage,
