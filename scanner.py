@@ -103,36 +103,32 @@ class MarketScanner:
                 if not analysis:
                     return None
 
-                # 4. НЕПРЕРЫВНЫЙ КВАНТОВЫЙ ML СКОРИНГ КАЖДОЙ ПАРЫ (Dual XGBoost Alpha):
-                # Оцениваем монету на 30 институциональных факторов под режимы LONG и SHORT
-                cand_long = {**t, **analysis, "candidate_side": "LONG"}
-                cand_short = {**t, **analysis, "candidate_side": "SHORT"}
-
+                # 4. НЕПРЕРЫВНЫЙ КВАНТОВЫЙ ML СКОРИНГ (Dual XGBoost Alpha):
+                # Определяем естественное направление по импульсу и тренду монеты:
+                # Растущая ракета оценивается в LONG, падающий пробой — в SHORT!
+                pct_5m = analysis.get("pct_5m", 0.0)
+                pct_15m = analysis.get("pct_15m", 0.0)
+                trend = analysis.get("trend", "CHOP")
                 btc_dump = btc_regime.get("is_dumping", False)
                 btc_pump = btc_regime.get("is_pumping", False)
 
                 if btc_dump:
-                    # Рынок падает: оцениваем строго SHORT сетапы
-                    chosen = cand_short
-                    ml_res = ml_engine.evaluate_candidate(cand_short)
                     side = "SHORT"
                 elif btc_pump:
-                    # Рынок растет: оцениваем строго LONG сетапы
-                    chosen = cand_long
-                    ml_res = ml_engine.evaluate_candidate(cand_long)
                     side = "LONG"
+                elif pct_15m >= 0.15 or (pct_15m >= 0 and pct_5m > 0):
+                    side = "LONG"
+                elif pct_15m <= -0.15 or (pct_15m <= 0 and pct_5m < 0):
+                    side = "SHORT"
+                elif trend == "BULLISH":
+                    side = "LONG"
+                elif trend == "BEARISH":
+                    side = "SHORT"
                 else:
-                    # Боковик: оцениваем оба направления и выбираем наивысшую вероятность
-                    res_l = ml_engine.evaluate_candidate(cand_long)
-                    res_s = ml_engine.evaluate_candidate(cand_short)
-                    if res_s.get("ml_probability", 0.0) > res_l.get("ml_probability", 0.0):
-                        chosen = cand_short
-                        ml_res = res_s
-                        side = "SHORT"
-                    else:
-                        chosen = cand_long
-                        ml_res = res_l
-                        side = "LONG"
+                    side = "LONG" if pct_5m >= 0 else "SHORT"
+
+                chosen = {**t, **analysis, "candidate_side": side}
+                ml_res = ml_engine.evaluate_candidate(chosen)
 
                 chosen["candidate_side"] = side
                 chosen["ml_prob"] = ml_res.get("ml_probability", 0.5)
@@ -168,11 +164,11 @@ class MarketScanner:
             pct_5m = cand.get("pct_5m", 0.0)
 
             # Требуем подтвержденный перевес квантовой модели
-            min_ml_thresh = getattr(config, "ML_CONFIDENCE_THRESHOLD", 0.68)
+            min_ml_thresh = getattr(config, "ML_CONFIDENCE_THRESHOLD", 0.60)
             if prob < min_ml_thresh:
                 continue
 
-            # Защита от опасных стопов (не более 0.75% для 60x плеча)
+            # Защита от опасных стопов (не более 1.25% для 30x плеча)
             if sl_dist > config.MAX_ALLOWED_SL_PCT:
                 if should_log:
                     print(f"🛑 [СТОП-ФИЛЬТР] {sym} ({side}) ML {int(prob*100)}% отклонен: стоп {sl_dist*100:.2f}% > {config.MAX_ALLOWED_SL_PCT*100:.2f}% (риск -{int(sl_dist*config.LEVERAGE*100)}% маржи при {config.LEVERAGE}x)", flush=True)
@@ -191,9 +187,9 @@ class MarketScanner:
                 continue
 
             # Проверка минимальной активности (не спим в мертвом стакане)
-            if surge < 1.30 and abs(pct_5m) < 0.30:
+            if surge < 1.15 and abs(pct_5m) < 0.20:
                 if should_log:
-                    print(f"🛑 [НЕТ ИМПУЛЬСА] {sym} ({side}) ML {int(prob*100)}% отклонен: всплеск {surge:.2f}x < 1.30x и ход 5m {pct_5m:+.2f}% < 0.30%", flush=True)
+                    print(f"🛑 [НЕТ ИМПУЛЬСА] {sym} ({side}) ML {int(prob*100)}% отклонен: всплеск {surge:.2f}x < 1.15x и ход 5m {pct_5m:+.2f}% < 0.20%", flush=True)
                 continue
 
             # Защита от контртрендовых сделок (Мульти-таймфрейм 5m + 15m Trend Alignment)
@@ -209,19 +205,19 @@ class MarketScanner:
                 continue
 
             # Защита от распила в боковике BTC (CHOP Shield):
-            # В боковике BTC 80% альткоин-пробоев ложные. Входим ТОЛЬКО при мощном взрыве объема (от 2.5x) и уверенности ML от 75%
+            # В боковике BTC требуем объем от 1.30x и подтверждение ML модели
             is_btc_chop = not btc_regime.get("is_dumping", False) and not btc_regime.get("is_pumping", False)
-            chop_min_surge = getattr(config, "CHOP_MIN_VOLUME_SURGE", 2.50)
-            if is_btc_chop and (surge < chop_min_surge or prob < 0.75):
+            chop_min_surge = getattr(config, "CHOP_MIN_VOLUME_SURGE", 1.30)
+            if is_btc_chop and (surge < chop_min_surge or prob < min_ml_thresh):
                 if should_log:
-                    print(f"🛑 [CHOP БЛОК] {sym} ({side}) отклонен: BTC в боковике — требуется взрыв объема >={chop_min_surge:.1f}x (факт: {surge:.2f}x) и ML >= 75% (факт: {int(prob*100)}%)", flush=True)
+                    print(f"🛑 [CHOP БЛОК] {sym} ({side}) отклонен: BTC в боковике — требуется взрыв объема >={chop_min_surge:.1f}x (факт: {surge:.2f}x) и ML >= {int(min_ml_thresh*100)}% (факт: {int(prob*100)}%)", flush=True)
                 continue
 
             candidates_to_eval.append(cand)
             print(f"🔥 [A+ КАНДИДАТ - {side}] {sym}: ML {int(prob*100)}%, всплеск {surge:.2f}x, 5m: {pct_5m:+.2f}% | Передача в Groq AI...", flush=True)
 
-        # Фокусируемся на абсолютном лидере
-        candidates_to_eval = candidates_to_eval[:1]
+        # Передаем топ-2 сетапа для оценки Groq AI
+        candidates_to_eval = candidates_to_eval[:2]
 
         # 4. GROQ SOFT GATE (JEV AI ENGINE)
         for ctx in candidates_to_eval:

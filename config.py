@@ -10,7 +10,7 @@ GROQ_API_KEY = (os.getenv("GROQ_API_KEY") or "").strip().strip('"').strip("'")
 GROQ_PRIMARY_MODEL = os.getenv("GROQ_MODEL", "allam-2-7b").strip()
 GROQ_FALLBACK_MODEL = os.getenv("GROQ_MODEL_FALLBACK", "openai/gpt-oss-120b").strip()
 GROQ_RPM_LIMIT = int(os.getenv("GROQ_RPM_LIMIT", "25"))  # Safe rate limit for free tier (max 30 RPM)
-GROQ_MIN_CONFIDENCE = float(os.getenv("GROQ_MIN_CONFIDENCE", "0.75"))  # Повышен порог для отсева мусора (только A+ сетапы)
+GROQ_MIN_CONFIDENCE = float(os.getenv("GROQ_MIN_CONFIDENCE", "0.65"))  # 65% минимальная уверенность ИИ для подтверждения сделки
 
 # Институциональные фильтры входа (High-Conviction A+ Scanners)
 # Отсекаем вялый боковик: всплеск объема строго от 1.50x, чистый импульс от 0.40%
@@ -84,8 +84,8 @@ TRAILING_STOP_PCT = float(os.getenv("TRAILING_STOP_PCT", "0.008"))  # 0.8% trail
 MIN_24H_VOLUME_USDT = float(os.getenv("MIN_24H_VOLUME_USDT", "2000000"))  # $2.0M минимум (отсекает мертвые монеты без стакана, но не режет ракеты!)
 SCAN_TICKERS_LIMIT = int(os.getenv("SCAN_TICKERS_LIMIT", "100"))  # Расширенный институциональный радар (100 пар)
 STRICT_WHITELIST_ONLY = os.getenv("STRICT_WHITELIST_ONLY", "false").lower() == "true"  # false = динамический радар ракет; true = только белый список
-CHOP_MIN_VOLUME_SURGE = 2.50  # В боковике BTC требуем взрывной объем от 2.5x для входа!
-ML_CONFIDENCE_THRESHOLD = float(os.getenv("ML_CONFIDENCE_THRESHOLD", "0.68"))
+CHOP_MIN_VOLUME_SURGE = float(os.getenv("CHOP_MIN_VOLUME_SURGE", "1.30"))  # В боковике BTC требуем объем от 1.30x
+ML_CONFIDENCE_THRESHOLD = float(os.getenv("ML_CONFIDENCE_THRESHOLD", "0.60"))  # 60% перевес квантовой модели (реалистичный порог для входа)
 
 # Элитный юниверс криптовалют (140+ монет: мажоры, L1/L2, топовые мемкоины, AI, DeFi)
 TOP_CRYPTO_UNIVERSE = [

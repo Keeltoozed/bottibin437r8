@@ -30,9 +30,10 @@ class QuantMLEngine:
         self.feature_cols_long = FEATURE_COLS_LONG
         self.feature_cols_short = FEATURE_COLS_SHORT
         self.feature_cols = FEATURE_COLS_LONG
-        self.threshold = 0.65
-        self.threshold_long = 0.65
-        self.threshold_short = 0.65
+        cfg_thresh = float(getattr(config, "ML_CONFIDENCE_THRESHOLD", 0.60))
+        self.threshold = cfg_thresh
+        self.threshold_long = cfg_thresh
+        self.threshold_short = cfg_thresh
         self.winrate = 0.0
         self.winrate_long = 0.0
         self.winrate_short = 0.0
@@ -61,7 +62,7 @@ class QuantMLEngine:
                 self.feature_cols_short = payload.get("feature_cols_short", FEATURE_COLS_SHORT)
                 self.feature_cols = self.feature_cols_long
 
-                cfg_thresh = float(getattr(config, "ML_CONFIDENCE_THRESHOLD", 0.65))
+                cfg_thresh = float(getattr(config, "ML_CONFIDENCE_THRESHOLD", 0.60))
                 self.threshold_long = cfg_thresh
                 self.threshold_short = cfg_thresh
                 self.threshold = cfg_thresh
@@ -93,7 +94,7 @@ class QuantMLEngine:
                 self.feature_cols_long = payload.get("feature_cols_long", FEATURE_COLS_LONG)
                 self.feature_cols_short = payload.get("feature_cols_short", FEATURE_COLS_SHORT)
                 self.feature_cols = self.feature_cols_long
-                cfg_thresh = float(getattr(config, "ML_CONFIDENCE_THRESHOLD", 0.65))
+                cfg_thresh = float(getattr(config, "ML_CONFIDENCE_THRESHOLD", 0.60))
                 self.threshold_long = cfg_thresh
                 self.threshold_short = cfg_thresh
                 self.threshold = cfg_thresh
@@ -144,15 +145,15 @@ class QuantMLEngine:
             raw_prob_win = float(probs[1]) if len(probs) > 1 else float(probs[0])
             prob_win = raw_prob_win
 
-            # 2. Институциональные фильтры качества (Штрафы за рискованные фазы рынка)
+            # 2. Институциональные фильтры качества
             penalties = []
             vol_surge = float(context.get("volume_surge_ratio", 1.5))
             p5m = float(context.get("pct_5m", 0.0)) / 100.0
 
-            # Защита от сонного боковика (Chop Penalty)
-            if vol_surge < 1.30 and abs(p5m) < 0.0030:
+            # Защита от мертвого объема (Dead Volume Penalty)
+            if vol_surge < 1.10 and abs(p5m) < 0.0015:
                 prob_win = min(prob_win, 0.52)
-                penalties.append("сонный объем < 1.30x")
+                penalties.append("мертвый объем < 1.10x")
 
             # Проверка соответствия допустимого стоп-лосса плечу
             sl_dist = context.get("sl_pct_distance", 0.0) if cand_side == "LONG" else context.get("short_sl_dist", 0.0)
@@ -161,14 +162,14 @@ class QuantMLEngine:
                 prob_win = min(prob_win, 0.49)
                 penalties.append(f"опасный стоп ({sl_dist*100:.2f}% > {max_sl_cap*100:.2f}%)")
 
-            # Защита от покупки на излете перекупленного импульса
+            # Защита от покупки на излете экстремального импульса
             rsi_val = float(context.get("rsi", 50.0))
-            if cand_side == "LONG" and rsi_val > 78.0:
-                prob_win = min(prob_win, 0.52)
-                penalties.append(f"RSI перегрет ({rsi_val:.0f} > 78)")
-            elif cand_side == "SHORT" and rsi_val < 22.0:
-                prob_win = min(prob_win, 0.52)
-                penalties.append(f"RSI перепродан ({rsi_val:.0f} < 22)")
+            if cand_side == "LONG" and rsi_val > 88.0:
+                prob_win *= 0.90
+                penalties.append(f"RSI перегрет ({rsi_val:.0f} > 88)")
+            elif cand_side == "SHORT" and rsi_val < 15.0:
+                prob_win *= 0.90
+                penalties.append(f"RSI перепродан ({rsi_val:.0f} < 15)")
 
             is_approved = (prob_win >= target_threshold)
             status_text = "ОДОБРЕНО" if is_approved else "ОТКЛОНЕНО"
