@@ -7,16 +7,16 @@ from tracker import portfolio
 
 class ExitManager:
     """
-    Интеллектуальный менеджер сопровождения и выхода из позиций (LONG и SHORT).
-    Реализует правила Day-Trader Discipline:
-      1. 'Stop lives under/above the wick': сделка свободно дышит в рамках исходного стоп-лосса.
-         Никаких преждевременных микро-безубытков, удушающих сделку из-за рыночного шума!
-      2. 'Tiered Take-Profit':
-         - При TP1 (+1.5% хода цены = +90.0% ROI на 60x): закрытие 50% объема с фиксацией реальной прибыли в депозит.
-         - Только ПОСЛЕ взятия TP1: стоп оставшейся части переносится в гарантированный безубыток с запасом на комиссию.
-         - При TP2 (+3.0% хода цены = +180.0% ROI): фиксация еще 25% объема.
-         - Остаток (25%): трейлинг-стоп для ловли мощных трендовых выносов.
-      3. 'Live Price Tracking': непрерывный мониторинг рыночных цен каждые 2 секунды.
+    Асимметричный трендовый менеджер выхода (Rocket Hunter Exit Engine — LONG & SHORT):
+      1. Честный структурный стоп до TP1 — никаких ранних поджимов, выбивающих шумом.
+      2. TP1 (+1.5R): фиксация ТОЛЬКО 30% позиции (окупает комиссии и фиксирует базовый плюс),
+         перенос стопа оставшихся 70% в безубыток +0.20% (сделка становится безрисковой!).
+      3. TP2 (+3.0R): фиксация еще 30% от начального объема (42.86% от остатка), заморозка +1.2R профита,
+         остается 40% чистый Moonbag-ранер для ловли ракет +5%..+15%!
+      4. Широкий Chandelier ATR-трейлинг (2.5 * ATR14, минимум 1.3%) активируется только от +2.2R,
+         позволяя ракете пережить нормальные 5m откаты и собрать все трендовое движение!
+      5. Time-Stop (35 минут): если пробой оказался ложным и за 35 минут цена не ушла даже на +0.45R,
+         сделка закрывается без ожидания полного стоп-лосса, освобождая капитал.
     """
     def __init__(self):
         self.is_running = False
@@ -31,7 +31,6 @@ class ExitManager:
                 return
             shadow_data = {}
             for sym in shadow_syms:
-                # 60 5-минутных свечей = 5 полных часов истории для фиксации максимумов и минимумов
                 hl = await binance_client.fetch_recent_high_low(sym, limit=60)
                 if hl:
                     cur, max_h, min_l = hl
@@ -47,7 +46,7 @@ class ExitManager:
 
     async def run_loop(self):
         self.is_running = True
-        print("🛡️ [ExitManager] Менеджер умного выхода активен (LONG + SHORT).", flush=True)
+        print("🛡️ [ExitManager] Асимметричный трендовый движок выхода активен (30%/30%/40% ATR Runner + 35m Time-Stop).", flush=True)
         while self.is_running:
             try:
                 now = time.time()
@@ -60,7 +59,6 @@ class ExitManager:
                     await asyncio.sleep(2.0)
                     continue
 
-                # Обновляем цены для всех открытых позиций
                 symbols = list(positions.keys())
                 price_map = {}
                 for sym in symbols:
@@ -76,10 +74,13 @@ class ExitManager:
                 if should_log:
                     self._last_log_time = now
 
-                # Проверяем макро-поводыря BTC для предотвращения убытков при развороте рынка
-                btc_reg = await binance_client.fetch_btc_regime()
+                tp1_part = float(getattr(config, "TP1_PARTIAL_PCT", 0.30))
+                tp2_part_rem = float(getattr(config, "TP2_PARTIAL_OF_REMAINING", 0.4286))
+                atr_mult = float(getattr(config, "RUNNER_ATR_MULT", 2.5))
+                act_r = float(getattr(config, "RUNNER_ACTIVATION_R", 2.2))
+                min_trail = float(getattr(config, "TRAILING_STOP_PCT", 0.013))
+                time_stop_sec = int(getattr(config, "TIME_STOP_MINUTES", 35)) * 60
 
-                # Проверяем каждую позицию на условия выхода
                 for sym in symbols:
                     if sym not in portfolio.open_positions:
                         continue
@@ -90,126 +91,131 @@ class ExitManager:
                     tp1 = pos["tp1"]
                     tp2 = pos["tp2"]
                     side = pos.get("side", "LONG")
+                    atr_pct = float(pos.get("atr_pct", 0.006))
+                    risk_dist = max(float(pos.get("risk_dist", abs(entry - pos.get("original_sl", wick_sl)))), entry * 0.005)
+                    elapsed_sec = now - float(pos.get("opened_at", now))
 
                     if should_log:
                         print(
-                            f"📊 [PRICE TRACKER] {sym} ({side} {pos['leverage']}x): ${cur_price:.4f} (Вход: ${entry:.4f}) | "
-                            f"PnL: {pos['pnl_pct']:+.2f}% (${pos['unrealized_pnl']:+.2f}) | "
-                            f"SL: ${wick_sl:.4f} | TP1: ${tp1:.4f}",
+                            f"📊 [RUNNER TRACKER] {sym} ({side} {pos['leverage']}x): ${cur_price:.4f} (Вход: ${entry:.4f}) | "
+                            f"PnL остатка: {pos['pnl_pct']:+.2f}% (${pos['unrealized_pnl']:+.2f}) | "
+                            f"SL: ${wick_sl:.4f} | TP1: ${tp1:.4f} | TP2: ${tp2:.4f}",
                             flush=True
                         )
 
                     # ==========================================================
-                    # ЛОГИКА ВЫХОДА ДЛЯ LONG
+                    # ЛОГИКА СОПРОВОЖДЕНИЯ ДЛЯ LONG
                     # ==========================================================
                     if side == "LONG":
-                        # 1. СТОП-ЛОСС ПОД ФИТИЛЬ (ИЛИ БЕЗУБЫТОК ПОСЛЕ ВЗЯТИЯ TP1)
+                        # 1. СТОП-ЛОСС / БЕЗУБЫТОК / CHANDELIER ATR TRAIL
                         if cur_price <= wick_sl:
-                            reason_label = (
-                                f"🛡️ Breakeven Exit ({pos['pnl_pct']:+.1f}%)"
-                                if pos.get("breakeven_set")
-                                else f"🛑 Stop Under Wick ({pos['pnl_pct']:+.1f}%)"
-                            )
-                            portfolio.close_position(
-                                sym, cur_price,
-                                reason=reason_label
-                            )
+                            if pos.get("tp2_hit"):
+                                reason_label = f"🚀 ATR Runner Trail ({pos['pnl_pct']:+.1f}%)"
+                            elif pos.get("breakeven_set"):
+                                reason_label = f"🛡️ Breakeven / Profit Lock ({pos['pnl_pct']:+.1f}%)"
+                            else:
+                                reason_label = f"🛑 Structural Stop ({pos['pnl_pct']:+.1f}%)"
+                            portfolio.close_position(sym, cur_price, reason=reason_label, partial_pct=1.0)
                             continue
 
-                        # 2. ТЕЙК-ПРОФИТ 1 (TP1): Фиксация 50% объема в плюс
+                        # 2. TP1 (+1.5R): Фиксация 30% + Безубыток +0.20% на 70% ранера
                         if not pos["tp1_hit"] and cur_price >= tp1:
                             pos["tp1_hit"] = True
-                            # После взятия крупного профита TP1 переносим стоп на остаток в гарантированный плюс (+0.25%)
-                            pos["wick_sl"] = round(entry * 1.0025, 6)
+                            pos["wick_sl"] = round(max(pos["wick_sl"], entry * 1.0020), 6)
                             pos["breakeven_set"] = True
                             portfolio.close_position(
                                 sym, cur_price,
-                                reason=f"🎯 TP1 Hit (+{pos['pnl_pct']:.1f}%): Фиксация 50%",
-                                partial_pct=0.50
+                                reason=f"🎯 TP1 1.5R (+{pos['pnl_pct']:.1f}%): 30% в кэш",
+                                partial_pct=tp1_part
                             )
-                            print(f"🎯 [TP1 HIT] {sym} (LONG): Зафиксировано 50% прибыли! Стоп на остаток перенесен в плюс (+0.25%).", flush=True)
                             continue
 
-                        # 3. ТЕЙК-ПРОФИТ 2 (TP2): Фиксация еще 25% объема
+                        # 3. TP2 (+3.0R): Фиксация еще 30% от исходной позиции (остается 40% ранер!)
                         if pos["tp1_hit"] and not pos["tp2_hit"] and cur_price >= tp2:
                             pos["tp2_hit"] = True
+                            pos["wick_sl"] = round(max(pos["wick_sl"], entry + 1.2 * risk_dist), 6)
                             portfolio.close_position(
                                 sym, cur_price,
-                                reason=f"🎯 TP2 Hit (+{pos['pnl_pct']:.1f}%): Фиксация 25%",
-                                partial_pct=0.50
+                                reason=f"🎯 TP2 3.0R (+{pos['pnl_pct']:.1f}%): еще 30% в кэш",
+                                partial_pct=tp2_part_rem
                             )
-                            print(f"🎯 [TP2 HIT] {sym} (LONG): Зафиксировано еще 25% на цели TP2!", flush=True)
                             continue
 
-                        # 4. ТРЕЙЛИНГ-СТОП ДЛЯ ОСТАТКА (активен только после взятия TP1)
-                        if pos["tp1_hit"]:
-                            highest = pos.get("highest_price", cur_price)
-                            trailing_sl_price = round(highest * (1.0 - config.TRAILING_STOP_PCT), 6)
+                        # 4. CHANDELIER ATR TRAILING (включается после +2.2R или TP2, чтобы не душить ракету сразу после TP1)
+                        highest = pos.get("highest_price", cur_price)
+                        if pos["tp1_hit"] and (pos["tp2_hit"] or highest >= entry + act_r * risk_dist):
+                            trail_dist = max(atr_pct * atr_mult, min_trail)
+                            trailing_sl_price = round(highest * (1.0 - trail_dist), 6)
                             if trailing_sl_price > pos["wick_sl"]:
                                 pos["wick_sl"] = trailing_sl_price
                                 portfolio.save()
 
-                            if cur_price <= trailing_sl_price:
+                        # 5. TIME-STOP (35 мин без пробоя): выход из затухшей сделки
+                        if not pos["tp1_hit"] and elapsed_sec >= time_stop_sec:
+                            cur_r = (cur_price - entry) / risk_dist
+                            if cur_r < 0.45:
                                 portfolio.close_position(
                                     sym, cur_price,
-                                    reason=f"🚀 Trailing SL Triggered (+{pos['pnl_pct']:.1f}%)"
+                                    reason=f"⏱️ Time-Stop ({int(elapsed_sec//60)}м без импульса)",
+                                    partial_pct=1.0
                                 )
                                 continue
 
                     # ==========================================================
-                    # ЛОГИКА ВЫХОДА ДЛЯ SHORT
+                    # ЛОГИКА СОПРОВОЖДЕНИЯ ДЛЯ SHORT
                     # ==========================================================
                     else:
-                        # 1. СТОП-ЛОСС НАД ФИТИЛЕМ (ИЛИ БЕЗУБЫТОК ПОСЛЕ TP1)
+                        # 1. СТОП-ЛОСС / БЕЗУБЫТОК / CHANDELIER ATR TRAIL
                         if cur_price >= wick_sl:
-                            reason_label = (
-                                f"🛡️ Breakeven Exit ({pos['pnl_pct']:+.1f}%)"
-                                if pos.get("breakeven_set")
-                                else f"🛑 Stop Above Wick ({pos['pnl_pct']:+.1f}%)"
-                            )
-                            portfolio.close_position(
-                                sym, cur_price,
-                                reason=reason_label
-                            )
+                            if pos.get("tp2_hit"):
+                                reason_label = f"🚀 ATR Runner Trail ({pos['pnl_pct']:+.1f}%)"
+                            elif pos.get("breakeven_set"):
+                                reason_label = f"🛡️ Breakeven / Profit Lock ({pos['pnl_pct']:+.1f}%)"
+                            else:
+                                reason_label = f"🛑 Structural Stop ({pos['pnl_pct']:+.1f}%)"
+                            portfolio.close_position(sym, cur_price, reason=reason_label, partial_pct=1.0)
                             continue
 
-                        # 2. ТЕЙК-ПРОФИТ 1 (TP1): Фиксация 50% объема (цена упала до tp1)
+                        # 2. TP1 (+1.5R): Фиксация 30% + Безубыток -0.20% на 70% ранера
                         if not pos["tp1_hit"] and cur_price <= tp1:
                             pos["tp1_hit"] = True
-                            # После взятия крупного профита TP1 переносим стоп на остаток в гарантированный плюс (-0.25% ниже входа)
-                            pos["wick_sl"] = round(entry * 0.9975, 6)
+                            pos["wick_sl"] = round(min(pos["wick_sl"], entry * 0.9980), 6)
                             pos["breakeven_set"] = True
                             portfolio.close_position(
                                 sym, cur_price,
-                                reason=f"🎯 TP1 Hit (+{pos['pnl_pct']:.1f}%): Фиксация 50%",
-                                partial_pct=0.50
+                                reason=f"🎯 TP1 1.5R (+{pos['pnl_pct']:.1f}%): 30% в кэш",
+                                partial_pct=tp1_part
                             )
-                            print(f"🎯 [TP1 HIT] {sym} (SHORT): Зафиксировано 50% прибыли! Стоп на остаток в плюсе (+0.25%).", flush=True)
                             continue
 
-                        # 3. ТЕЙК-ПРОФИТ 2 (TP2): Фиксация еще 25% объема
+                        # 3. TP2 (+3.0R): Фиксация еще 30% от исходной позиции (остается 40% ранер!)
                         if pos["tp1_hit"] and not pos["tp2_hit"] and cur_price <= tp2:
                             pos["tp2_hit"] = True
+                            pos["wick_sl"] = round(min(pos["wick_sl"], entry - 1.2 * risk_dist), 6)
                             portfolio.close_position(
                                 sym, cur_price,
-                                reason=f"🎯 TP2 Hit (+{pos['pnl_pct']:.1f}%): Фиксация 25%",
-                                partial_pct=0.50
+                                reason=f"🎯 TP2 3.0R (+{pos['pnl_pct']:.1f}%): еще 30% в кэш",
+                                partial_pct=tp2_part_rem
                             )
-                            print(f"🎯 [TP2 HIT] {sym} (SHORT): Зафиксировано еще 25% на цели TP2!", flush=True)
                             continue
 
-                        # 4. ТРЕЙЛИНГ-СТОП ДЛЯ ШОРТА (следует сверху за локальным минимумом, активен после TP1)
-                        if pos["tp1_hit"]:
-                            lowest = pos.get("lowest_price", cur_price)
-                            trailing_sl_price = round(lowest * (1.0 + config.TRAILING_STOP_PCT), 6)
+                        # 4. CHANDELIER ATR TRAILING ДЛЯ ШОРТА
+                        lowest = pos.get("lowest_price", cur_price)
+                        if pos["tp1_hit"] and (pos["tp2_hit"] or lowest <= entry - act_r * risk_dist):
+                            trail_dist = max(atr_pct * atr_mult, min_trail)
+                            trailing_sl_price = round(lowest * (1.0 + trail_dist), 6)
                             if trailing_sl_price < pos["wick_sl"]:
                                 pos["wick_sl"] = trailing_sl_price
                                 portfolio.save()
 
-                            if cur_price >= trailing_sl_price:
+                        # 5. TIME-STOP (35 мин без пролива): выход из зависшего шорта
+                        if not pos["tp1_hit"] and elapsed_sec >= time_stop_sec:
+                            cur_r = (entry - cur_price) / risk_dist
+                            if cur_r < 0.45:
                                 portfolio.close_position(
                                     sym, cur_price,
-                                    reason=f"🚀 Trailing SL Triggered (+{pos['pnl_pct']:.1f}%)"
+                                    reason=f"⏱️ Time-Stop ({int(elapsed_sec//60)}м без импульса)",
+                                    partial_pct=1.0
                                 )
                                 continue
 

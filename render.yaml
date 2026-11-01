@@ -2,6 +2,7 @@ services:
   - type: web
     name: binance-groq-trader
     runtime: python
+    region: frankfurt
     plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: python3 -u -m streamlit run app.py --server.port $PORT --server.address 0.0.0.0 --server.headless true
@@ -20,8 +21,11 @@ services:
         value: "true"
       - key: INITIAL_BALANCE
         value: "20.0"
+      - key: LEVERAGE
+        value: "12"
+      - key: RISK_PER_TRADE_PCT
+        value: "0.025"
       - key: TRADE_AMOUNT_USDT
-        value: "5.0"
+        value: "4.5"
       - key: MAX_POSITIONS
-        value: "3"
-
+        value: "2"

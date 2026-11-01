@@ -152,14 +152,26 @@ def compute_quant_features_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 def extract_features_from_candles(candles: List[Dict[str, Any]], side: str = "LONG") -> Optional[pd.DataFrame]:
     """
     Принимает список свечей (от 30 до 100), возвращает строку признаков (DataFrame из 1 строки)
-    для самого последнего закрытого/актуального бара.
+    строго для ПОСЛЕДНЕГО ЗАКРЫТОГО 5m бара (исключая искажение формирующейся 3-секундной свечой с нулевым объемом).
     """
     if not candles or len(candles) < 15:
         return None
 
+    # Если последняя свеча еще формируется в реальном времени (< 5 минут с момента открытия),
+    # отсекаем её, чтобы скоринг ML оценивал именно закрытый сигнальный бар (candles[-2])!
+    working_candles = candles
+    if len(candles) >= 16:
+        try:
+            last_open_ms = int(candles[-1].get("time", 0))
+            now_ms = int(time.time() * 1000)
+            if last_open_ms > 0 and (now_ms - last_open_ms) < 299_000:
+                working_candles = candles[:-1]
+        except (ValueError, TypeError):
+            working_candles = candles[:-1]
+
     # Обеспечиваем правильные типы колонок
     clean_records = []
-    for c in candles:
+    for c in working_candles:
         clean_records.append({
             "time": c.get("time", int(time.time() * 1000)),
             "open": float(c.get("open", 0.0)),

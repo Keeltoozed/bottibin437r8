@@ -6,14 +6,14 @@ import config
 
 class BinanceClient:
     """
-    Асинхронный отказоустойчивый клиент для Binance API.
+    Асинхронный отказоустойчивый клиент для Binance Futures API.
     Поддерживает:
-      - Автоматическое переключение на глобальные зеркала (Binance Vision) при блокировке IP в США (Render).
-      - Запрос цен, стакана, свечей и расчет фитилей (wicks).
-      - Параллельный мониторинг цен открытых позиций.
+      - Прямое подключение к Binance Perpetual Futures (fapi.binance.com, нативно в регионе Frankfurt EU)
+        с автоматическим резервированием на Binance Vision при гео-блокировке.
+      - Умный радар пробоев (24h High/Low Proximity + Институциональный объем).
+      - Структурный расчет пробоев Дончиана (20 баров), силы закрытия свечи (CLV), RVOL и честных стопов по ATR/фитилям.
     """
     def __init__(self):
-        # Список доступных эндпоинтов (с авто-переключением при 451 / гео-блоке)
         self.mirrors = [
             {"name": "fapi", "base": "https://fapi.binance.com", "ticker24": "/fapi/v1/ticker/24hr", "klines": "/fapi/v1/klines", "book": "/fapi/v1/ticker/bookTicker", "price": "/fapi/v1/ticker/price"},
             {"name": "vision", "base": "https://data-api.binance.vision", "ticker24": "/api/v3/ticker/24hr", "klines": "/api/v3/klines", "book": "/api/v3/ticker/bookTicker", "price": "/api/v3/ticker/price"},
@@ -37,10 +37,8 @@ class BinanceClient:
 
     async def _request_with_fallback(self, route_key: str, params: Optional[Dict[str, Any]] = None) -> Optional[Any]:
         session = await self.get_session()
-        
-        # Сначала пробуем текущее активное зеркало
+
         indices = list(range(len(self.mirrors)))
-        # Переставляем активное зеркало на первое место
         if self.active_mirror_idx in indices:
             indices.remove(self.active_mirror_idx)
             indices.insert(0, self.active_mirror_idx)
@@ -56,12 +54,11 @@ class BinanceClient:
                             self.active_mirror_idx = idx
                         return await resp.json()
                     elif resp.status in [451, 403]:
-                        # Гео-блокировка (часто на серверах Render в США)
                         if self.active_mirror_idx == idx:
-                            print(f"⚠️ [Binance API] {mirror['name']} вернул HTTP {resp.status} (гео-ограничение сервера). Пробуем зеркало Binance Vision...", flush=True)
+                            print(f"⚠️ [Binance API] {mirror['name']} вернул HTTP {resp.status} (гео-ограничение сервера). Пробуем резервное зеркало...", flush=True)
                     elif resp.status == 429:
                         await asyncio.sleep(1.0)
-            except Exception as e:
+            except Exception:
                 pass
         return None
 
@@ -77,12 +74,10 @@ class BinanceClient:
 
     async def fetch_top_tickers(self, min_vol_usdt: float = config.MIN_24H_VOLUME_USDT, limit: int = config.SCAN_TICKERS_LIMIT) -> List[Dict[str, Any]]:
         """
-        Формирует институциональный торговый радар:
-        Сканирует самые ликвидные активы и топовые ракеты рынка (Top Gainers + High Volume):
-        1. Топ-Гейнеры (Ракеты!): монеты с максимальным суточным ростом % при наличии реального объема.
-        2. Институциональный объем: тяжеловесы с глубочайшим стаканом.
-        3. Топ-Лузеры: лучшие кандидаты для шорт-пробоев.
-        Исключает стейблкоины, фиат, токенизированные акции и неликвидный спам.
+        Формирует профессиональный радар Охотника за Ракетами (Structural Rocket Radar):
+        1. Поджатие к суточному хаю (24h High Proximity): монеты в пределах 5% от хая дня (без перегрева >38%) — кандидаты на старт ракеты прямо сейчас!
+        2. Топ по ликвидности и элитный юниверс (Core Liquid & Meme Universe).
+        3. Поджатие к суточному лою (24h Low Proximity): кандидаты на каскадный пробой в SHORT.
         """
         data = await self._request_with_fallback("ticker24")
         if not data or not isinstance(data, list):
@@ -91,6 +86,7 @@ class BinanceClient:
         excluded = getattr(config, "EXCLUDED_TICKERS", set())
         strict = getattr(config, "STRICT_WHITELIST_ONLY", False)
         whitelist = set(getattr(config, "TOP_CRYPTO_UNIVERSE", []))
+        max_24h_cap = float(getattr(config, "MAX_24H_CHANGE_CAP", 38.0))
         lev_tokens = ("UPUSDT", "DOWNUSDT", "BEARUSDT", "BULLUSDT")
 
         valid_tickers = []
@@ -98,13 +94,10 @@ class BinanceClient:
             if not isinstance(item, dict):
                 continue
             sym = item.get("symbol", "")
-            if not sym.endswith("USDT"):
-                continue
-            if sym in excluded:
+            if not sym.endswith("USDT") or sym in excluded:
                 continue
             if any(sym.endswith(lt) for lt in lev_tokens):
                 continue
-            # Фильтр: только валидные латинские символы и цифры
             if not all(ord(c) < 128 and (c.isalnum() or c == '_') for c in sym):
                 continue
             if strict and sym not in whitelist:
@@ -118,15 +111,21 @@ class BinanceClient:
                 if last_p <= 0:
                     continue
                 pct = float(item.get("priceChangePercent", 0) or 0)
-                high_p = float(item.get("highPrice", 0) or 0)
-                low_p = float(item.get("lowPrice", 0) or 0)
+                high_p = max(float(item.get("highPrice", 0) or 0), last_p)
+                low_p = min(float(item.get("lowPrice", 0) or last_p), last_p)
+
+                dist_to_high = (high_p - last_p) / max(high_p, 1e-9)
+                dist_to_low = (last_p - low_p) / max(last_p, 1e-9)
+
                 valid_tickers.append({
                     "symbol": sym,
                     "price": last_p,
                     "volume_24h": vol,
                     "price_change_24h_pct": pct,
                     "high_24h": high_p,
-                    "low_24h": low_p
+                    "low_24h": low_p,
+                    "dist_to_high_24h": round(dist_to_high, 4),
+                    "dist_to_low_24h": round(dist_to_low, 4)
                 })
             except (ValueError, TypeError):
                 continue
@@ -134,55 +133,61 @@ class BinanceClient:
         if not valid_tickers:
             return []
 
-        # ДИНАМИЧЕСКИЙ РАДАР (Ракеты + Ликвидность + Шорт-радар):
-        # 1. Топ-Гейнеры (Ракеты прямо сейчас! Самый мощный импульс дня)
-        by_gainers = sorted(valid_tickers, key=lambda x: x["price_change_24h_pct"], reverse=True)
-        # 2. Топ по суточному объёму (Институциональные мажоры и L1/L2 гиганты)
-        by_volume = sorted(valid_tickers, key=lambda x: x["volume_24h"], reverse=True)
-        # 3. Топ-Лузеры (для поиска чистых шорт-пробоев)
-        by_losers = sorted(valid_tickers, key=lambda x: x["price_change_24h_pct"])
+        # 1. Кандидаты на пробой вверх (торгуются у самых суточных максимумов, но еще не перегреты раздачей >38%)
+        breakout_long_pool = [
+            x for x in valid_tickers
+            if 0.5 <= x["price_change_24h_pct"] <= max_24h_cap and x["dist_to_high_24h"] <= 0.055
+        ]
+        breakout_long_pool.sort(key=lambda x: (x["dist_to_high_24h"], -x["volume_24h"]))
 
-        # Комбинируем без дубликатов, гарантируя присутствие ракет и ликвидности
-        combined_dict = {}
-        # Сначала отдаем 35% квоты под ракеты дня (Top Gainers)
-        g_quota = max(15, int(limit * 0.35))
-        for item in by_gainers[:g_quota]:
+        # 2. Кандидаты на пробой вниз (торгуются у самых суточных минимумов)
+        breakdown_short_pool = [
+            x for x in valid_tickers
+            if -max_24h_cap <= x["price_change_24h_pct"] <= -0.5 and x["dist_to_low_24h"] <= 0.055
+        ]
+        breakdown_short_pool.sort(key=lambda x: (x["dist_to_low_24h"], -x["volume_24h"]))
+
+        # 3. Топ ликвидности и приоритетный список ракет
+        by_volume = sorted(valid_tickers, key=lambda x: (1 if x["symbol"] in whitelist else 0, x["volume_24h"]), reverse=True)
+
+        combined_dict: Dict[str, Dict[str, Any]] = {}
+
+        # 35% квоты: поджатие к суточному хаю (свежие LONG ракеты)
+        q_long = max(20, int(limit * 0.35))
+        for item in breakout_long_pool[:q_long]:
             combined_dict[item["symbol"]] = item
 
-        # 45% квоты под топ-ликвидность (Volume Leaders)
-        v_quota = max(25, int(limit * 0.45))
-        for item in by_volume[:v_quota]:
+        # 40% квоты: лидеры ликвидности и элитный юниверс
+        q_vol = max(30, int(limit * 0.40))
+        for item in by_volume[:q_vol]:
+            if abs(item["price_change_24h_pct"]) <= max_24h_cap * 1.15:
+                combined_dict[item["symbol"]] = item
+
+        # 25% квоты: поджатие к суточному лою (свежие SHORT пробои)
+        q_short = max(15, int(limit * 0.25))
+        for item in breakdown_short_pool[:q_short]:
             combined_dict[item["symbol"]] = item
 
-        # 20% квоты под шорт-радар (Top Losers)
-        l_quota = max(10, int(limit * 0.20))
-        for item in by_losers[:l_quota]:
-            combined_dict[item["symbol"]] = item
-
-        # Если остался лимит, добираем следующими по объему
+        # Добираем остаток ликвидными активами по объему
         if len(combined_dict) < limit:
-            for item in by_volume:
-                if item["symbol"] not in combined_dict:
+            for item in sorted(valid_tickers, key=lambda x: x["volume_24h"], reverse=True):
+                if item["symbol"] not in combined_dict and abs(item["price_change_24h_pct"]) <= max_24h_cap * 1.15:
                     combined_dict[item["symbol"]] = item
                     if len(combined_dict) >= limit:
                         break
 
-        selected = list(combined_dict.values())
-        return selected[:limit]
+        return list(combined_dict.values())[:limit]
 
     async def fetch_candles_analysis(self, symbol: str, interval: str = "5m", limit: int = 80) -> Optional[Dict[str, Any]]:
         """
-        Запрашивает свечи и производит институциональный технический расчет:
-        - Всплеск объема (Volume Surge)
-        - Фитили последней свечи (Wick analysis)
-        - Доля отката (Pullback) / микро-отскока (Bounce)
-        - Локальный минимум/максимум под фитилем (Wick Stop Loss)
-        - Индекс относительной силы RSI-14
-        - Экспоненциальные скользящие средние EMA-9 и EMA-21 (Trend Alignment)
-        - Передает список свечей для квантового инференса в QuantMLEngine
+        Запрашивает 5m свечи и выполняет структурный анализ пробоя (Rocket Hunter Engine):
+        - Строго разделяет закрытые свечи (candles[:-1]) и текущую живую цену (candles[-1]).
+        - Вычисляет пробой 20-барного канала Дончиана и быстрый 12-барный Ignition.
+        - Рассчитывает силу закрытия свечи (Close Location Value) вместо ошибочного фильтра нижнего фитиля.
+        - Вычисляет ЧЕСТНЫЙ структурный стоп (за фитиль + ATR буфер) БЕЗ искусственного зажима внутри свечи!
         """
         raw_candles = await self._request_with_fallback("klines", params={"symbol": symbol, "interval": interval, "limit": limit})
-        if not raw_candles or len(raw_candles) < 8:
+        if not raw_candles or len(raw_candles) < 30:
             return None
 
         candles = []
@@ -200,47 +205,47 @@ class BinanceClient:
             except (ValueError, IndexError):
                 continue
 
-        if len(candles) < 15:
+        if len(candles) < 30:
             return None
 
-        # СТРОГАЯ ДИСЦИПЛИНА СВЕЧНОГО АНАЛИЗА:
-        # Анализируем ТОЛЬКО последнюю ПОЛНОСТЬЮ ЗАКРЫТУЮ свечу (candles[-2]),
-        # а формирующаяся свеча (candles[-1]) используется исключительно для текущей рыночной цены!
+        # СТРОГАЯ СВЕЧНАЯ ДИСЦИПЛИНА:
+        # Все индикаторы и условия сигнала считаются строго по ЗАКРЫТЫМ свечам (closed_candles),
+        # а формирующаяся свеча (candles[-1]) дает актуальную рыночную цену входа и контроль погони!
+        closed_candles = candles[:-1]
         current_live_c = candles[-1]
-        closed_signal_c = candles[-2]
-        prev_closed_c = candles[-3]
+        closed_signal_c = closed_candles[-1]   # candles[-2] — закрытый сигнальный бар
+        prev_closed_c = closed_candles[-2]     # candles[-3] — предыдущий закрытый бар
         current_price = current_live_c["close"]
 
-        # Средний объем предыдущих 10 закрытых свечей (без учета формирующейся свечи)
-        prior_vols = [c["quote_vol"] for c in candles[-12:-2]]
-        avg_vol = (sum(prior_vols) / len(prior_vols)) if prior_vols else 1.0
-
-        # Всплеск объема строго по закрытой сигнальной свече
+        # Относительный всплеск объема RVOL по закрытой сигнальной свече к 20 предыдущим закрытым барам
+        prior_20_vols = [c["quote_vol"] for c in closed_candles[-21:-1]]
+        avg_vol = (sum(prior_20_vols) / len(prior_20_vols)) if prior_20_vols else 1.0
         surge_ratio = round(closed_signal_c["quote_vol"] / avg_vol, 2) if avg_vol > 0 else 1.0
 
+        # Анатомия сигнальной свечи и сила закрытия (Close Location Value — CLV)
         candle_range = max(closed_signal_c["high"] - closed_signal_c["low"], 1e-9)
         body_top = max(closed_signal_c["open"], closed_signal_c["close"])
         body_bottom = min(closed_signal_c["open"], closed_signal_c["close"])
 
         upper_wick_pct = round((closed_signal_c["high"] - body_top) / candle_range, 3)
         lower_wick_pct = round((body_bottom - closed_signal_c["low"]) / candle_range, 3)
+        close_strength_long = round((closed_signal_c["close"] - closed_signal_c["low"]) / candle_range, 3)
+        close_strength_short = round((closed_signal_c["high"] - closed_signal_c["close"]) / candle_range, 3)
 
-        # Откат текущей цены от хая сигнальной свечи (для LONG: вход на ретесте)
-        pullback_from_high_pct = round((current_price - closed_signal_c["high"]) / closed_signal_c["high"], 4)
-        # Отскок текущей цены от лоя сигнальной свечи (для SHORT: вход на микро-отскоке)
+        # Отклонение живой цены относительно сигнального закрытия
+        pullback_from_high_pct = round((current_price - closed_signal_c["high"]) / max(closed_signal_c["high"], 1e-9), 4)
         bounce_from_low_pct = round((current_price - closed_signal_c["low"]) / max(closed_signal_c["low"], 1e-9), 4)
+        live_drift_long_pct = round((current_price - closed_signal_c["close"]) / max(closed_signal_c["close"], 1e-9), 4)
+        live_drift_short_pct = round((closed_signal_c["close"] - current_price) / max(closed_signal_c["close"], 1e-9), 4)
 
-        # Расчет истинного импульса закрытой свечи:
-        pct_5m = round((closed_signal_c["close"] - prev_closed_c["close"]) / prev_closed_c["close"] * 100, 2)
-        pct_15m = round((closed_signal_c["close"] - candles[-5]["close"]) / candles[-5]["close"] * 100, 2) if len(candles) >= 5 else pct_5m
+        pct_5m = round((closed_signal_c["close"] - prev_closed_c["close"]) / max(prev_closed_c["close"], 1e-9) * 100, 2)
+        pct_15m = round((closed_signal_c["close"] - closed_candles[-4]["close"]) / max(closed_candles[-4]["close"], 1e-9) * 100, 2) if len(closed_candles) >= 5 else pct_5m
 
-        # ======================================================================
-        # РАСЧЕТ ATR-14 (Average True Range) ДЛЯ ФИЛЬТРАЦИИ СЛУЧАЙНОГО ШУМА
-        # ======================================================================
+        # ATR-14 строго по закрытым свечам
         true_ranges = []
-        for i in range(1, len(candles) - 1): # только закрытые свечи
-            c_curr = candles[i]
-            c_prev = candles[i-1]
+        for i in range(1, len(closed_candles)):
+            c_curr = closed_candles[i]
+            c_prev = closed_candles[i - 1]
             tr = max(
                 c_curr["high"] - c_curr["low"],
                 abs(c_curr["high"] - c_prev["close"]),
@@ -249,47 +254,25 @@ class BinanceClient:
             true_ranges.append(tr)
 
         atr14 = (sum(true_ranges[-14:]) / min(len(true_ranges), 14)) if true_ranges else candle_range
-        atr14_pct = round(atr14 / current_price, 4)
+        atr14_pct = round(atr14 / max(closed_signal_c["close"], 1e-9), 4)
 
-        # Скальп-стоп за фитилем: локальный экстремум последних 2 ЗАКРЫТЫХ свечей
-        recent_wick_low = min(prev_closed_c["low"], closed_signal_c["low"])
-        raw_wick_sl = round(recent_wick_low * (1.0 - config.WICK_BUFFER_PCT), 6)
-        raw_sl_pct = (current_price - raw_wick_sl) / current_price
+        # EMA-9, EMA-21 и RSI-14 строго по закрытым свечам (без дрожания незакрытого тика)
+        closed_closes = [c["close"] for c in closed_candles]
 
-        # Расчет параметров для SHORT (стоп над верхним фитилем закрытых свечей)
-        recent_wick_high = max(prev_closed_c["high"], closed_signal_c["high"])
-        raw_short_sl = round(recent_wick_high * (1.0 + config.WICK_BUFFER_PCT), 6)
-        raw_short_sl_pct = (raw_short_sl - current_price) / current_price
-
-        # Институциональный скальперский стоп-лосс (диапазон 0.40%..1.20%):
-        safe_long_sl_pct = round(min(max(raw_sl_pct, atr14_pct, 0.0040), 0.0120), 4)
-        wick_stop_loss = round(current_price * (1.0 - safe_long_sl_pct), 6)
-        sl_pct_distance = safe_long_sl_pct
-
-        safe_short_sl_pct = round(min(max(raw_short_sl_pct, atr14_pct, 0.0040), 0.0120), 4)
-        short_wick_stop_loss = round(current_price * (1.0 + safe_short_sl_pct), 6)
-        short_sl_pct_distance = safe_short_sl_pct
-
-        # ======================================================================
-        # ИНСТИТУЦИОНАЛЬНЫЕ ИНДИКАТОРЫ: RSI-14 & EMA 9/21 TREND ALIGNMENT
-        # ======================================================================
-        closes = [c["close"] for c in candles]
-
-        # EMA-9 & EMA-21
-        def calc_ema(values, period):
+        def calc_ema(values: List[float], period: int) -> float:
             k = 2.0 / (period + 1.0)
-            ema = values[0]
+            ema_val = values[0]
             for v in values[1:]:
-                ema = v * k + ema * (1.0 - k)
-            return ema
+                ema_val = v * k + ema_val * (1.0 - k)
+            return ema_val
 
-        ema9 = round(calc_ema(closes, 9), 6)
-        ema21 = round(calc_ema(closes, 21) if len(closes) >= 21 else calc_ema(closes, len(closes)), 6)
+        ema9 = round(calc_ema(closed_closes, 9), 6)
+        ema21 = round(calc_ema(closed_closes, 21) if len(closed_closes) >= 21 else calc_ema(closed_closes, len(closed_closes)), 6)
+        ema21_ext_pct = round(abs(closed_signal_c["close"] - ema21) / max(ema21, 1e-9), 4)
 
-        # RSI-14
         gains, losses = [], []
-        for i in range(1, len(closes)):
-            delta = closes[i] - closes[i - 1]
+        for i in range(1, len(closed_closes)):
+            delta = closed_closes[i] - closed_closes[i - 1]
             if delta >= 0:
                 gains.append(delta)
                 losses.append(0.0)
@@ -305,13 +288,47 @@ class BinanceClient:
             rs = avg_gain / avg_loss
             rsi = round(100.0 - (100.0 / (1.0 + rs)), 1)
 
-        recent_high = max(c["high"] for c in candles[-6:])
-        recent_low = min(c["low"] for c in candles[-6:])
+        # Структурные уровни пробоя Дончиана (предшествующие закрытые бары БЕЗ сигнальной свечи)
+        lookback = int(getattr(config, "BREAKOUT_LOOKBACK_BARS", 20))
+        fast_lb = int(getattr(config, "FAST_IGNITION_LOOKBACK_BARS", 12))
+        fast_surge = float(getattr(config, "FAST_IGNITION_SURGE", 2.80))
 
-        # Структура тренда
-        if current_price >= ema9 >= ema21:
+        struct_slice = closed_candles[-(lookback + 1):-1] if len(closed_candles) > lookback else closed_candles[:-1]
+        fast_slice = closed_candles[-(fast_lb + 1):-1] if len(closed_candles) > fast_lb else closed_candles[:-1]
+
+        donchian_high = max(c["high"] for c in struct_slice)
+        donchian_low = min(c["low"] for c in struct_slice)
+        fast_high_12 = max(c["high"] for c in fast_slice)
+        fast_low_12 = min(c["low"] for c in fast_slice)
+
+        is_breakout_long = (
+            (closed_signal_c["close"] > donchian_high) or
+            (surge_ratio >= fast_surge and closed_signal_c["close"] > fast_high_12 and ema9 >= ema21)
+        )
+        is_breakout_short = (
+            (closed_signal_c["close"] < donchian_low) or
+            (surge_ratio >= fast_surge and closed_signal_c["close"] < fast_low_12 and ema9 <= ema21)
+        )
+
+        # ЧЕСТНЫЙ СТРУКТУРНЫЙ СТОП-ЛОСС (БЕЗ ИСКУССТВЕННОГО ЗАЖИМА min(..., 0.012) ВНУТРИ СВЕЧИ!):
+        # Если реальный структурный стоп шире лимита (2.2%), сканер честно пропустит сделку, а не поставит стоп в воздух!
+        recent_wick_low = min(prev_closed_c["low"], closed_signal_c["low"])
+        raw_wick_sl = round(recent_wick_low * (1.0 - config.WICK_BUFFER_PCT), 6)
+        raw_sl_pct = (current_price - raw_wick_sl) / max(current_price, 1e-9)
+
+        true_long_sl_pct = round(max(raw_sl_pct, 1.2 * atr14_pct, config.STOP_LOSS_MIN_PCT), 4)
+        wick_stop_loss = round(current_price * (1.0 - true_long_sl_pct), 6)
+
+        recent_wick_high = max(prev_closed_c["high"], closed_signal_c["high"])
+        raw_short_sl = round(recent_wick_high * (1.0 + config.WICK_BUFFER_PCT), 6)
+        raw_short_sl_pct = (raw_short_sl - current_price) / max(current_price, 1e-9)
+
+        true_short_sl_pct = round(max(raw_short_sl_pct, 1.2 * atr14_pct, config.STOP_LOSS_MIN_PCT), 4)
+        short_wick_stop_loss = round(current_price * (1.0 + true_short_sl_pct), 6)
+
+        if closed_signal_c["close"] >= ema9 >= ema21:
             trend = "BULLISH"
-        elif current_price <= ema9 <= ema21:
+        elif closed_signal_c["close"] <= ema9 <= ema21:
             trend = "BEARISH"
         else:
             trend = "CHOP"
@@ -319,19 +336,31 @@ class BinanceClient:
         return {
             "symbol": symbol,
             "current_price": current_price,
-            "recent_high": recent_high,
-            "recent_low": recent_low,
+            "signal_close": closed_signal_c["close"],
+            "signal_open": closed_signal_c["open"],
+            "recent_high": donchian_high,
+            "recent_low": donchian_low,
+            "is_breakout_long": is_breakout_long,
+            "is_breakout_short": is_breakout_short,
+            "close_strength_long": close_strength_long,
+            "close_strength_short": close_strength_short,
+            "ema21_ext_pct": ema21_ext_pct,
+            "live_drift_long_pct": live_drift_long_pct,
+            "live_drift_short_pct": live_drift_short_pct,
+            "breakout_failed_long": current_price < closed_signal_c["open"],
+            "breakout_failed_short": current_price > closed_signal_c["open"],
             "pullback_from_high_pct": pullback_from_high_pct,
             "bounce_from_low_pct": bounce_from_low_pct,
             "volume_surge_ratio": surge_ratio,
+            "rvol": surge_ratio,
             "upper_wick_pct": upper_wick_pct,
             "lower_wick_pct": lower_wick_pct,
             "wick_stop_loss": wick_stop_loss,
-            "sl_pct_distance": sl_pct_distance,
+            "sl_pct_distance": true_long_sl_pct,
             "short_wick_sl": short_wick_stop_loss,
             "short_wick_stop_loss": short_wick_stop_loss,
-            "short_sl_dist": short_sl_pct_distance,
-            "short_sl_pct_distance": short_sl_pct_distance,
+            "short_sl_dist": true_short_sl_pct,
+            "short_sl_pct_distance": true_short_sl_pct,
             "pct_5m": pct_5m,
             "pct_15m": pct_15m,
             "last_quote_volume": closed_signal_c["quote_vol"],
@@ -346,9 +375,9 @@ class BinanceClient:
     async def fetch_btc_regime(self) -> Dict[str, Any]:
         """
         Институциональный макро-фильтр рынка по Bitcoin (Поводырь рынка).
-        Защищает депозит от общерыночных сливов, негативных новостей и FUD.
+        Блокирует входы против резких импульсных проливов/выносов BTC.
         """
-        analysis = await self.fetch_candles_analysis("BTCUSDT", interval="5m", limit=30)
+        analysis = await self.fetch_candles_analysis("BTCUSDT", interval="5m", limit=35)
         if not analysis:
             return {
                 "trend": "CHOP",
@@ -365,18 +394,15 @@ class BinanceClient:
         trend = analysis.get("trend", "CHOP")
         rsi = analysis.get("rsi", 50.0)
 
-        # Фильтр режима Bitcoin (Directional Market Lock):
-        # Блокируем лонги ТОЛЬКО при реальном импульсном дампе BTC (от -0.40% за 15m или -0.30% за 5m)
-        is_dumping = (p15 <= -0.40) or (p5 <= -0.30) or (trend == "BEARISH" and rsi < 35.0 and p5 < -0.15)
-        # Блокируем шорты ТОЛЬКО при мощном импульсном выносе BTC (от +0.40% за 15m или +0.30% за 5m)
-        is_pumping = (p15 >= +0.40) or (p5 >= +0.30) or (trend == "BULLISH" and rsi > 65.0 and p5 > +0.15)
+        is_dumping = (p15 <= -0.45) or (p5 <= -0.35) or (trend == "BEARISH" and rsi < 32.0 and p5 < -0.20)
+        is_pumping = (p15 >= +0.45) or (p5 >= +0.35) or (trend == "BULLISH" and rsi > 68.0 and p5 > +0.20)
 
         if is_dumping:
-            status_str = f"🔴 Медвежий BTC ({p15:+.2f}%, {trend}) — ЛОНГИ ЗАБЛОКИРОВАНЫ | Приоритет: SHORT"
+            status_str = f"🔴 Медвежий импульс BTC ({p15:+.2f}%, {trend}) — ЛОНГИ ЗАБЛОКИРОВАНЫ | Приоритет: SHORT"
         elif is_pumping:
-            status_str = f"🟢 Бычий BTC ({p15:+.2f}%, {trend}) — ШОРТЫ ЗАБЛОКИРОВАНЫ | Приоритет: LONG"
+            status_str = f"🟢 Бычий импульс BTC ({p15:+.2f}%, {trend}) — ШОРТЫ ЗАБЛОКИРОВАНЫ | Приоритет: LONG"
         else:
-            status_str = f"🟡 Боковик BTC ({p15:+.2f}%, тренд: {trend}) — Разрешены LONG и SHORT"
+            status_str = f"🟡 Спокойный BTC ({p15:+.2f}%, {trend}) — Разрешены LONG и SHORT ракеты"
 
         return {
             "trend": trend,
@@ -389,10 +415,6 @@ class BinanceClient:
         }
 
     async def fetch_all_book_tickers(self) -> Dict[str, Tuple[float, float]]:
-        """
-        Пакетная загрузка стаканов (best bid/ask) всех пар рынка за 1 быстрый запрос.
-        Кэшируется на 4 секунды, избавляя от сотен повторных HTTP вызовов.
-        """
         now = time.time()
         if self._book_tickers_cache and (now - self._book_tickers_cache_time) < 4.0:
             return self._book_tickers_cache
@@ -416,7 +438,6 @@ class BinanceClient:
         return self._book_tickers_cache
 
     async def fetch_orderbook_spread(self, symbol: str) -> Tuple[float, float, float]:
-        # Быстрый путь: берем из пакетного кэша стаканов (O(1) память)
         cache = await self.fetch_all_book_tickers()
         if symbol in cache:
             bid, ask = cache[symbol]
@@ -438,10 +459,6 @@ class BinanceClient:
         return 0.0, 0.0, 1.0
 
     async def fetch_recent_high_low(self, symbol: str, limit: int = 12) -> Optional[Tuple[float, float, float]]:
-        """
-        Возвращает (current_price, max_high, min_low) за последние limit 5m свечей.
-        Гарантирует, что даже кратковременный всплеск или пролив цены не будет упущен.
-        """
         raw = await self._request_with_fallback("klines", params={"symbol": symbol, "interval": "5m", "limit": limit})
         if not raw or not isinstance(raw, list):
             return None

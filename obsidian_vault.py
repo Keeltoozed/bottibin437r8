@@ -15,6 +15,7 @@ class ObsidianVaultManager:
     """
 
     def __init__(self, custom_path: Optional[str] = None):
+        self.enabled: bool = True
         # Приоритет 1: iCloud Obsidian (если Mac пользователя)
         icloud_dir = os.path.expanduser("~/Library/Mobile Documents/iCloud~md~obsidian/Documents/Binance_AI_Trader")
         # Приоритет 2: Локальная папка проекта (для Render / Linux)
@@ -145,6 +146,8 @@ updated: {now}
 
     def _write_file_to_targets(self, relative_path: str, content: str):
         """Записывает файл как в iCloud, так и в локальную папку."""
+        if not getattr(self, "enabled", True):
+            return
         targets = [self.vault_path]
         if getattr(self, "secondary_path", None):
             targets.append(self.secondary_path)
