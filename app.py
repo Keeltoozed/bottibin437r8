@@ -390,8 +390,9 @@ with tab_pos:
 # 2. GROQ LIVE RADAR (ОЦЕНКА МОНЕТ)
 # ------------------------------------------------------------------------------
 with tab_radar:
-    st.subheader("🧠 Живой радар Quant ML (Оценка всех 72 пар рынка)")
-    st.caption("Квантовая модель XGBoost непрерывно сканирует каждую пару на Binance Futures и оценивает 30 институциональных факторов в реальном времени.")
+    live_u_cnt = getattr(portfolio, "last_universe_count", config.SCAN_TICKERS_LIMIT) or config.SCAN_TICKERS_LIMIT
+    st.subheader(f"🧠 Живой радар Охотника за Ракетами (Топ-15 из {live_u_cnt} ликвидных пар)")
+    st.caption("Сканер каждые 12 секунд отслеживает поджатие к 20-барным экстремумам Дончиана, RVOL и 30 квантовых факторов ML по закрытым 5m свечам.")
     
     if getattr(portfolio, "live_ml_ranking", None):
         rows_ml = []
@@ -401,18 +402,20 @@ with tab_radar:
             side_str = "🟢 LONG" if side_val == 'LONG' else "🔻 SHORT"
             sl_dist = item.get("sl_pct_distance", 0.0) if side_val == "LONG" else item.get("short_sl_dist", 0.0)
             sl_pct = sl_dist * 100
+            dist_brk = item.get("dist_to_breakout_pct", None)
+            dist_str = "🔥 0.00%" if (dist_brk is not None and dist_brk <= 0.001) else (f"{dist_brk:.2f}%" if dist_brk is not None else "—")
             
-            raw_reason = item.get("ml_reason", "")
-            if "опасный стоп" in raw_reason:
-                stat_str = f"❌ Широкий стоп ({sl_pct:.2f}% > {config.STOP_LOSS_MAX_PCT*100:.1f}%)"
-            elif "мертвый объем" in raw_reason:
-                stat_str = "💤 Нет объёма"
-            elif p_val >= 60.0:
-                stat_str = "🚀 Сильный пробой (A+)"
-            elif p_val >= 42.0:
-                stat_str = "⚡ Кандидат в пробой"
-            else:
-                stat_str = "💤 Слабый скоринг"
+            stat_str = item.get("radar_status")
+            if not stat_str:
+                raw_reason = item.get("ml_reason", "")
+                if "опасный стоп" in raw_reason:
+                    stat_str = f"❌ Широкий стоп ({sl_pct:.2f}% > {config.STOP_LOSS_MAX_PCT*100:.1f}%)"
+                elif p_val >= 60.0:
+                    stat_str = "🚀 Сильный пробой (A+)"
+                elif p_val >= 42.0:
+                    stat_str = "⚡ Кандидат в пробой"
+                else:
+                    stat_str = "💤 Слабый скоринг"
                 
             v_vol = item.get('volume_surge_ratio') if item.get('volume_surge_ratio') is not None else 1.0
             v_5m = item.get('pct_5m') if item.get('pct_5m') is not None else 0.0
@@ -420,17 +423,18 @@ with tab_radar:
 
             rows_ml.append({
                 "Монета": item.get("symbol", "N/A"),
-                "Сторона": side_str,
-                "Вероятность ML": f"{p_val:.1f}%",
-                "Дистанция SL": f"{sl_pct:.2f}%",
-                "Всплеск объема": f"{v_vol:.2f}x",
+                "Направление": side_str,
+                "До пробоя": dist_str,
+                "RVOL объем": f"{v_vol:.2f}x",
                 "Импульс 5m": f"{v_5m:+.2f}%",
+                "Вероятность ML": f"{p_val:.1f}%",
+                "Структ. SL": f"{sl_pct:.2f}%",
                 "RSI": f"{v_rsi:.1f}",
-                "Статус": stat_str
+                "Статус сканера": stat_str
             })
         st.dataframe(pd.DataFrame(rows_ml), width="stretch")
     else:
-        st.info("Квантовый ML сканер собирает метрики по парам рынка...")
+        st.info("Квантовый ML сканер выполняет первый обход рынка (занимает ~4 секунды)...")
 
     st.markdown("---")
     st.subheader("🤖 Решения Groq AI (JEV Engine)")

@@ -56,24 +56,21 @@ class MarketScanner:
         btc_regime = await binance_client.fetch_btc_regime()
         portfolio.btc_regime_str = btc_regime.get("status_str", "")
 
-        # 1. UNIVERSE: Широкий радар пробоев (до 100 ликвидных пар)
+        # 1. UNIVERSE: Широкий радар пробоев (до 115-120 ликвидных пар как на fapi, так и на vision)
         tickers = await binance_client.fetch_top_tickers(
             min_vol_usdt=config.MIN_24H_VOLUME_USDT,
             limit=config.SCAN_TICKERS_LIMIT
         )
+        portfolio.last_universe_count = len(tickers)
         portfolio.funnel_stats["universe"] += len(tickers)
 
         should_log = (now - self._last_log_time) >= 60.0
         if should_log:
             self._last_log_time = now
-            btc_p = btc_regime.get("pct_15m", 0.0)
-            print(
-                f"📡 [ROCKET RADAR] {now_str} — Мониторинг {len(tickers)} пар (Donchian Breakout + RVOL) | "
-                f"BTC 15m: {btc_p:+.2f}% | Оценок Groq: {portfolio.funnel_stats['groq_evaluated']}",
-                flush=True
-            )
 
-        await binance_client.fetch_all_book_tickers()
+        # Если ticker24 еще не заполнил кеш стакана (например на fapi), подгружаем bookTickers одним запросом
+        if not binance_client._book_tickers_cache or (time.time() - binance_client._book_tickers_cache_time) >= 5.0:
+            await binance_client.fetch_all_book_tickers()
         sem = asyncio.Semaphore(16)
 
         async def check_ticker(t: Dict[str, Any]) -> Any:
@@ -123,6 +120,8 @@ class MarketScanner:
                 ema21_ext = analysis.get("ema21_ext_pct", 0.0)
                 sl_long_dist = analysis.get("sl_pct_distance", 0.01)
                 sl_short_dist = analysis.get("short_sl_dist", 0.01)
+                dist_l_pct = analysis.get("dist_to_breakout_long_pct", 1.0)
+                dist_s_pct = analysis.get("dist_to_breakout_short_pct", 1.0)
 
                 min_req_impulse = max(config.MIN_5M_PRICE_IMPULSE_PCT, atr_pct * 100.0 * 0.90)
 
@@ -135,7 +134,7 @@ class MarketScanner:
                 # - Выравнивание EMA9/EMA21 без поздней перерастяжки (>3.5% от EMA21 отсекается)
                 # - Честный структурный стоп 0.50%..2.20%
                 # ==============================================================
-                is_long = (
+                tech_long = (
                     analysis.get("is_breakout_long", False) and
                     surge >= config.MIN_5M_VOLUME_SURGE_RATIO and
                     pct_5m >= min_req_impulse and
@@ -146,11 +145,11 @@ class MarketScanner:
                     ema21_ext <= config.MAX_EMA21_EXTENSION_PCT and
                     analysis.get("live_drift_long_pct", 0.0) <= config.MAX_LIVE_DRIFT_PCT and
                     not analysis.get("breakout_failed_long", False) and
-                    config.STOP_LOSS_MIN_PCT <= sl_long_dist <= config.STOP_LOSS_MAX_PCT and
-                    not btc_regime.get("is_dumping", False)
+                    config.STOP_LOSS_MIN_PCT <= sl_long_dist <= config.STOP_LOSS_MAX_PCT
                 )
+                is_long = tech_long and not btc_regime.get("is_dumping", False)
 
-                is_short = (
+                tech_short = (
                     config.ENABLE_SHORT and
                     analysis.get("is_breakout_short", False) and
                     surge >= config.MIN_5M_VOLUME_SURGE_RATIO and
@@ -162,49 +161,131 @@ class MarketScanner:
                     ema21_ext <= config.MAX_EMA21_EXTENSION_PCT and
                     analysis.get("live_drift_short_pct", 0.0) <= config.MAX_LIVE_DRIFT_PCT and
                     not analysis.get("breakout_failed_short", False) and
-                    config.STOP_LOSS_MIN_PCT <= sl_short_dist <= config.STOP_LOSS_MAX_PCT and
-                    not btc_regime.get("is_pumping", False)
+                    config.STOP_LOSS_MIN_PCT <= sl_short_dist <= config.STOP_LOSS_MAX_PCT
                 )
+                is_short = tech_short and not btc_regime.get("is_pumping", False)
+
+                if (tech_long and not is_long) or (tech_short and not is_short):
+                    portfolio.funnel_stats["btc_blocked"] = portfolio.funnel_stats.get("btc_blocked", 0) + 1
 
                 if not is_long and not is_short:
                     portfolio.funnel_stats["gate_failed"] = portfolio.funnel_stats.get("gate_failed", 0) + 1
-                    return None
+                    # Формируем живую телеметрию поджатия для радара дашборда и логов
+                    watch_side = "LONG" if (dist_l_pct <= dist_s_pct or not config.ENABLE_SHORT) else "SHORT"
+                    dist_near = dist_l_pct if watch_side == "LONG" else dist_s_pct
+                    brk_flag = analysis.get("is_breakout_long", False) if watch_side == "LONG" else analysis.get("is_breakout_short", False)
+                    sl_d = sl_long_dist if watch_side == "LONG" else sl_short_dist
+                    clv_w = clv_long if watch_side == "LONG" else clv_short
+                    wick_w = upper_wick if watch_side == "LONG" else lower_wick
+
+                    if (tech_long and not is_long) or (tech_short and not is_short):
+                        w_status = "🛑 Заблокировано импульсом BTC"
+                    elif brk_flag:
+                        if surge < config.MIN_5M_VOLUME_SURGE_RATIO:
+                            w_status = f"📊 Пробой есть, ждем RVOL ({surge:.1f}x < {config.MIN_5M_VOLUME_SURGE_RATIO:.1f}x)"
+                        elif abs(pct_5m) < min_req_impulse:
+                            w_status = f"⚡ Слабый импульс ({pct_5m:+.2f}% < {min_req_impulse:.2f}%)"
+                        elif clv_w < config.MIN_CLOSE_STRENGTH or wick_w > config.WICK_EXHAUSTION_MAX:
+                            w_status = "🕯️ Тень истощения (отсев ловушки)"
+                        elif sl_d > config.STOP_LOSS_MAX_PCT:
+                            w_status = f"📏 Широкий стоп ({sl_d*100:.2f}% > {config.STOP_LOSS_MAX_PCT*100:.1f}%)"
+                        else:
+                            w_status = "⏳ Ждем выравнивания EMA / RSI"
+                    else:
+                        w_status = f"⏳ Поджатие: {dist_near:.2f}% до пробоя (RVOL {surge:.1f}x)"
+
+                    watch_activity = round(surge * (1.0 / max(dist_near, 0.15)) + abs(pct_5m), 3)
+                    return {
+                        "kind": "watch",
+                        "data": {
+                            **t,
+                            **analysis,
+                            "candidate_side": watch_side,
+                            "dist_to_breakout_pct": dist_near,
+                            "radar_status": w_status,
+                            "watch_activity": watch_activity
+                        }
+                    }
 
                 side = "LONG" if is_long else "SHORT"
                 clv_used = clv_long if side == "LONG" else clv_short
-                chosen = {**t, **analysis, "candidate_side": side}
+                dist_used = dist_l_pct if side == "LONG" else dist_s_pct
+                chosen = {
+                    **t,
+                    **analysis,
+                    "candidate_side": side,
+                    "dist_to_breakout_pct": dist_used,
+                    "btc_regime": btc_regime.get("status_str", "Neutral")
+                }
 
                 # Оценка квантовой моделью строго по закрытой сигнальной свече
                 ml_res = ml_engine.evaluate_candidate(chosen)
                 chosen["ml_prob"] = ml_res.get("ml_probability", 0.5)
                 chosen["ml_reason"] = ml_res.get("reason", "")
                 chosen["ml_approved"] = ml_res.get("ml_approved", False)
-                chosen["btc_regime"] = btc_regime.get("status_str", "Neutral")
 
                 min_ml = float(getattr(config, "ML_MIN_FILTER_PROB", 0.42))
                 if ml_res.get("ml_active") and chosen["ml_prob"] < min_ml:
                     portfolio.funnel_stats["gate_failed"] = portfolio.funnel_stats.get("gate_failed", 0) + 1
-                    return None
+                    chosen["radar_status"] = f"🧠 Отсев ML ({chosen['ml_prob']*100:.0f}% < {min_ml*100:.0f}%)"
+                    chosen["watch_activity"] = round(surge * 3.0 + abs(pct_5m), 3)
+                    return {"kind": "watch", "data": chosen}
 
                 ml_mult = (0.5 + chosen["ml_prob"]) if ml_res.get("ml_active") else 1.0
                 chosen["score"] = round(abs(pct_5m) * surge * clv_used * ml_mult, 3)
-                return chosen
+                chosen["radar_status"] = "🚀 ПРОБОЙ АКТИВЕН (Передан в Groq AI)"
+                return {"kind": "candidate", "data": chosen}
 
         tasks = [check_ticker(t) for t in tickers]
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        all_scored = [r for r in results if r and isinstance(r, dict)]
+
+        all_scored = [r["data"] for r in results if isinstance(r, dict) and r.get("kind") == "candidate"]
+        watch_pool = [r["data"] for r in results if isinstance(r, dict) and r.get("kind") == "watch"]
         portfolio.funnel_stats["hard_gates"] += len(all_scored)
 
         all_scored.sort(key=lambda x: x.get("score", 0.0), reverse=True)
-        portfolio.update_live_ml_ranking(all_scored)
+        watch_pool.sort(key=lambda x: x.get("watch_activity", 0.0), reverse=True)
 
-        if should_log and all_scored:
-            top_3 = all_scored[:3]
-            top_str = ", ".join([
-                f"{c['symbol']} {c['candidate_side']} (Score: {c['score']}, RVOL: {c['volume_surge_ratio']}x, ML: {int(c['ml_prob']*100)}%)"
-                for c in top_3
-            ])
-            print(f"🚀 [ПРОБОЙ НАЙДЕН] Кандидатов: {len(all_scored)} | Лидеры: {top_str}", flush=True)
+        # Всегда заполняем Live Radar топ-15 монетами (сначала активные пробои, затем лидеры поджатия с ML-оценкой)
+        radar_display: List[Dict[str, Any]] = list(all_scored[:15])
+        if len(radar_display) < 15 and watch_pool:
+            need_n = 15 - len(radar_display)
+            for w_item in watch_pool[:need_n]:
+                if "ml_prob" not in w_item:
+                    ml_w = ml_engine.evaluate_candidate(w_item)
+                    w_item["ml_prob"] = ml_w.get("ml_probability", 0.5)
+                    w_item["ml_reason"] = ml_w.get("reason", "")
+                # Не храним тяжелый массив свечей в JSON-радаре
+                w_clean = {k: v for k, v in w_item.items() if k != "candles"}
+                radar_display.append(w_clean)
+
+        portfolio.update_live_ml_ranking([
+            {k: v for k, v in item.items() if k != "candles"} for item in radar_display
+        ])
+
+        if should_log:
+            btc_p = btc_regime.get("pct_15m", 0.0)
+            mirror_tag = binance_client.active_mirror_name
+            if all_scored:
+                top_str = ", ".join([
+                    f"{c['symbol']} {c['candidate_side']} (Score: {c['score']}, RVOL: {c['volume_surge_ratio']}x, ML: {int(c['ml_prob']*100)}%)"
+                    for c in all_scored[:3]
+                ])
+                print(
+                    f"🚀 [ПРОБОЙ НАЙДЕН] {now_str} [{mirror_tag}] — Радар {len(tickers)} пар | "
+                    f"Кандидатов: {len(all_scored)} | {top_str}",
+                    flush=True
+                )
+            else:
+                watch_str = ", ".join([
+                    f"{w['symbol']} {w['candidate_side']} (до пробоя {w.get('dist_to_breakout_pct', 0):.2f}%, RVOL {w.get('volume_surge_ratio', 1):.1f}x)"
+                    for w in watch_pool[:3]
+                ]) if watch_pool else "ожидание импульса"
+                print(
+                    f"📡 [ROCKET RADAR] {now_str} [{mirror_tag}] — Мониторинг {len(tickers)} пар | "
+                    f"BTC 15m: {btc_p:+.2f}% | На прицеле: {watch_str}",
+                    flush=True
+                )
 
         # 5. ОТБОР ЛУЧШИХ КАНДИДАТОВ ДЛЯ GROQ AI
         free_slots = max(1, config.MAX_CONCURRENT_POSITIONS - len(portfolio.open_positions))

@@ -44,6 +44,7 @@ class PortfolioTracker:
         self.pause_until: float = 0.0
         self.is_paused = False
         self.current_leverage = getattr(config, "LEVERAGE", 12)
+        self.last_universe_count: int = 0
         self.btc_regime_str = "🟡 Анализ рынка BTC..."
         self.last_scan_str = "Ожидание..."
         self.load()
@@ -94,7 +95,8 @@ class PortfolioTracker:
                 self.daily_loss_day = state.get("daily_loss_day", time.strftime('%Y-%m-%d', time.gmtime()))
                 self.pause_until = state.get("pause_until", 0.0)
                 self.is_paused = state.get("is_paused", False)
-                self.current_leverage = int(state.get("current_leverage", getattr(config, "LEVERAGE", 12)))
+                raw_lev = int(state.get("current_leverage", getattr(config, "LEVERAGE", 12)))
+                self.current_leverage = raw_lev if 5 <= raw_lev <= 25 else getattr(config, "LEVERAGE", 12)
                 print(f"✅ Портфель загружен: кэш ${self.cash:.2f}, открытых позиций: {len(self.open_positions)}, плечо: {self.current_leverage}x", flush=True)
         except Exception as e:
             print(f"⚠️ Ошибка чтения portfolio.json: {e}", flush=True)

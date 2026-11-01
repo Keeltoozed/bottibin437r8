@@ -134,9 +134,22 @@ async def run_suite():
     assert algo_res["decision"] == "BUY", f"Marubozu-ракета с RSI 79.5 должна одобряться, а не отклоняться! {algo_res}"
     print(f"  ✓ Marubozu-пробой одобрен: {algo_res['decision']} (conf={algo_res['confidence']}) — {algo_res['reason']}")
 
+    # 7. ТЕСТ US RENDER MIRROR (VISION) — 110+ ЖИВЫХ ПАР БЕЗ АКЦИЙ И СТЕЙБЛКОИНОВ + LIVE RADAR
+    print("\n[ТЕСТ 7/7] Проверка зеркала US Render (vision): охват 110+ живых пар, фильтр акций/стейблов и Live Radar...")
+    portfolio.pause_until = 0.0
+    portfolio.daily_losses_count = 0
+    portfolio.consecutive_losses = 0
+    portfolio.open_positions.clear()
+    binance_client.active_mirror_idx = 1  # Принудительно vision (как на сервере Render в США при HTTP 451)
+    vision_tickers = await binance_client.fetch_top_tickers(min_vol_usdt=config.MIN_24H_VOLUME_USDT, limit=config.SCAN_TICKERS_LIMIT)
+    assert len(vision_tickers) >= 100, f"На зеркале vision должно быть >= 100 живых пар, получено {len(vision_tickers)}"
+    bad_syms = [t["symbol"] for t in vision_tickers if t["symbol"] in ("USD1USDT", "RLUSDUSDT", "TQQQBUSDT", "NVDABUSDT", "COCOSUSDT", "XAUTUSDT")]
+    assert not bad_syms, f"В радар попали мусорные пары/акции/стейблы: {bad_syms}"
+    print(f"  ✓ Зеркало vision отобрало {len(vision_tickers)} чистых крипто-пар (акции *BUSDT, стейблкоины и делисты отсечены)!")
+
     await binance_client.close()
     print("\n" + "=" * 78)
-    print("🎉 ВСЕ 6 СИСТЕМ STRUCTURAL ROCKET HUNTER ПРОШЛИ ПРОВЕРКУ НА 100%!")
+    print("🎉 ВСЕ 7 СИСТЕМ STRUCTURAL ROCKET HUNTER ПРОШЛИ ПРОВЕРКУ НА 100%!")
     print("=" * 78)
 
 

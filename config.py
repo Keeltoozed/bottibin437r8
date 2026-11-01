@@ -99,8 +99,9 @@ TAKER_FEE_PCT = float(os.getenv("TAKER_FEE_PCT", "0.0005"))           # 0.05% б
 # ==============================================================================
 # 6. MARKET SCANNER & LIQUID ROCKET UNIVERSE
 # ==============================================================================
-MIN_24H_VOLUME_USDT = max(float(os.getenv("MIN_24H_VOLUME_USDT", "8000000")), 8000000.0)  # Строгий пол $8M (защита от тонких щиткоинов из старых env)
-SCAN_TICKERS_LIMIT = min(int(os.getenv("SCAN_TICKERS_LIMIT", "110")), 120)                # Оптимальный радар до 120 пар без риска бана 429
+MIN_24H_VOLUME_USDT = max(float(os.getenv("MIN_24H_VOLUME_USDT", "8000000")), 8000000.0)  # Строгий пол $8M на fapi (авто-масштаб $650K на Spot/Vision зеркале)
+SPOT_MIRROR_MIN_VOL_USDT = float(os.getenv("SPOT_MIRROR_MIN_VOL_USDT", "650000"))         # Эквивалент ~$8M фьючерсного объема на зеркале data-api.binance.vision (US Render)
+SCAN_TICKERS_LIMIT = min(int(os.getenv("SCAN_TICKERS_LIMIT", "115")), 120)                # Оптимальный радар до 120 пар без риска бана 429
 MAX_24H_CHANGE_CAP = float(os.getenv("MAX_24H_CHANGE_CAP", "38.0"))       # Отсев перегретых +40% пампов на стадии раздачи
 STRICT_WHITELIST_ONLY = os.getenv("STRICT_WHITELIST_ONLY", "false").lower() == "true"
 CHOP_MIN_VOLUME_SURGE = float(os.getenv("CHOP_MIN_VOLUME_SURGE", "1.50"))
@@ -122,18 +123,29 @@ TOP_CRYPTO_UNIVERSE = [
     "ORDIUSDT", "BEAMXUSDT", "POWRUSDT", "GTCUSDT", "WLDUSDT", "ONDOUSDT"
 ]
 
-# Черный список: стейблкоины, фиат, хаки и синтетические акции
+# Корни токенизированных акций и ETF (отсекают как <ROOT>USDT, так и <ROOT>BUSDT на Spot/Vision):
+STOCK_TICKER_ROOTS = {
+    "NVDA", "TSLA", "AAPL", "MSFT", "AMZN", "GOOG", "GOOGL", "META", "MSTR",
+    "COIN", "QQQ", "SPY", "SOXL", "SOXS", "INTC", "INTW", "SNDK", "CRCL",
+    "SPCX", "SKHY", "SKHYNIX", "KORU", "AMD", "PLTR", "HOOD", "NFLX", "BABA",
+    "MU", "BNC", "AKE"
+}
+
+# Черный список: стейблкоины, фиат, золото/металлы, хаки и синтетические акции
 EXCLUDED_TICKERS = {
-    # Стейблкоины и фиат
-    "USDCUSDT", "FDUSDUSDT", "TUSDUSDT", "BUSDUSDT", "EURUSDT", "DAIUSDT", "USTCUSDT", "PAXGUSDT", "XAUUSDT", "XAGUSDT",
+    # Стейблкоины, синтетический доллар, фиат и золото
+    "USDCUSDT", "FDUSDUSDT", "TUSDUSDT", "BUSDUSDT", "EURUSDT", "EURIUSDT", "AEURUSDT",
+    "DAIUSDT", "USTCUSDT", "USD1USDT", "USDEUSDT", "RLUSDUSDT", "RWUSDUSDT", "UUSDT",
+    "BFUSDUSDT", "PAXGUSDT", "XAUUSDT", "XAUTUSDT", "XAGUSDT",
     # Традиционные акции и ETF
     "GOOGLUSDT", "MSTRUSDT", "QQQUSDT", "MUUSDT", "SOXSUSDT", "SPYUSDT", "NVDAUSDT",
     "TSLAUSDT", "AAPLUSDT", "AMZNUSDT", "MSFTUSDT", "COINBUSDT", "SOXLUSDT", "INTCUSDT", "SNDKUSDT",
     "SKHYNIXUSDT", "SKHYUSDT", "KORUUSDT", "SPCXUSDT", "AKEUSDT", "CRCLUSDT",
-    # Хакнутые/проблемные токены
-    "INITUSDT", "CRVUSDT", "MEGAUSDT", "AVAUSDT", "SOLVUSDT", "BIRBUSDT"
+    # Хакнутые/делистнутые/проблемные токены
+    "INITUSDT", "CRVUSDT", "MEGAUSDT", "AVAUSDT", "SOLVUSDT", "BIRBUSDT",
+    "COCOSUSDT", "RNDRUSDT", "GALUSDT", "POLYUSDT"
 }
-MAX_SPREAD_PCT = float(os.getenv("MAX_SPREAD_PCT", "0.0015"))  # 0.15% max spread
+MAX_SPREAD_PCT = float(os.getenv("MAX_SPREAD_PCT", "0.0022"))  # 0.22% max spread (учитывает тик-шаг на Spot/Vision зеркале)
 SCAN_INTERVAL_SECONDS = int(os.getenv("SCAN_INTERVAL_SECONDS", "12"))
 PAIR_COOLDOWN_MINUTES = int(os.getenv("PAIR_COOLDOWN_MINUTES", "5"))
 

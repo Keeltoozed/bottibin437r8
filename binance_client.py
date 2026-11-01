@@ -24,9 +24,15 @@ class BinanceClient:
         self._book_tickers_cache: Dict[str, Tuple[float, float]] = {}
         self._book_tickers_cache_time: float = 0.0
 
+    @property
+    def active_mirror_name(self) -> str:
+        if 0 <= self.active_mirror_idx < len(self.mirrors):
+            return self.mirrors[self.active_mirror_idx]["name"]
+        return "unknown"
+
     async def get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
-            timeout = aiohttp.ClientTimeout(total=6)
+            timeout = aiohttp.ClientTimeout(total=10)
             headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
             self._session = aiohttp.ClientSession(timeout=timeout, headers=headers)
         return self._session
@@ -75,20 +81,35 @@ class BinanceClient:
     async def fetch_top_tickers(self, min_vol_usdt: float = config.MIN_24H_VOLUME_USDT, limit: int = config.SCAN_TICKERS_LIMIT) -> List[Dict[str, Any]]:
         """
         Формирует профессиональный радар Охотника за Ракетами (Structural Rocket Radar):
-        1. Поджатие к суточному хаю (24h High Proximity): монеты в пределах 5% от хая дня (без перегрева >38%) — кандидаты на старт ракеты прямо сейчас!
-        2. Топ по ликвидности и элитный юниверс (Core Liquid & Meme Universe).
-        3. Поджатие к суточному лою (24h Low Proximity): кандидаты на каскадный пробой в SHORT.
+        1. Автоматически адаптирует порог объема при работе через Spot-зеркало (data-api.binance.vision на US сервере Render),
+           так как спотовый оборот USDT в 8-10 раз ниже фьючерсного (fapi), сохраняя полный охват 110-120 живых крипто-пар!
+        2. Отсекает делистнутые/замороженные пары (closeTime > 5 мин), стейблкоины ($0.97..$1.03 с узким диапазоном) и токенизированные акции (*BUSDT).
+        3. Приоритезирует монеты у суточных экстремумов (24h High/Low Proximity) и лидеров ликвидности.
         """
         data = await self._request_with_fallback("ticker24")
         if not data or not isinstance(data, list):
             return []
 
+        # Адаптация порога ликвидности под активное зеркало:
+        # На fapi (Perpetual Futures) $8M отбирает ~120 пар; на vision/spot $650K Spot USDT эквивалентны ~$8M Futures!
+        is_spot_mirror = (self.active_mirror_name != "fapi")
+        if is_spot_mirror and min_vol_usdt >= 2_000_000.0:
+            spot_floor = float(getattr(config, "SPOT_MIRROR_MIN_VOL_USDT", 650_000.0))
+            effective_min_vol = max(spot_floor, min_vol_usdt * 0.08)
+        else:
+            effective_min_vol = min_vol_usdt
+
         excluded = getattr(config, "EXCLUDED_TICKERS", set())
+        stock_roots = getattr(config, "STOCK_TICKER_ROOTS", set())
         strict = getattr(config, "STRICT_WHITELIST_ONLY", False)
         whitelist = set(getattr(config, "TOP_CRYPTO_UNIVERSE", []))
         max_24h_cap = float(getattr(config, "MAX_24H_CHANGE_CAP", 38.0))
         lev_tokens = ("UPUSDT", "DOWNUSDT", "BEARUSDT", "BULLUSDT")
+        fiat_commodities = {"XAU", "XAUT", "PAXG", "XAG", "EUR", "EURI", "AEUR", "GBP", "AUD", "BRL", "TRY", "JPY"}
+        real_crypto_b = {"BNB", "ARB", "SHIB", "1000SHIB", "TRB", "BB", "CKB", "YB", "PHB", "AMB"}
+        now_ms = int(time.time() * 1000)
 
+        fresh_books: Dict[str, Tuple[float, float]] = {}
         valid_tickers = []
         for item in data:
             if not isinstance(item, dict):
@@ -100,12 +121,24 @@ class BinanceClient:
                 continue
             if not all(ord(c) < 128 and (c.isalnum() or c == '_') for c in sym):
                 continue
+
+            base = sym[:-4]
+            if base in fiat_commodities:
+                continue
+            # Все токенизированные акции на Binance имеют суффикс <TICKER>B + USDT (NVDABUSDT, TQQQBUSDT, MSTRBUSDT и т.д.)
+            if base in stock_roots or (base.endswith("B") and base not in real_crypto_b):
+                continue
             if strict and sym not in whitelist:
                 continue
 
             try:
+                # Защита от делистнутых/архивных пар на data-api.binance.vision (closeTime старше 5 минут)
+                close_time_ms = int(item.get("closeTime", 0) or 0)
+                if close_time_ms > 0 and (now_ms - close_time_ms) > 300_000:
+                    continue
+
                 vol = float(item.get("quoteVolume", 0) or 0)
-                if vol < min_vol_usdt:
+                if vol < effective_min_vol:
                     continue
                 last_p = float(item.get("lastPrice", 0) or 0)
                 if last_p <= 0:
@@ -113,6 +146,16 @@ class BinanceClient:
                 pct = float(item.get("priceChangePercent", 0) or 0)
                 high_p = max(float(item.get("highPrice", 0) or 0), last_p)
                 low_p = min(float(item.get("lowPrice", 0) or last_p), last_p)
+
+                # Автоматический детектор привязанных к $1.00 стейблкоинов (USD1, RLUSD, RWUSD, USDE, U и др.)
+                if 0.97 <= last_p <= 1.03 and low_p > 0 and ((high_p - low_p) / low_p) < 0.012:
+                    continue
+
+                # Попутно кешируем свежие bid/ask из ticker24 (экономит 100+ запросов к стакану!)
+                bid_p = float(item.get("bidPrice", 0) or 0)
+                ask_p = float(item.get("askPrice", 0) or 0)
+                if bid_p > 0 and ask_p >= bid_p:
+                    fresh_books[sym] = (bid_p, ask_p)
 
                 dist_to_high = (high_p - last_p) / max(high_p, 1e-9)
                 dist_to_low = (last_p - low_p) / max(last_p, 1e-9)
@@ -129,6 +172,10 @@ class BinanceClient:
                 })
             except (ValueError, TypeError):
                 continue
+
+        if fresh_books:
+            self._book_tickers_cache.update(fresh_books)
+            self._book_tickers_cache_time = time.time()
 
         if not valid_tickers:
             return []
@@ -206,6 +253,10 @@ class BinanceClient:
                 continue
 
         if len(candles) < 30:
+            return None
+
+        # Защита от приостановленных/замороженных торгов (свеча старше 10 минут)
+        if (int(time.time() * 1000) - candles[-1]["time"]) > 600_000:
             return None
 
         # СТРОГАЯ СВЕЧНАЯ ДИСЦИПЛИНА:
@@ -301,6 +352,9 @@ class BinanceClient:
         fast_high_12 = max(c["high"] for c in fast_slice)
         fast_low_12 = min(c["low"] for c in fast_slice)
 
+        dist_to_breakout_long_pct = round(max(0.0, (donchian_high - closed_signal_c["close"]) / max(closed_signal_c["close"], 1e-9) * 100.0), 2)
+        dist_to_breakout_short_pct = round(max(0.0, (closed_signal_c["close"] - donchian_low) / max(closed_signal_c["close"], 1e-9) * 100.0), 2)
+
         is_breakout_long = (
             (closed_signal_c["close"] > donchian_high) or
             (surge_ratio >= fast_surge and closed_signal_c["close"] > fast_high_12 and ema9 >= ema21)
@@ -340,6 +394,8 @@ class BinanceClient:
             "signal_open": closed_signal_c["open"],
             "recent_high": donchian_high,
             "recent_low": donchian_low,
+            "dist_to_breakout_long_pct": dist_to_breakout_long_pct,
+            "dist_to_breakout_short_pct": dist_to_breakout_short_pct,
             "is_breakout_long": is_breakout_long,
             "is_breakout_short": is_breakout_short,
             "close_strength_long": close_strength_long,
