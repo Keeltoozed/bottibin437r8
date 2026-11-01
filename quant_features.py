@@ -279,4 +279,3 @@ def extract_features_from_dict_fallback(context: Dict[str, Any], side: str = "LO
             "hour_cos": [h_cos]
         }
         return pd.DataFrame(data)[FEATURE_COLS_LONG]
-

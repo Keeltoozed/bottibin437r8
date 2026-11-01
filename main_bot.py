@@ -45,9 +45,13 @@ async def start_autonomous_bot():
     print("=" * 70, flush=True)
     print("🚀 BINANCE AUTONOMOUS GROQ TRADER (JEV ENGINE)", flush=True)
     print(f"💰 Стартовый банкролл: ${portfolio.cash:.2f} USDT", flush=True)
-    print(f"🎯 Размер сделки: ${config.TRADE_AMOUNT_USDT:.2f} USDT | Плечо: {config.LEVERAGE}x", flush=True)
-    print(f"🤖 Groq Модель: {config.GROQ_PRIMARY_MODEL}", flush=True)
-    print(f"🧪 Режим: {'PAPER TRADING (Симуляция на реальных котировках)' if config.PAPER_TRADING else 'LIVE TRADING'}", flush=True)
+    trade_amount = getattr(config, "TRADE_AMOUNT_USDT", 5.0)
+    leverage_val = getattr(config, "LEVERAGE", 30)
+    groq_model = getattr(config, "GROQ_PRIMARY_MODEL", "allam-2-7b")
+    paper_mode = getattr(config, "PAPER_TRADING", True)
+    print(f"🎯 Размер сделки: ${trade_amount:.2f} USDT | Плечо: {leverage_val}x", flush=True)
+    print(f"🤖 Groq Модель: {groq_model}", flush=True)
+    print(f"🧪 Режим: {'PAPER TRADING (Симуляция на реальных котировках)' if paper_mode else 'LIVE TRADING'}", flush=True)
     print("=" * 70, flush=True)
 
     try:

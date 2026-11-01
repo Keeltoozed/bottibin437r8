@@ -59,6 +59,7 @@ ENABLE_SHORT = os.getenv("ENABLE_SHORT", "true").lower() == "true"  # Торго
 # 1. Режет биржевые комиссии Binance в 2 раза по сравнению с 60x!
 # 2. Позволяет стоп-лоссу дышать на 1.0%..1.2% под фитилем без риска мгновенной ликвидации
 LEVERAGE = int(os.getenv("LEVERAGE", "30"))
+TRADE_AMOUNT_USDT = float(os.getenv("TRADE_AMOUNT_USDT", "5.0"))
 MAX_CONCURRENT_POSITIONS = int(os.getenv("MAX_POSITIONS", "2"))
 
 # ==============================================================================
