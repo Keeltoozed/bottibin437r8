@@ -21,7 +21,7 @@ class GroqEngine:
     def __init__(self):
         self.api_key = config.GROQ_API_KEY
         self.url = "https://api.groq.com/openai/v1/chat/completions"
-        self.models = ["allam-2-7b", "openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"]
+        self.models = ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"]
         self._last_call_ts = 0.0
         self._lock = asyncio.Lock()
         self._model_cooldowns: Dict[str, float] = {}  # {model_name: cooldown_until_ts}
@@ -60,7 +60,7 @@ class GroqEngine:
         cache_key = f"{symbol}_{cand_side}"
         if cache_key in self._eval_cache:
             ts, cached_res = self._eval_cache[cache_key]
-            if now - ts < 600:  # 10 минут кеширования для экономии токенов и фокуса
+            if now - ts < 60:  # 60 секунд кеширования (1 цикл сканирования, чтобы не пропускать свежие сетапы)
                 expected_dec = "BUY" if cand_side == "LONG" else "SHORT"
                 is_app = cached_res.get("decision") == expected_dec and cached_res.get("confidence", 0) >= config.GROQ_MIN_CONFIDENCE
                 return is_app, cached_res
@@ -109,20 +109,20 @@ class GroqEngine:
             pullback_pct = context.get('pullback_from_high_pct', 0) * 100.0
             sl_price = context.get('wick_stop_loss', cur_p * 0.99)
             sl_dist = context.get('sl_pct_distance', 0.008) * 100.0
-            prompt = f"""Evaluate LONG setup for {symbol} on Binance Futures ({lev}x leverage).
+            prompt = f"""Evaluate LONG Breakout & Retest setup for {symbol} on Binance Futures ({lev}x leverage).
 Metrics: Price ${cur_p}, 5m Vol: {vol_surge}x, 5m: {p5m:+.2f}%, 15m: {p15m:+.2f}%, Pullback: {pullback_pct:+.2f}%, RSI14: {rsi_val}, Trend: {trend_val}, Wick U/L: {u_wick:.1f}%/{l_wick:.1f}%, ATR: {atr_pct:.2f}%, BTC: {btc_reg}, SL: ${sl_price} ({sl_dist:.2f}% dist).
 Quant & Memory: {ml_prob_str} | {token_mem}
-Rules: Default is SKIP. Approve (BUY) ONLY if volume conviction is real and no trap (upper wick <= 30%, RSI <= 70, trend Bullish).
+Rules: Approve (BUY) if volume conviction is real (surge >= 1.25x), candle shows solid momentum without exhaustion (upper wick <= 38%), and not overbought (RSI <= 75). Reject (SKIP) only if massive exhaustion wick > 40% or obvious bear divergence.
 Output JSON:
 {{"trap_risk": bool, "decision": "BUY"|"SKIP", "confidence": float, "entry_price": float, "stop_loss": float, "tp1": float, "tp2": float, "reason": "1-2 sentences with trade thesis"}}"""
         else:
             bounce_pct = context.get('bounce_from_low_pct', 0) * 100.0
-            sl_price = context.get('short_wick_sl', cur_p * 1.01)
-            sl_dist = context.get('short_sl_dist', 0.008) * 100.0
-            prompt = f"""Evaluate SHORT setup for {symbol} on Binance Futures ({lev}x leverage).
+            sl_price = context.get('short_wick_stop_loss', cur_p * 1.01)
+            sl_dist = context.get('short_sl_pct_distance', 0.008) * 100.0
+            prompt = f"""Evaluate SHORT Breakdown setup for {symbol} on Binance Futures ({lev}x leverage).
 Metrics: Price ${cur_p}, 5m Vol: {vol_surge}x, 5m: {p5m:+.2f}%, 15m: {p15m:+.2f}%, Bounce: +{bounce_pct:.2f}%, RSI14: {rsi_val}, Trend: {trend_val}, Wick U/L: {u_wick:.1f}%/{l_wick:.1f}%, ATR: {atr_pct:.2f}%, BTC: {btc_reg}, SL: ${sl_price} ({sl_dist:.2f}% dist).
 Quant & Memory: {ml_prob_str} | {token_mem}
-Rules: Default is SKIP. Approve (SHORT) ONLY if breakdown volume is real and no trap (lower wick <= 30%, RSI >= 30, trend Bearish).
+Rules: Approve (SHORT) if breakdown volume is real (surge >= 1.25x), candle shows breakdown conviction without buyers stepping in (lower wick <= 38%), and not oversold (RSI >= 25). Reject (SKIP) only if massive lower rejection wick > 40%.
 Output JSON:
 {{"trap_risk": bool, "decision": "SHORT"|"SKIP", "confidence": float, "entry_price": float, "stop_loss": float, "tp1": float, "tp2": float, "reason": "1-2 sentences with trade thesis"}}"""
 
@@ -226,42 +226,36 @@ Output JSON:
             wick_sl = context.get("wick_stop_loss", price * 0.988)
 
             # 1. ЖЕСТКИЕ ПРАВИЛА ОТСЕВА МУСОРА (INSTANT REJECTION)
-            if pullback > -config.MIN_PULLBACK_PCT and lower_wick < 0.20:
-                return {
-                    "decision": "SKIP", "confidence": 0.20, "entry_price": price, "stop_loss": wick_sl,
-                    "tp1": round(price * (1.0 + config.TP1_PCT), 6), "tp2": round(price * (1.0 + config.TP2_PCT), 6),
-                    "reason": f"Отказ (FOMO): покупка на хае свечи без выкупа снизу (откат {pullback*100:+.2f}%). Нужен фитиль защиты уровня."
-                }
             if sl_pct > config.MAX_ALLOWED_SL_PCT:
                 return {
                     "decision": "SKIP", "confidence": 0.20, "entry_price": price, "stop_loss": wick_sl,
                     "tp1": round(price * (1.0 + config.TP1_PCT), 6), "tp2": round(price * (1.0 + config.TP2_PCT), 6),
-                    "reason": f"Отказ: стоп {sl_pct*100:.2f}% шире лимита {config.MAX_ALLOWED_SL_PCT*100:.1f}% для 60x (риск ликвидации)."
+                    "reason": f"Отказ: стоп {sl_pct*100:.2f}% шире лимита {config.MAX_ALLOWED_SL_PCT*100:.1f}% (слишком большой риск)."
                 }
             if rsi > config.MAX_RSI_LONG:
                 return {
                     "decision": "SKIP", "confidence": 0.20, "entry_price": price, "stop_loss": wick_sl,
                     "tp1": round(price * (1.0 + config.TP1_PCT), 6), "tp2": round(price * (1.0 + config.TP2_PCT), 6),
-                    "reason": f"Отказ: RSI {rsi:.1f} > {config.MAX_RSI_LONG} (экстремальная перекупленность, риск резкого дампа)."
+                    "reason": f"Отказ: RSI {rsi:.1f} > {config.MAX_RSI_LONG} (экстремальная перекупленность)."
                 }
-            if upper_wick >= 0.35:
+            if upper_wick >= config.WICK_EXHAUSTION_MAX:
                 return {
                     "decision": "SKIP", "confidence": 0.20, "entry_price": price, "stop_loss": wick_sl,
                     "tp1": round(price * (1.0 + config.TP1_PCT), 6), "tp2": round(price * (1.0 + config.TP2_PCT), 6),
-                    "reason": f"Отказ: массивный верхний фитиль {upper_wick*100:.0f}% (сильное давление продавцов на вершине)."
+                    "reason": f"Отказ: верхний фитиль истощения {upper_wick*100:.0f}% > {config.WICK_EXHAUSTION_MAX*100:.0f}% (давление продавцов)."
                 }
-            if trend == "BEARISH":
+            if trend == "BEARISH" and rsi < 40.0:
                 return {
                     "decision": "SKIP", "confidence": 0.20, "entry_price": price, "stop_loss": wick_sl,
                     "tp1": round(price * (1.0 + config.TP1_PCT), 6), "tp2": round(price * (1.0 + config.TP2_PCT), 6),
-                    "reason": "Отказ: попытка лонга против нисходящего тренда (Price < EMA9 < EMA21)."
+                    "reason": "Отказ: попытка лонга в сильном нисходящем тренде (Price < EMA9 < EMA21)."
                 }
 
             # 2. ПОДТВЕРЖДЕНИЕ КАЧЕСТВЕННОГО А+ ВХОДА
-            score = 0.70
-            if surge >= 2.0:
-                score += 0.12
-            if lower_wick >= 0.25:
+            score = 0.72
+            if surge >= 1.50:
+                score += 0.10
+            if lower_wick >= 0.15:
                 score += 0.08
             if trend == "BULLISH":
                 score += 0.08
@@ -276,7 +270,7 @@ Output JSON:
                 "stop_loss": wick_sl,
                 "tp1": round(price * (1.0 + config.TP1_PCT), 6),
                 "tp2": round(price * (1.0 + config.TP2_PCT), 6),
-                "reason": f"Институциональный LONG (A+): откат {pullback*100:+.1f}% к поддержке | RSI {rsi:.1f} (здоровый запас хода) | Выкуп фитиля {lower_wick*100:.0f}% | Стоп {sl_pct*100:.2f}%"
+                "reason": f"Подтвержденный Breakout & Retest LONG (A+): объем {surge:.2f}x | RSI {rsi:.1f} | Стоп {sl_pct*100:.2f}%"
             }
 
         else:  # SHORT
@@ -285,17 +279,11 @@ Output JSON:
             short_sl = context.get("short_wick_sl", price * 1.012)
 
             # 1. ЖЕСТКИЕ ПРАВИЛА ОТСЕВА МУСОРА (INSTANT REJECTION)
-            if bounce < config.MIN_PULLBACK_PCT and upper_wick < 0.20:
-                return {
-                    "decision": "SKIP", "confidence": 0.20, "entry_price": price, "stop_loss": short_sl,
-                    "tp1": round(price * (1.0 - config.TP1_PCT), 6), "tp2": round(price * (1.0 - config.TP2_PCT), 6),
-                    "reason": f"Отказ (Bottom Short): цена на самом дне дампа без верхнего фитиля (отскок +{bounce*100:.2f}%). Нужен тест сопротивления."
-                }
             if short_sl_pct > config.MAX_ALLOWED_SL_PCT:
                 return {
                     "decision": "SKIP", "confidence": 0.20, "entry_price": price, "stop_loss": short_sl,
                     "tp1": round(price * (1.0 - config.TP1_PCT), 6), "tp2": round(price * (1.0 - config.TP2_PCT), 6),
-                    "reason": f"Отказ: стоп {short_sl_pct*100:.2f}% шире лимита {config.MAX_ALLOWED_SL_PCT*100:.1f}% для 60x (риск ликвидации)."
+                    "reason": f"Отказ: стоп {short_sl_pct*100:.2f}% шире лимита {config.MAX_ALLOWED_SL_PCT*100:.1f}% (слишком большой риск)."
                 }
             if rsi < config.MIN_RSI_SHORT:
                 return {
@@ -303,13 +291,13 @@ Output JSON:
                     "tp1": round(price * (1.0 - config.TP1_PCT), 6), "tp2": round(price * (1.0 - config.TP2_PCT), 6),
                     "reason": f"Отказ: RSI {rsi:.1f} < {config.MIN_RSI_SHORT} (экстремальная перепроданность, высокий риск резкого отскока)."
                 }
-            if lower_wick >= 0.35:
+            if lower_wick >= config.WICK_EXHAUSTION_MAX:
                 return {
                     "decision": "SKIP", "confidence": 0.20, "entry_price": price, "stop_loss": short_sl,
                     "tp1": round(price * (1.0 - config.TP1_PCT), 6), "tp2": round(price * (1.0 - config.TP2_PCT), 6),
                     "reason": f"Отказ: массивный нижний фитиль {lower_wick*100:.0f}% (покупатели активно поглощают пролив на дне)."
                 }
-            if trend == "BULLISH":
+            if trend == "BULLISH" and rsi > 60.0:
                 return {
                     "decision": "SKIP", "confidence": 0.20, "entry_price": price, "stop_loss": short_sl,
                     "tp1": round(price * (1.0 - config.TP1_PCT), 6), "tp2": round(price * (1.0 - config.TP2_PCT), 6),
@@ -317,10 +305,10 @@ Output JSON:
                 }
 
             # 2. ПОДТВЕРЖДЕНИЕ КАЧЕСТВЕННОГО А+ ВХОДА
-            score = 0.70
-            if surge >= 2.0:
-                score += 0.12
-            if upper_wick >= 0.25:
+            score = 0.72
+            if surge >= 1.50:
+                score += 0.10
+            if upper_wick >= 0.15:
                 score += 0.08
             if trend == "BEARISH":
                 score += 0.08
@@ -335,7 +323,7 @@ Output JSON:
                 "stop_loss": short_sl,
                 "tp1": round(price * (1.0 - config.TP1_PCT), 6),
                 "tp2": round(price * (1.0 - config.TP2_PCT), 6),
-                "reason": f"Институциональный SHORT (A+): отскок +{bounce*100:.1f}% в сопротивление | RSI {rsi:.1f} (запас падения) | Продавцы защищают хай {upper_wick*100:.0f}% | Стоп {short_sl_pct*100:.2f}%"
+                "reason": f"Подтвержденный Breakdown SHORT (A+): объем {surge:.2f}x | RSI {rsi:.1f} | Стоп {short_sl_pct*100:.2f}%"
             }
 
 # Глобальный инстанс

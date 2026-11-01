@@ -151,7 +151,7 @@ with st.sidebar:
     st.markdown("### 🎯 Параметры стратегии ($20)")
     
     # Выбор кредитного плеча
-    lev_options = [30, 25, 35, 50, 60, 75, 20, 10]
+    lev_options = [10, 15, 20, 25, 30, 50]
     cur_lev = getattr(portfolio, "current_leverage", config.LEVERAGE)
     cur_idx = lev_options.index(cur_lev) if cur_lev in lev_options else 0
     chosen_leverage = st.selectbox("⚡ Кредитное плечо (для новых сделок):", lev_options, index=cur_idx)
@@ -166,45 +166,48 @@ with st.sidebar:
     strategy_mode = st.radio(
         "Режим стратегии:",
         [
-            "🔥 Максимум Хай-Профит (50x, +149.1% ROI, WR 70.6%)",
-            "🛡️ Сбалансированный Титан (40x, +119.2% ROI, WR 70.6%)",
-            "🎯 Снайпер A+ (30x, +18.0% ROI, WR 75.0%)"
+            "🛡️ Консервативный Проп (10x, риск 1-2% на сделку)",
+            "⚡ Умеренный Скальпер (15x, риск 2-3% на сделку)",
+            "🔥 Агрессивный Разгон (30x, повышенный риск)"
         ],
         index=0
     )
-    if "Максимум" in strategy_mode:
-        config.LEVERAGE = 50
-        portfolio.current_leverage = 50
+    if "Консервативный" in strategy_mode:
+        config.LEVERAGE = 10
+        portfolio.current_leverage = 10
+        config.TRADE_AMOUNT_USDT = 4.0
         config.MIN_5M_VOLUME_SURGE_RATIO = 1.25
-        config.MIN_5M_PRICE_IMPULSE_PCT = 0.50
+        config.MIN_5M_PRICE_IMPULSE_PCT = 0.45
         config.WICK_REJECTION_MIN = 0.12
         config.WICK_EXHAUSTION_MAX = 0.38
         config.TP1_PCT = 0.012
         config.TP2_PCT = 0.024
         config.DAILY_LOSS_LIMIT = 3
-    elif "Сбалансированный" in strategy_mode:
-        config.LEVERAGE = 40
-        portfolio.current_leverage = 40
+    elif "Умеренный" in strategy_mode:
+        config.LEVERAGE = 15
+        portfolio.current_leverage = 15
+        config.TRADE_AMOUNT_USDT = 4.0
         config.MIN_5M_VOLUME_SURGE_RATIO = 1.30
         config.MIN_5M_PRICE_IMPULSE_PCT = 0.50
         config.WICK_REJECTION_MIN = 0.12
         config.WICK_EXHAUSTION_MAX = 0.38
         config.TP1_PCT = 0.012
         config.TP2_PCT = 0.024
-        config.DAILY_LOSS_LIMIT = 2
+        config.DAILY_LOSS_LIMIT = 3
     else:
         config.LEVERAGE = 30
         portfolio.current_leverage = 30
-        config.MIN_5M_VOLUME_SURGE_RATIO = 1.50
-        config.MIN_5M_PRICE_IMPULSE_PCT = 0.65
-        config.WICK_REJECTION_MIN = 0.25
-        config.WICK_EXHAUSTION_MAX = 0.30
+        config.TRADE_AMOUNT_USDT = 5.0
+        config.MIN_5M_VOLUME_SURGE_RATIO = 1.40
+        config.MIN_5M_PRICE_IMPULSE_PCT = 0.55
+        config.WICK_REJECTION_MIN = 0.15
+        config.WICK_EXHAUSTION_MAX = 0.35
         config.TP1_PCT = 0.015
         config.TP2_PCT = 0.030
         config.DAILY_LOSS_LIMIT = 2
 
     st.text(f"Плечо для новых входов: {portfolio.current_leverage}x 🚀")
-    st.text(f"Маржа на сделку: Фиксированная $5.00 (Fixed-5)")
+    st.text(f"Маржа на сделку: ${config.TRADE_AMOUNT_USDT:.2f} (Риск ~{round(config.TRADE_AMOUNT_USDT*portfolio.current_leverage*0.008, 2)}$)")
     st.text(f"Лимит убытков: Макс {config.DAILY_LOSS_LIMIT} в день ({portfolio.daily_losses_count}/{config.DAILY_LOSS_LIMIT})")
     st.text(f"Всплеск объема: от {config.MIN_5M_VOLUME_SURGE_RATIO:.2f}x | Ход: от {config.MIN_5M_PRICE_IMPULSE_PCT:.2f}%")
     st.text(f"Направления: 🟢 LONG + 🔻 SHORT")

@@ -7,9 +7,9 @@ load_dotenv()
 # 1. GROQ AI ENGINE CONFIG (JEV ENGINE)
 # ==============================================================================
 GROQ_API_KEY = (os.getenv("GROQ_API_KEY") or "").strip().strip('"').strip("'")
-GROQ_PRIMARY_MODEL = os.getenv("GROQ_MODEL", "allam-2-7b").strip()
-GROQ_FALLBACK_MODEL = os.getenv("GROQ_MODEL_FALLBACK", "openai/gpt-oss-120b").strip()
-GROQ_RPM_LIMIT = int(os.getenv("GROQ_RPM_LIMIT", "25"))  # Safe rate limit for free tier (max 30 RPM)
+GROQ_PRIMARY_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b").strip()
+GROQ_FALLBACK_MODEL = os.getenv("GROQ_MODEL_FALLBACK", "openai/gpt-oss-20b").strip()
+GROQ_RPM_LIMIT = int(os.getenv("GROQ_RPM_LIMIT", "25"))  # Безопасный лимит Groq Free Tier (до 30 RPM)
 GROQ_MIN_CONFIDENCE = float(os.getenv("GROQ_MIN_CONFIDENCE", "0.65"))  # 65% минимальная уверенность ИИ для подтверждения сделки
 
 # Институциональные фильтры входа (High-Conviction A+ Scanners)
@@ -39,32 +39,32 @@ BINANCE_TESTNET_FUTURES_URL = "https://testnet.binancefuture.com"
 PAPER_TRADING = os.getenv("PAPER_TRADING", "true").lower() == "true"
 INITIAL_BALANCE = float(os.getenv("INITIAL_BALANCE", "20.0"))
 
-# Фиксированная скальперская маржа $5.00 (как в бектесте fixed_5):
-# Равный вес и строгий контроль риска в каждой сделке (никаких $6 на лосях и $2 на профитах!)
-TRADE_AMOUNT_USDT = float(os.getenv("TRADE_AMOUNT_USDT", "5.0"))
+# Фиксированная скальперская маржа $4.00 (контроль риска 1-2% депозита):
+# При депозите $20 и плече 10x стоп 0.8% стоит всего -$0.32 (1.6% депозита вместо сливных 15-25% при 50x)
+TRADE_AMOUNT_USDT = float(os.getenv("TRADE_AMOUNT_USDT", "4.0"))
 MAX_CONCURRENT_POSITIONS = int(os.getenv("MAX_POSITIONS", "2"))  # Строго максимум 2 позиции одновременно
 
-# Институциональный предохранитель депозита (Circuit Breaker из бектеста):
+# Институциональный предохранитель депозита (Circuit Breaker):
 # Максимум 3 убытка в день (UTC). После 3 стопов бот останавливает торговлю до завтра!
 DAILY_LOSS_LIMIT = int(os.getenv("DAILY_LOSS_LIMIT", "3"))
 ENABLE_CIRCUIT_BREAKER = True
 MAX_CONSECUTIVE_LOSSES = 2
 CONSECUTIVE_LOSS_PAUSE_SECONDS = 3600
-MAX_DAILY_LOSS_USD = float(os.getenv("MAX_DAILY_LOSS_USD", "4.00"))
+MAX_DAILY_LOSS_USD = float(os.getenv("MAX_DAILY_LOSS_USD", "2.00"))
 
 TARGET_1_R = 2.0  # Цель 1: 2R
 TARGET_2_R = 3.5  # Цель 2: 3.5R
 ENABLE_SHORT = os.getenv("ENABLE_SHORT", "true").lower() == "true"  # Торговля в LONG и SHORT
 
-# ОПТИМАЛЬНОЕ ПЛЕЧО ДЛЯ СКАЛЬПИНГА КРИПТЫ: 50x (Хай-Профит максимум) или 40x (Сбалансированное)
-LEVERAGE = int(os.getenv("LEVERAGE", "50"))
+# АДЕКВАТНОЕ КРЕДИТНОЕ ПЛЕЧО ДЛЯ СКАЛЬПИНГА КРИПТЫ: 10x (1-2% риск на сделку)
+LEVERAGE = int(os.getenv("LEVERAGE", "10"))
 
-# Селективные скальперские фильтры входа (Режим Максимум Хай-Профит: +149.1% ROI, Винрейт 70.6%):
-MIN_5M_VOLUME_SURGE_RATIO = float(os.getenv("MIN_5M_VOLUME_SURGE_RATIO", "1.25"))  # Всплеск объема от 1.25x
-MIN_5M_PRICE_IMPULSE_PCT = float(os.getenv("MIN_5M_PRICE_IMPULSE_PCT", "0.50"))    # Чистый импульс свечи от 0.50%
+# Селективные скальперские фильтры входа (Breakout-Pullback на закрытых свечах):
+MIN_5M_VOLUME_SURGE_RATIO = float(os.getenv("MIN_5M_VOLUME_SURGE_RATIO", "1.25"))  # Всплеск объема закрытой свечи от 1.25x
+MIN_5M_PRICE_IMPULSE_PCT = float(os.getenv("MIN_5M_PRICE_IMPULSE_PCT", "0.45"))    # Чистый импульс закрытой свечи от 0.45%
 WICK_REJECTION_MIN = float(os.getenv("WICK_REJECTION_MIN", "0.12"))                # Защитный фитиль отбоя не менее 12% свечи
 WICK_EXHAUSTION_MAX = float(os.getenv("WICK_EXHAUSTION_MAX", "0.38"))              # Встречный фитиль истощения не более 38% свечи
-STOP_LOSS_MIN_PCT = float(os.getenv("STOP_LOSS_MIN_PCT", "0.003"))                  # 0.3% мин стоп
+STOP_LOSS_MIN_PCT = float(os.getenv("STOP_LOSS_MIN_PCT", "0.004"))                  # 0.4% мин стоп
 STOP_LOSS_MAX_PCT = float(os.getenv("STOP_LOSS_MAX_PCT", "0.012"))                  # 1.2% макс стоп
 
 # ==============================================================================
@@ -118,8 +118,6 @@ EXCLUDED_TICKERS = {
     # Хакнутые/проблемные токены
     "INITUSDT", "CRVUSDT", "MEGAUSDT", "AVAUSDT", "SOLVUSDT", "BIRBUSDT"
 }
-MIN_5M_VOLUME_SURGE_RATIO = float(os.getenv("MIN_5M_VOLUME_SURGE_RATIO", "1.50"))  # 1.50x реальный всплеск объёма
-MIN_5M_PRICE_IMPULSE_PCT = float(os.getenv("MIN_5M_PRICE_IMPULSE_PCT", "0.55"))  # 0.55% четкий импульс свечи (отсекает сонные боковики)
 MAX_SPREAD_PCT = float(os.getenv("MAX_SPREAD_PCT", "0.0015"))  # 0.15% max spread
 SCAN_INTERVAL_SECONDS = int(os.getenv("SCAN_INTERVAL_SECONDS", "10"))
 PAIR_COOLDOWN_MINUTES = int(os.getenv("PAIR_COOLDOWN_MINUTES", "5"))

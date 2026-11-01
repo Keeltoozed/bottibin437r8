@@ -92,8 +92,7 @@ class PortfolioTracker:
                 self.daily_loss_day = state.get("daily_loss_day", time.strftime('%Y-%m-%d', time.gmtime()))
                 self.pause_until = state.get("pause_until", 0.0)
                 self.is_paused = state.get("is_paused", False)
-                self.current_leverage = int(state.get("current_leverage", getattr(config, "LEVERAGE", 30)))
-                config.LEVERAGE = self.current_leverage
+                self.current_leverage = int(state.get("current_leverage", getattr(config, "LEVERAGE", 10)))
                 print(f"✅ Портфель загружен: баланс ${self.cash:.2f}, открытых позиций: {len(self.open_positions)}, плечо: {self.current_leverage}x", flush=True)
         except Exception as e:
             print(f"⚠️ Ошибка чтения portfolio.json: {e}", flush=True)

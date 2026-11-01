@@ -200,37 +200,45 @@ class BinanceClient:
             except (ValueError, IndexError):
                 continue
 
-        if len(candles) < 5:
+        if len(candles) < 15:
             return None
 
-        last_c = candles[-1]
-        prev_c = candles[-2]
-        prior_vols = [c["quote_vol"] for c in candles[-11:-2]]
+        # СТРОГАЯ ДИСЦИПЛИНА СВЕЧНОГО АНАЛИЗА:
+        # Анализируем ТОЛЬКО последнюю ПОЛНОСТЬЮ ЗАКРЫТУЮ свечу (candles[-2]),
+        # а формирующаяся свеча (candles[-1]) используется исключительно для текущей рыночной цены!
+        current_live_c = candles[-1]
+        closed_signal_c = candles[-2]
+        prev_closed_c = candles[-3]
+        current_price = current_live_c["close"]
+
+        # Средний объем предыдущих 10 закрытых свечей (без учета формирующейся свечи)
+        prior_vols = [c["quote_vol"] for c in candles[-12:-2]]
         avg_vol = (sum(prior_vols) / len(prior_vols)) if prior_vols else 1.0
 
-        # Учитываем всплеск объема как последней закрытой 5m свечи, так и текущей
-        surge_closed = prev_c["quote_vol"] / avg_vol if avg_vol > 0 else 1.0
-        surge_live = last_c["quote_vol"] / avg_vol if avg_vol > 0 else 1.0
-        surge_ratio = round(max(surge_closed, surge_live), 2)
+        # Всплеск объема строго по закрытой сигнальной свече
+        surge_ratio = round(closed_signal_c["quote_vol"] / avg_vol, 2) if avg_vol > 0 else 1.0
 
-        candle_range = max(last_c["high"] - last_c["low"], 1e-9)
-        body_top = max(last_c["open"], last_c["close"])
-        body_bottom = min(last_c["open"], last_c["close"])
+        candle_range = max(closed_signal_c["high"] - closed_signal_c["low"], 1e-9)
+        body_top = max(closed_signal_c["open"], closed_signal_c["close"])
+        body_bottom = min(closed_signal_c["open"], closed_signal_c["close"])
 
-        upper_wick_pct = round((last_c["high"] - body_top) / candle_range, 3)
-        lower_wick_pct = round((body_bottom - last_c["low"]) / candle_range, 3)
+        upper_wick_pct = round((closed_signal_c["high"] - body_top) / candle_range, 3)
+        lower_wick_pct = round((body_bottom - closed_signal_c["low"]) / candle_range, 3)
 
-        recent_high = max(c["high"] for c in candles[-5:])
-        pullback_from_high_pct = round((last_c["close"] - recent_high) / recent_high, 4)
+        # Откат текущей цены от хая сигнальной свечи (для LONG: вход на ретесте)
+        pullback_from_high_pct = round((current_price - closed_signal_c["high"]) / closed_signal_c["high"], 4)
+        # Отскок текущей цены от лоя сигнальной свечи (для SHORT: вход на микро-отскоке)
+        bounce_from_low_pct = round((current_price - closed_signal_c["low"]) / max(closed_signal_c["low"], 1e-9), 4)
 
-        recent_low = min(c["low"] for c in candles[-5:])
-        bounce_from_low_pct = round((last_c["close"] - recent_low) / max(recent_low, 1e-9), 4)
+        # Расчет истинного импульса закрытой свечи:
+        pct_5m = round((closed_signal_c["close"] - prev_closed_c["close"]) / prev_closed_c["close"] * 100, 2)
+        pct_15m = round((closed_signal_c["close"] - candles[-5]["close"]) / candles[-5]["close"] * 100, 2) if len(candles) >= 5 else pct_5m
 
         # ======================================================================
         # РАСЧЕТ ATR-14 (Average True Range) ДЛЯ ФИЛЬТРАЦИИ СЛУЧАЙНОГО ШУМА
         # ======================================================================
         true_ranges = []
-        for i in range(1, len(candles)):
+        for i in range(1, len(candles) - 1): # только закрытые свечи
             c_curr = candles[i]
             c_prev = candles[i-1]
             tr = max(
@@ -241,31 +249,26 @@ class BinanceClient:
             true_ranges.append(tr)
 
         atr14 = (sum(true_ranges[-14:]) / min(len(true_ranges), 14)) if true_ranges else candle_range
-        atr14_pct = round(atr14 / last_c["close"], 4)
+        atr14_pct = round(atr14 / current_price, 4)
 
-        # Скальп-стоп за фитилем: локальный экстремум последних 2 свечей (текущая + предыдущая)
-        recent_wick_low = min(c["low"] for c in candles[-2:])
+        # Скальп-стоп за фитилем: локальный экстремум последних 2 ЗАКРЫТЫХ свечей
+        recent_wick_low = min(prev_closed_c["low"], closed_signal_c["low"])
         raw_wick_sl = round(recent_wick_low * (1.0 - config.WICK_BUFFER_PCT), 6)
-        raw_sl_pct = (last_c["close"] - raw_wick_sl) / last_c["close"]
+        raw_sl_pct = (current_price - raw_wick_sl) / current_price
 
-        # Расчет параметров для SHORT (стоп над верхним фитилем)
-        recent_wick_high = max(c["high"] for c in candles[-2:])
+        # Расчет параметров для SHORT (стоп над верхним фитилем закрытых свечей)
+        recent_wick_high = max(prev_closed_c["high"], closed_signal_c["high"])
         raw_short_sl = round(recent_wick_high * (1.0 + config.WICK_BUFFER_PCT), 6)
-        raw_short_sl_pct = (raw_short_sl - last_c["close"]) / last_c["close"]
+        raw_short_sl_pct = (raw_short_sl - current_price) / current_price
 
-        # Институциональный скальперский стоп-лосс (диапазон 0.45%..1.00% под 30x плечо):
-        # 1. Защищает от шума стакана (минимум 0.45%)
-        # 2. Не позволяет стопу превышать 1.00% (риск не более 30% маржи при 30x)
-        safe_long_sl_pct = round(min(max(raw_sl_pct, atr14_pct, 0.0045), 0.0100), 4)
-        wick_stop_loss = round(last_c["close"] * (1.0 - safe_long_sl_pct), 6)
+        # Институциональный скальперский стоп-лосс (диапазон 0.40%..1.20%):
+        safe_long_sl_pct = round(min(max(raw_sl_pct, atr14_pct, 0.0040), 0.0120), 4)
+        wick_stop_loss = round(current_price * (1.0 - safe_long_sl_pct), 6)
         sl_pct_distance = safe_long_sl_pct
 
-        safe_short_sl_pct = round(min(max(raw_short_sl_pct, atr14_pct, 0.0045), 0.0100), 4)
-        short_wick_stop_loss = round(last_c["close"] * (1.0 + safe_short_sl_pct), 6)
+        safe_short_sl_pct = round(min(max(raw_short_sl_pct, atr14_pct, 0.0040), 0.0120), 4)
+        short_wick_stop_loss = round(current_price * (1.0 + safe_short_sl_pct), 6)
         short_sl_pct_distance = safe_short_sl_pct
-
-        pct_5m = round((candles[-1]["close"] - candles[-2]["close"]) / candles[-2]["close"] * 100, 2)
-        pct_15m = round((candles[-1]["close"] - candles[-4]["close"]) / candles[-4]["close"] * 100, 2) if len(candles) >= 4 else pct_5m
 
         # ======================================================================
         # ИНСТИТУЦИОНАЛЬНЫЕ ИНДИКАТОРЫ: RSI-14 & EMA 9/21 TREND ALIGNMENT
@@ -302,17 +305,20 @@ class BinanceClient:
             rs = avg_gain / avg_loss
             rsi = round(100.0 - (100.0 / (1.0 + rs)), 1)
 
+        recent_high = max(c["high"] for c in candles[-6:])
+        recent_low = min(c["low"] for c in candles[-6:])
+
         # Структура тренда
-        if last_c["close"] >= ema9 >= ema21:
+        if current_price >= ema9 >= ema21:
             trend = "BULLISH"
-        elif last_c["close"] <= ema9 <= ema21:
+        elif current_price <= ema9 <= ema21:
             trend = "BEARISH"
         else:
             trend = "CHOP"
 
         return {
             "symbol": symbol,
-            "current_price": last_c["close"],
+            "current_price": current_price,
             "recent_high": recent_high,
             "recent_low": recent_low,
             "pullback_from_high_pct": pullback_from_high_pct,
@@ -323,10 +329,12 @@ class BinanceClient:
             "wick_stop_loss": wick_stop_loss,
             "sl_pct_distance": sl_pct_distance,
             "short_wick_sl": short_wick_stop_loss,
+            "short_wick_stop_loss": short_wick_stop_loss,
             "short_sl_dist": short_sl_pct_distance,
+            "short_sl_pct_distance": short_sl_pct_distance,
             "pct_5m": pct_5m,
             "pct_15m": pct_15m,
-            "last_quote_volume": last_c["quote_vol"],
+            "last_quote_volume": closed_signal_c["quote_vol"],
             "rsi": rsi,
             "ema9": ema9,
             "ema21": ema21,
@@ -357,11 +365,11 @@ class BinanceClient:
         trend = analysis.get("trend", "CHOP")
         rsi = analysis.get("rsi", 50.0)
 
-        # Институциональный фильтр режима Bitcoin (Directional Market Lock):
-        # В крипте бета альткоинов к BTC составляет 1.5x - 3.0x.
-        # Если BTC в нисходящем тренде (ниже EMA9/EMA21) или сливается — ЛОНГИ ПО АЛЬТАМ КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНЫ.
-        is_dumping = (trend == "BEARISH" and p15 <= -0.05) or (p15 <= -0.25) or (p5 <= -0.20) or (rsi < 40.0 and p5 < -0.05)
-        is_pumping = (trend == "BULLISH" and p15 >= +0.05) or (p15 >= +0.25) or (p5 >= +0.20) or (rsi > 60.0 and p5 > +0.05)
+        # Фильтр режима Bitcoin (Directional Market Lock):
+        # Блокируем лонги ТОЛЬКО при реальном импульсном дампе BTC (от -0.40% за 15m или -0.30% за 5m)
+        is_dumping = (p15 <= -0.40) or (p5 <= -0.30) or (trend == "BEARISH" and rsi < 35.0 and p5 < -0.15)
+        # Блокируем шорты ТОЛЬКО при мощном импульсном выносе BTC (от +0.40% за 15m или +0.30% за 5m)
+        is_pumping = (p15 >= +0.40) or (p5 >= +0.30) or (trend == "BULLISH" and rsi > 65.0 and p5 > +0.15)
 
         if is_dumping:
             status_str = f"🔴 Медвежий BTC ({p15:+.2f}%, {trend}) — ЛОНГИ ЗАБЛОКИРОВАНЫ | Приоритет: SHORT"

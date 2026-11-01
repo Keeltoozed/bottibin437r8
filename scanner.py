@@ -157,8 +157,14 @@ class MarketScanner:
                 chosen["ml_reason"] = ml_res.get("reason", "")
                 chosen["ml_approved"] = ml_res.get("ml_approved", False)
                 chosen["btc_regime"] = btc_regime.get("status_str", "Neutral")
-                # Балл силы импульса как в бектесте: abs(pct_5m) * surge
-                chosen["score"] = round(abs(pct_5m) * surge, 3)
+
+                # Активный фильтр ML: если квантовая модель уверена в провале сетапа (< 40%), отсекаем токсичный вход
+                if ml_res.get("ml_active") and chosen["ml_prob"] < 0.40:
+                    return None
+
+                # Балл силы импульса с квантовым мультипликатором ML:
+                ml_mult = (0.5 + chosen["ml_prob"]) if ml_res.get("ml_active") else 1.0
+                chosen["score"] = round(abs(pct_5m) * surge * ml_mult, 3)
                 return chosen
 
         tasks = [check_ticker(t) for t in tickers]
@@ -190,8 +196,13 @@ class MarketScanner:
 
             approved, groq_eval = await groq_engine.evaluate_setup(ctx)
 
-            default_sl = ctx["wick_stop_loss"] if cand_side == "LONG" else ctx.get("short_wick_sl", ctx["current_price"] * 1.01)
-            default_tp1 = round(ctx["current_price"] * (1.0 + config.TP1_PCT if cand_side == "LONG" else 1.0 - config.TP1_PCT), 4)
+            # СТРОГИЙ МАТЕМАТИЧЕСКИЙ РАСЧЕТ SL И TP (ИИ не может ломать или искажать стопы!)
+            if cand_side == "LONG":
+                exact_sl = ctx.get("wick_stop_loss", round(ctx["current_price"] * 0.992, 6))
+            else:
+                exact_sl = ctx.get("short_wick_stop_loss", round(ctx["current_price"] * 1.008, 6))
+
+            default_tp1 = round(ctx["current_price"] * (1.0 + config.TP1_PCT if cand_side == "LONG" else 1.0 - config.TP1_PCT), 6)
 
             eval_entry = {
                 "symbol": sym,
@@ -201,8 +212,8 @@ class MarketScanner:
                 "confidence": groq_eval.get("confidence", 0.0),
                 "ml_prob": round(ctx.get("ml_prob", 0.5) * 100, 1),
                 "reason": groq_eval.get("reason", ""),
-                "sl": groq_eval.get("stop_loss") or default_sl,
-                "tp1": groq_eval.get("tp1") or default_tp1,
+                "sl": exact_sl,
+                "tp1": default_tp1,
                 "surge": ctx["volume_surge_ratio"],
                 "score": ctx.get("score", 1.0),
                 "pullback": round(ctx.get("pullback_from_high_pct", 0) * 100, 2) if cand_side == "LONG" else round(ctx.get("bounce_from_low_pct", 0) * 100, 2),
@@ -221,17 +232,17 @@ class MarketScanner:
                     break
 
                 entry_p = ctx["current_price"]
-                wick_sl = eval_entry["sl"]
+                wick_sl = exact_sl
 
                 min_tp1_dist = entry_p * config.TP1_PCT
                 min_tp2_dist = entry_p * config.TP2_PCT
 
                 if cand_side == "LONG":
-                    risk_per_coin = max(entry_p - wick_sl, entry_p * 0.003)
+                    risk_per_coin = max(entry_p - wick_sl, entry_p * 0.004)
                     tp1_2r = round(max(entry_p + (config.TARGET_1_R * risk_per_coin), entry_p + min_tp1_dist), 6)
                     tp2_3r = round(max(entry_p + (config.TARGET_2_R * risk_per_coin), entry_p + min_tp2_dist), 6)
                 else:  # SHORT
-                    risk_per_coin = max(wick_sl - entry_p, entry_p * 0.003)
+                    risk_per_coin = max(wick_sl - entry_p, entry_p * 0.004)
                     tp1_2r = round(min(entry_p - (config.TARGET_1_R * risk_per_coin), entry_p - min_tp1_dist), 6)
                     tp2_3r = round(min(entry_p - (config.TARGET_2_R * risk_per_coin), entry_p - min_tp2_dist), 6)
 

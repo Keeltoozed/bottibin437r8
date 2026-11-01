@@ -1,20 +1,20 @@
 {
   "cash": 20.0,
   "initial_balance": 20.0,
-  "current_leverage": 50,
+  "current_leverage": 10,
   "open_positions": {},
   "trade_history": [],
   "funnel_stats": {
-    "universe": 0,
+    "universe": 400,
     "gate_failed": 0,
     "cooldown_blocked": 0,
     "btc_blocked": 0,
-    "hard_gates": 0,
-    "groq_evaluated": 0,
-    "groq_skip": 0,
-    "low_conf": 0,
-    "passed": 0,
-    "filled": 0
+    "hard_gates": 5,
+    "groq_evaluated": 4,
+    "groq_skip": 1,
+    "low_conf": 1,
+    "passed": 2,
+    "filled": 2
   },
   "recent_evaluations": [],
   "shadow_trades": [],
@@ -24,5 +24,5 @@
   "daily_loss_day": "2026-11-01",
   "pause_until": 0.0,
   "is_paused": false,
-  "last_updated": 1793543762.8345752
+  "last_updated": 1793546501.901978
 }
