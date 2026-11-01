@@ -39,6 +39,8 @@ class PortfolioTracker:
         self.live_ml_ranking: List[Dict[str, Any]] = []
         self.symbol_lockouts: Dict[str, float] = {}
         self.consecutive_losses: int = 0
+        self.daily_losses_count: int = 0
+        self.daily_loss_day: str = time.strftime('%Y-%m-%d', time.gmtime())
         self.pause_until: float = 0.0
         self.is_paused = False
         self.current_leverage = getattr(config, "LEVERAGE", 30)
@@ -59,6 +61,8 @@ class PortfolioTracker:
             "shadow_trades": self.shadow_trades[-50:],
             "symbol_lockouts": self.symbol_lockouts,
             "consecutive_losses": self.consecutive_losses,
+            "daily_losses_count": self.daily_losses_count,
+            "daily_loss_day": self.daily_loss_day,
             "pause_until": self.pause_until,
             "is_paused": self.is_paused,
             "last_updated": time.time()
@@ -84,6 +88,8 @@ class PortfolioTracker:
                 self.shadow_trades = state.get("shadow_trades", [])
                 self.symbol_lockouts = state.get("symbol_lockouts", {})
                 self.consecutive_losses = state.get("consecutive_losses", 0)
+                self.daily_losses_count = state.get("daily_losses_count", 0)
+                self.daily_loss_day = state.get("daily_loss_day", time.strftime('%Y-%m-%d', time.gmtime()))
                 self.pause_until = state.get("pause_until", 0.0)
                 self.is_paused = state.get("is_paused", False)
                 self.current_leverage = int(state.get("current_leverage", getattr(config, "LEVERAGE", 30)))
@@ -91,6 +97,16 @@ class PortfolioTracker:
                 print(f"✅ Портфель загружен: баланс ${self.cash:.2f}, открытых позиций: {len(self.open_positions)}, плечо: {self.current_leverage}x", flush=True)
         except Exception as e:
             print(f"⚠️ Ошибка чтения portfolio.json: {e}", flush=True)
+
+    def is_daily_limit_reached(self) -> bool:
+        """Проверяет дневной лимит убытка (Circuit Breaker из бектеста)."""
+        today_utc = time.strftime('%Y-%m-%d', time.gmtime())
+        if self.daily_loss_day != today_utc:
+            self.daily_loss_day = today_utc
+            self.daily_losses_count = 0
+            self.save()
+        limit = getattr(config, "DAILY_LOSS_LIMIT", 2)
+        return self.daily_losses_count >= limit
 
     def add_evaluation(self, eval_data: Dict[str, Any]):
         """Добавляет свежую оценку Groq в ленту радара."""
@@ -274,8 +290,17 @@ class PortfolioTracker:
             # Если монета выбита по стопу или в минус — 45 минут карантина
             if realized_pnl < 0 or "Stop" in reason:
                 self.consecutive_losses += 1
+                today_utc = time.strftime('%Y-%m-%d', time.gmtime())
+                if self.daily_loss_day != today_utc:
+                    self.daily_loss_day = today_utc
+                    self.daily_losses_count = 0
+                self.daily_losses_count += 1
+
                 self.symbol_lockouts[symbol] = time.time() + (45 * 60)
-                print(f"🔒 [КАРАНТИН] {symbol} помещен в карантин на 45 минут после стоп-лосса.", flush=True)
+                print(f"🔒 [КАРАНТИН] {symbol} помещен в карантин на 45 минут после стоп-лосса. (Дневных убытков: {self.daily_losses_count}/{getattr(config, 'DAILY_LOSS_LIMIT', 2)})", flush=True)
+
+                if self.is_daily_limit_reached():
+                    print(f"🛑 [CIRCUIT BREAKER] Достигнут лимит {config.DAILY_LOSS_LIMIT} убытка за день! Защита капитала: новые сделки заблокированы до завтра.", flush=True)
 
                 max_streak = getattr(config, "MAX_CONSECUTIVE_LOSSES", 2)
                 if self.consecutive_losses >= max_streak:

@@ -226,11 +226,11 @@ Output JSON:
             wick_sl = context.get("wick_stop_loss", price * 0.988)
 
             # 1. ЖЕСТКИЕ ПРАВИЛА ОТСЕВА МУСОРА (INSTANT REJECTION)
-            if pullback > -config.MIN_PULLBACK_PCT:
+            if pullback > -config.MIN_PULLBACK_PCT and lower_wick < 0.20:
                 return {
                     "decision": "SKIP", "confidence": 0.20, "entry_price": price, "stop_loss": wick_sl,
                     "tp1": round(price * (1.0 + config.TP1_PCT), 6), "tp2": round(price * (1.0 + config.TP2_PCT), 6),
-                    "reason": f"Отказ (FOMO): покупка на хае свечи (откат {pullback*100:+.2f}% < 0.2%). Нужна коррекция к поддержке."
+                    "reason": f"Отказ (FOMO): покупка на хае свечи без выкупа снизу (откат {pullback*100:+.2f}%). Нужен фитиль защиты уровня."
                 }
             if sl_pct > config.MAX_ALLOWED_SL_PCT:
                 return {
@@ -285,11 +285,11 @@ Output JSON:
             short_sl = context.get("short_wick_sl", price * 1.012)
 
             # 1. ЖЕСТКИЕ ПРАВИЛА ОТСЕВА МУСОРА (INSTANT REJECTION)
-            if bounce < config.MIN_PULLBACK_PCT:
+            if bounce < config.MIN_PULLBACK_PCT and upper_wick < 0.20:
                 return {
                     "decision": "SKIP", "confidence": 0.20, "entry_price": price, "stop_loss": short_sl,
                     "tp1": round(price * (1.0 - config.TP1_PCT), 6), "tp2": round(price * (1.0 - config.TP2_PCT), 6),
-                    "reason": f"Отказ (Bottom Short): цена на самом дне дампа (отскок +{bounce*100:.2f}% < 0.2%). Нужен тест сопротивления."
+                    "reason": f"Отказ (Bottom Short): цена на самом дне дампа без верхнего фитиля (отскок +{bounce*100:.2f}%). Нужен тест сопротивления."
                 }
             if short_sl_pct > config.MAX_ALLOWED_SL_PCT:
                 return {

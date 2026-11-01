@@ -33,81 +33,78 @@ BINANCE_FUTURES_PUBLIC_URL = "https://fapi.binance.com"
 BINANCE_TESTNET_FUTURES_URL = "https://testnet.binancefuture.com"
 
 # ==============================================================================
-# 3. TRADING & RISK MANAGEMENT (DAY-TRADER-SKILL 2R/3R DISCIPLINE)
+# 3. TRADING & RISK MANAGEMENT (SELECTIVE A+ DAY-TRADER BACKTEST ENGINE)
 # ==============================================================================
 # Paper trading is enabled by default for safe real-market testing
 PAPER_TRADING = os.getenv("PAPER_TRADING", "true").lower() == "true"
 INITIAL_BALANCE = float(os.getenv("INITIAL_BALANCE", "20.0"))
 
-# Дисциплина Day-Trader-Skill: динамический сложный процент (Compounding)
-# При росте баланса размер риска и прибыль растут автоматически!
-ENABLE_COMPOUNDING = os.getenv("ENABLE_COMPOUNDING", "true").lower() == "true"
-COMPOUND_RISK_PCT = float(os.getenv("COMPOUND_RISK_PCT", "0.08"))  # 8% от депозита на сделку ($1.60 при $20)
-MAX_RISK_PER_TRADE_USD = float(os.getenv("MAX_RISK_PER_TRADE_USD", "1.00")) # минимум $1.00
+# Фиксированная скальперская маржа $5.00 (как в бектесте fixed_5):
+# Равный вес и строгий контроль риска в каждой сделке (никаких $6 на лосях и $2 на профитах!)
+TRADE_AMOUNT_USDT = float(os.getenv("TRADE_AMOUNT_USDT", "5.0"))
+MAX_CONCURRENT_POSITIONS = int(os.getenv("MAX_POSITIONS", "2"))  # Строго максимум 2 позиции одновременно
 
-# Институциональный предохранитель депозита (Circuit Breaker):
+# Институциональный предохранитель депозита (Circuit Breaker из бектеста):
+# Максимум 3 убытка в день (UTC). После 3 стопов бот останавливает торговлю до завтра!
+DAILY_LOSS_LIMIT = int(os.getenv("DAILY_LOSS_LIMIT", "3"))
 ENABLE_CIRCUIT_BREAKER = True
-MAX_CONSECUTIVE_LOSSES = 2  # Пауза после 2 стопов подряд для защиты от распила в боковике
-CONSECUTIVE_LOSS_PAUSE_SECONDS = 3600  # 60 минут паузы
-MAX_DAILY_LOSS_USD = float(os.getenv("MAX_DAILY_LOSS_USD", "4.00"))  # Макс $4 дневного убытка (20% от $20)
+MAX_CONSECUTIVE_LOSSES = 2
+CONSECUTIVE_LOSS_PAUSE_SECONDS = 3600
+MAX_DAILY_LOSS_USD = float(os.getenv("MAX_DAILY_LOSS_USD", "4.00"))
 
 TARGET_1_R = 2.0  # Цель 1: 2R
 TARGET_2_R = 3.5  # Цель 2: 3.5R
 ENABLE_SHORT = os.getenv("ENABLE_SHORT", "true").lower() == "true"  # Торговля в LONG и SHORT
 
-# ОПТИМАЛЬНОЕ ПЛЕЧО ДЛЯ СКАЛЬПИНГА КРИПТЫ: 30x
-# 1. Режет биржевые комиссии Binance в 2 раза по сравнению с 60x!
-# 2. Позволяет стоп-лоссу дышать на 1.0%..1.2% под фитилем без риска мгновенной ликвидации
-LEVERAGE = int(os.getenv("LEVERAGE", "30"))
-TRADE_AMOUNT_USDT = float(os.getenv("TRADE_AMOUNT_USDT", "5.0"))
-MAX_CONCURRENT_POSITIONS = int(os.getenv("MAX_POSITIONS", "2"))
+# ОПТИМАЛЬНОЕ ПЛЕЧО ДЛЯ СКАЛЬПИНГА КРИПТЫ: 50x (Хай-Профит максимум) или 40x (Сбалансированное)
+LEVERAGE = int(os.getenv("LEVERAGE", "50"))
+
+# Селективные скальперские фильтры входа (Режим Максимум Хай-Профит: +149.1% ROI, Винрейт 70.6%):
+MIN_5M_VOLUME_SURGE_RATIO = float(os.getenv("MIN_5M_VOLUME_SURGE_RATIO", "1.25"))  # Всплеск объема от 1.25x
+MIN_5M_PRICE_IMPULSE_PCT = float(os.getenv("MIN_5M_PRICE_IMPULSE_PCT", "0.50"))    # Чистый импульс свечи от 0.50%
+WICK_REJECTION_MIN = float(os.getenv("WICK_REJECTION_MIN", "0.12"))                # Защитный фитиль отбоя не менее 12% свечи
+WICK_EXHAUSTION_MAX = float(os.getenv("WICK_EXHAUSTION_MAX", "0.38"))              # Встречный фитиль истощения не более 38% свечи
+STOP_LOSS_MIN_PCT = float(os.getenv("STOP_LOSS_MIN_PCT", "0.003"))                  # 0.3% мин стоп
+STOP_LOSS_MAX_PCT = float(os.getenv("STOP_LOSS_MAX_PCT", "0.012"))                  # 1.2% макс стоп
 
 # ==============================================================================
 # 4. EXIT STRATEGY & "THE LINE" (INSTITUTIONAL DAY-TRADING DISCIPLINE)
 # ==============================================================================
-MIN_PULLBACK_PCT = float(os.getenv("MIN_PULLBACK_PCT", "0.0010"))
+MIN_PULLBACK_PCT = float(os.getenv("MIN_PULLBACK_PCT", "0.0005"))
 WICK_BUFFER_PCT = float(os.getenv("WICK_BUFFER_PCT", "0.0010"))
-MAX_ALLOWED_SL_PCT = float(os.getenv("MAX_ALLOWED_SL_PCT", "0.0125"))  # Макс. 1.25% SL (безопасно для 30x)
+MAX_ALLOWED_SL_PCT = STOP_LOSS_MAX_PCT
 
-# Multi-tier Take Profit (с плечом 30x):
-# +1.5% ход цены = +45.0% ROI (TP1: фиксация 50% + мгновенный безубыток с плюсом)
-# +3.0% ход цены = +90.0% ROI (TP2: фиксация 25%)
-# Остаток 25%: динамический трейлинг-стоп 0.8%
-TP1_PCT = float(os.getenv("TP1_PCT", "0.015"))
-TP2_PCT = float(os.getenv("TP2_PCT", "0.030"))
-TRAILING_STOP_PCT = float(os.getenv("TRAILING_STOP_PCT", "0.008"))  # 0.8% trailing
+# Multi-tier Take Profit (с плечом 50x):
+# +1.2% ход цены = +60.0% ROI (TP1: фиксация 50% + мгновенный безубыток с запасом на комиссию)
+# +2.4% ход цены = +120.0% ROI (TP2: фиксация 25%)
+# Остаток 25%: динамический трейлинг-стоп 0.7%
+TP1_PCT = float(os.getenv("TP1_PCT", "0.012"))
+TP2_PCT = float(os.getenv("TP2_PCT", "0.024"))
+TRAILING_STOP_PCT = float(os.getenv("TRAILING_STOP_PCT", "0.007"))  # 0.7% trailing (точно как в бектесте)
+TAKER_FEE_PCT = float(os.getenv("TAKER_FEE_PCT", "0.0005"))         # 0.05% биржевой сбор
 
 # ==============================================================================
 # 5. MARKET SCANNER & ELITE HIGH-LIQUIDITY UNIVERSE
 # ==============================================================================
-# Радар рынка: сканирует топ по объему + топ-гейнеров (ракеты!) с суточным объемом от $2M
-MIN_24H_VOLUME_USDT = float(os.getenv("MIN_24H_VOLUME_USDT", "2000000"))  # $2.0M минимум (отсекает мертвые монеты без стакана, но не режет ракеты!)
-SCAN_TICKERS_LIMIT = int(os.getenv("SCAN_TICKERS_LIMIT", "100"))  # Расширенный институциональный радар (100 пар)
-STRICT_WHITELIST_ONLY = os.getenv("STRICT_WHITELIST_ONLY", "false").lower() == "true"  # false = динамический радар ракет; true = только белый список
-CHOP_MIN_VOLUME_SURGE = float(os.getenv("CHOP_MIN_VOLUME_SURGE", "1.30"))  # В боковике BTC требуем объем от 1.30x
-ML_CONFIDENCE_THRESHOLD = float(os.getenv("ML_CONFIDENCE_THRESHOLD", "0.60"))  # 60% перевес квантовой модели (реалистичный порог для входа)
+MIN_24H_VOLUME_USDT = float(os.getenv("MIN_24H_VOLUME_USDT", "10000000"))  # $10M минимум (отсекает сонные щиткоины с фальшивым стаканом, но пропускает любые ракеты)
+SCAN_TICKERS_LIMIT = int(os.getenv("SCAN_TICKERS_LIMIT", "60"))
+STRICT_WHITELIST_ONLY = os.getenv("STRICT_WHITELIST_ONLY", "false").lower() == "true"  # false = динамический радар ракет и объема от $10M
+CHOP_MIN_VOLUME_SURGE = float(os.getenv("CHOP_MIN_VOLUME_SURGE", "1.30"))
+ML_CONFIDENCE_THRESHOLD = float(os.getenv("ML_CONFIDENCE_THRESHOLD", "0.55"))
 
-# Элитный юниверс криптовалют (140+ монет: мажоры, L1/L2, топовые мемкоины, AI, DeFi)
+# Элитный юниверс доказанной ликвидности (топ мажоры, L1/L2, импульсные мемкоины и ракеты):
 TOP_CRYPTO_UNIVERSE = [
-    # Топ-10 Мажоры и L1 гиганты
-    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT", "ADAUSDT", "TRXUSDT", "AVAXUSDT", "SUIUSDT",
-    # Топ L1/L2 и инфраструктурные лидеры
-    "NEARUSDT", "LINKUSDT", "APTUSDT", "RENDERUSDT", "TIAUSDT", "SEIUSDT", "ENAUSDT", "JUPUSDT", "INJUSDT", "AAVEUSDT",
-    "DOTUSDT", "LTCUSDT", "BCHUSDT", "OPUSDT", "ARBUSDT", "FILUSDT", "STXUSDT", "ONDOUSDT", "WLDUSDT", "TAOUSDT", "TONUSDT",
-    "ATOMUSDT", "XLMUSDT", "ETCUSDT", "KASUSDT", "ALGOUSDT", "THETAUSDT", "KAVAUSDT", "ZECUSDT", "XMRUSDT", "FTMUSDT", "EGLDUSDT",
-    # Высоколиквидные мемкоины и импульсные ракеты
-    "PEPEUSDT", "1000PEPEUSDT", "WIFUSDT", "SHIBUSDT", "1000SHIBUSDT", "BONKUSDT", "1000BONKUSDT", "FLOKIUSDT", "1000FLOKIUSDT",
-    "BOMEUSDT", "MEMEUSDT", "TURBOUSDT", "1000SATSUSDT", "NEIROUSDT", "PENGUUSDT", "POPCATUSDT", "MEWUSDT", "BRETTUSDT",
-    "MOODENGUSDT", "GOATUSDT", "ACTUSDT", "PNUTUSDT", "COWUSDT", "CETUSUSDT", "GRASSUSDT", "DRIFTUSDT", "VIRTUALUSDT", "AIXBTUSDT",
-    "DOGSUSDT", "NOTUSDT", "HMSTRUSDT", "CATIUSDT", "SLERFUSDT",
-    # Топ DeFi, AI и Web3 импульсы
-    "FETUSDT", "UNIUSDT", "PENDLEUSDT", "ZROUSDT", "STRKUSDT", "PYTHUSDT", "JTOUSDT", "BLURUSDT",
-    "GALAUSDT", "SANDUSDT", "MANAUSDT", "AXSUSDT", "CHZUSDT", "DYDXUSDT", "GMXUSDT", "LDOUSDT", "RAYUSDT", "ORDIUSDT",
-    "BEAMXUSDT", "HYPEUSDT", "QNTUSDT", "AINUSDT", "LSKUSDT", "QUSDT", "SOPHUSDT", "INTWUSDT", "BTWUSDT", "PUMPUSDT",
-    "BLESSUSDT", "AIOTUSDT", "MAGMAUSDT", "PARTIUSDT", "ETHFIUSDT", "REZUSDT", "BBUSDT", "IOUSDT", "ZKUSDT", "LISTAUSDT",
-    "WUSDT", "OMUSDT", "KAIAUSDT", "SAGAUSDT", "TNSRUSDT", "SAFEUSDT", "KMNOUSDT", "TRUUSDT", "LQTYUSDT", "SPELLUSDT",
-    "GASUSDT", "ARKUSDT", "LOOMUSDT", "HIFIUSDT", "POLUSDT", "BIGTIMEUSDT", "SUPERUSDT", "ARKMUSDT", "AIUSDT", "NFPUSDT",
-    "GLMUSDT", "ATHUSDT", "ARUSDT", "HNTUSDT", "MOBILEUSDT", "IOTXUSDT", "AIOZUSDT", "RONINUSDT", "METISUSDT", "MANTAUSDT", "SCRUSDT"
+    "SOLUSDT", "PEPEUSDT", "DOGEUSDT", "NEARUSDT", "SUIUSDT",
+    "ENAUSDT", "JUPUSDT", "RENDERUSDT", "WIFUSDT", "APTUSDT",
+    "TIAUSDT", "SEIUSDT", "AVAXUSDT", "LINKUSDT", "INJUSDT",
+    "FETUSDT", "OPUSDT", "ARBUSDT", "BTCUSDT", "ETHUSDT",
+    "BNBUSDT", "XRPUSDT", "SHIBUSDT", "1000PEPEUSDT", "1000SHIBUSDT",
+    "BONKUSDT", "1000BONKUSDT", "FLOKIUSDT", "POPCATUSDT", "NEIROUSDT",
+    "MOODENGUSDT", "GOATUSDT", "ACTUSDT", "PNUTUSDT", "DRIFTUSDT",
+    "GRASSUSDT", "VIRTUALUSDT", "AIXBTUSDT", "PENDLEUSDT", "UNIUSDT",
+    "AAVEUSDT", "DOTUSDT", "LTCUSDT", "BCHUSDT", "FILUSDT",
+    "TONUSDT", "TAOUSDT", "PYTHUSDT", "JTOUSDT", "RAYUSDT",
+    "ORDIUSDT", "BEAMXUSDT", "POWRUSDT", "GTCUSDT"
 ]
 
 # Черный список: стейблкоины, фиат, хаки и синтетические акции

@@ -46,6 +46,15 @@ class MarketScanner:
                 portfolio.btc_regime_str = f"🛑 Пауза Circuit Breaker ({rem} сек)"
             return []
 
+        # Предохранитель депозита: максимум 2 убытка в день (как в бектесте)
+        if portfolio.is_daily_limit_reached():
+            portfolio.btc_regime_str = f"🛑 Дневной лимит 2 убытка достигнут ({portfolio.daily_losses_count}/{config.DAILY_LOSS_LIMIT})"
+            return []
+
+        # Лимит одновременных позиций (строго 2 позиции)
+        if len(portfolio.open_positions) >= config.MAX_CONCURRENT_POSITIONS:
+            return []
+
         # 0. MACRO GUARD: Проверяем состояние Bitcoin (Поводырь рынка и защита от негативных новостей)
         btc_regime = await binance_client.fetch_btc_regime()
         portfolio.btc_regime_str = btc_regime.get("status_str", "")
@@ -62,7 +71,7 @@ class MarketScanner:
         if should_log:
             self._last_log_time = now
             btc_p = btc_regime.get("pct_15m", 0.0)
-            print(f"📡 [РАДАР] {now_str} — Мониторинг {len(tickers)} пар Binance (Ракеты + Ликвидность) | BTC: {btc_p:+.2f}% | Оценок Groq: {portfolio.funnel_stats['groq_evaluated']}", flush=True)
+            print(f"📡 [РАДАР] {now_str} — Мониторинг {len(tickers)} пар Binance (Selective A+ Day-Trader) | BTC: {btc_p:+.2f}% | Оценок Groq: {portfolio.funnel_stats['groq_evaluated']}", flush=True)
 
         # Предварительно загружаем стаканы всех пар за 1 сетевой вызов
         await binance_client.fetch_all_book_tickers()
@@ -72,7 +81,7 @@ class MarketScanner:
             sym = t["symbol"]
 
             # Проверка белого и черного списков
-            strict = getattr(config, "STRICT_WHITELIST_ONLY", False)
+            strict = getattr(config, "STRICT_WHITELIST_ONLY", True)
             if strict and sym not in getattr(config, "TOP_CRYPTO_UNIVERSE", []):
                 return None
             if sym in getattr(config, "EXCLUDED_TICKERS", set()):
@@ -98,43 +107,58 @@ class MarketScanner:
                     portfolio.funnel_stats["gate_failed"] = portfolio.funnel_stats.get("gate_failed", 0) + 1
                     return None
 
-                # 3. Получаем 5m свечной анализ (80 свечей для расчета EMA50, RSI14, ATR)
+                # 3. Получаем 5m свечной анализ (80 свечей для расчета EMA50, RSI14, ATR, фитилей)
                 analysis = await binance_client.fetch_candles_analysis(sym, interval="5m", limit=80)
                 if not analysis:
                     return None
 
-                # 4. НЕПРЕРЫВНЫЙ КВАНТОВЫЙ ML СКОРИНГ (Dual XGBoost Alpha):
-                # Определяем естественное направление по импульсу и тренду монеты:
-                # Растущая ракета оценивается в LONG, падающий пробой — в SHORT!
                 pct_5m = analysis.get("pct_5m", 0.0)
-                pct_15m = analysis.get("pct_15m", 0.0)
-                trend = analysis.get("trend", "CHOP")
-                btc_dump = btc_regime.get("is_dumping", False)
-                btc_pump = btc_regime.get("is_pumping", False)
+                surge = analysis.get("volume_surge_ratio", 1.0)
+                upper_wick = analysis.get("upper_wick_pct", 0.0)
+                lower_wick = analysis.get("lower_wick_pct", 0.0)
+                sl_long_dist = analysis.get("sl_pct_distance", 0.01)
+                sl_short_dist = analysis.get("short_sl_dist", 0.01)
 
-                if btc_dump:
-                    side = "SHORT"
-                elif btc_pump:
-                    side = "LONG"
-                elif pct_15m >= 0.15 or (pct_15m >= 0 and pct_5m > 0):
-                    side = "LONG"
-                elif pct_15m <= -0.15 or (pct_15m <= 0 and pct_5m < 0):
-                    side = "SHORT"
-                elif trend == "BULLISH":
-                    side = "LONG"
-                elif trend == "BEARISH":
-                    side = "SHORT"
-                else:
-                    side = "LONG" if pct_5m >= 0 else "SHORT"
+                # ==============================================================
+                # 4. СЕЛЕКТИВНЫЕ ПРАВИЛА ВХОДА A+ (100% ИЗ БЕКТЕСТА REALISTIC_BACKTEST_7D)
+                # 1. Четкий взрыв объема >= 1.50x
+                # 2. Амплитуда свечи >= 0.65%
+                # 3. Фитиль защиты уровня >= 0.25 (отбой от покупателей / сопротивления)
+                # 4. Нет истощения: противоположный встречный фитиль <= 0.30
+                # 5. Стоп в пределах скальперского допуска (0.3% - 1.2%)
+                # ==============================================================
+                is_long = (
+                    surge >= config.MIN_5M_VOLUME_SURGE_RATIO and
+                    pct_5m >= config.MIN_5M_PRICE_IMPULSE_PCT and
+                    lower_wick >= config.WICK_REJECTION_MIN and
+                    upper_wick <= config.WICK_EXHAUSTION_MAX and
+                    config.STOP_LOSS_MIN_PCT <= sl_long_dist <= config.STOP_LOSS_MAX_PCT and
+                    not btc_regime.get("is_dumping", False)
+                )
 
+                is_short = (
+                    surge >= config.MIN_5M_VOLUME_SURGE_RATIO and
+                    pct_5m <= -config.MIN_5M_PRICE_IMPULSE_PCT and
+                    upper_wick >= config.WICK_REJECTION_MIN and
+                    lower_wick <= config.WICK_EXHAUSTION_MAX and
+                    config.STOP_LOSS_MIN_PCT <= sl_short_dist <= config.STOP_LOSS_MAX_PCT and
+                    not btc_regime.get("is_pumping", False)
+                )
+
+                if not is_long and not is_short:
+                    return None
+
+                side = "LONG" if is_long else "SHORT"
                 chosen = {**t, **analysis, "candidate_side": side}
-                ml_res = ml_engine.evaluate_candidate(chosen)
 
-                chosen["candidate_side"] = side
+                # Оценка квантовой моделью
+                ml_res = ml_engine.evaluate_candidate(chosen)
                 chosen["ml_prob"] = ml_res.get("ml_probability", 0.5)
                 chosen["ml_reason"] = ml_res.get("reason", "")
                 chosen["ml_approved"] = ml_res.get("ml_approved", False)
                 chosen["btc_regime"] = btc_regime.get("status_str", "Neutral")
+                # Балл силы импульса как в бектесте: abs(pct_5m) * surge
+                chosen["score"] = round(abs(pct_5m) * surge, 3)
                 return chosen
 
         tasks = [check_ticker(t) for t in tickers]
@@ -142,95 +166,32 @@ class MarketScanner:
         all_scored = [r for r in results if r and isinstance(r, dict)]
         portfolio.funnel_stats["hard_gates"] += len(all_scored)
 
-        # Сохраняем полный живой рейтинг всех пар рынка в портфель
-        all_scored.sort(key=lambda x: x.get("ml_prob", 0.0), reverse=True)
+        # Сортируем кандидатов строго по силе импульса (как в бектесте)
+        all_scored.sort(key=lambda x: x.get("score", 0.0), reverse=True)
         portfolio.update_live_ml_ranking(all_scored)
 
         # Выводим лог лидеров квантового радара раз в минуту
         if should_log and all_scored:
             top_3 = all_scored[:3]
-            top_str = ", ".join([f"{c['symbol']} {c['candidate_side']} ({int(c['ml_prob']*100)}%)" for c in top_3])
-            print(f"🧠 [QUANT ML] Все {len(all_scored)} пар оценены | Топ: {top_str} | Порог входа: {int(ml_engine.threshold*100)}%", flush=True)
+            top_str = ", ".join([f"{c['symbol']} {c['candidate_side']} (Score: {c['score']}, ML: {int(c['ml_prob']*100)}%)" for c in top_3])
+            print(f"🔥 [A+ СЕКВЕНЦИЯ] Найдено {len(all_scored)} сетапов | Лидеры: {top_str}", flush=True)
 
-        # 5. ОТБОР КАНДИДАТОВ ДЛЯ GROQ AI (A+ СЕКВЕНЦИЯ):
-        # Только монеты с подтвержденным математическим перевесом ML и строгим риск-профилем
-        candidates_to_eval = []
-        for cand in all_scored:
-            sym = cand["symbol"]
-            side = cand["candidate_side"]
-            prob = cand["ml_prob"]
-            sl_dist = cand["sl_pct_distance"] if side == "LONG" else cand.get("short_sl_dist", 0.05)
-            surge = cand.get("volume_surge_ratio", 1.0)
-            pct_5m = cand.get("pct_5m", 0.0)
+        # 5. ОТБОР КАНДИДАТОВ ДЛЯ GROQ AI:
+        # Оцениваем лучших кандидатов для заполнения свободных слотов портфеля
+        free_slots = max(1, config.MAX_CONCURRENT_POSITIONS - len(portfolio.open_positions))
+        candidates_to_eval = all_scored[:free_slots]
 
-            # Требуем подтвержденный перевес квантовой модели
-            min_ml_thresh = getattr(config, "ML_CONFIDENCE_THRESHOLD", 0.60)
-            if prob < min_ml_thresh:
-                continue
-
-            # Защита от опасных стопов (не более 1.25% для 30x плеча)
-            if sl_dist > config.MAX_ALLOWED_SL_PCT:
-                if should_log:
-                    print(f"🛑 [СТОП-ФИЛЬТР] {sym} ({side}) ML {int(prob*100)}% отклонен: стоп {sl_dist*100:.2f}% > {config.MAX_ALLOWED_SL_PCT*100:.2f}% (риск -{int(sl_dist*config.LEVERAGE*100)}% маржи при {config.LEVERAGE}x)", flush=True)
-                continue
-
-            # Проверка BTC-фильтра (Directional Lock)
-            if side == "LONG" and btc_regime.get("is_dumping", False):
-                portfolio.funnel_stats["btc_blocked"] = portfolio.funnel_stats.get("btc_blocked", 0) + 1
-                if should_log:
-                    print(f"🛑 [BTC БЛОК] {sym} LONG ML {int(prob*100)}% отклонен: BTC падает — ЛОНГИ ЗАБЛОКИРОВАНЫ", flush=True)
-                continue
-            if side == "SHORT" and btc_regime.get("is_pumping", False):
-                portfolio.funnel_stats["btc_blocked"] = portfolio.funnel_stats.get("btc_blocked", 0) + 1
-                if should_log:
-                    print(f"🛑 [BTC БЛОК] {sym} SHORT ML {int(prob*100)}% отклонен: BTC растет — ШОРТЫ ЗАБЛОКИРОВАНЫ", flush=True)
-                continue
-
-            # Проверка минимальной активности (не спим в мертвом стакане)
-            if surge < 1.15 and abs(pct_5m) < 0.20:
-                if should_log:
-                    print(f"🛑 [НЕТ ИМПУЛЬСА] {sym} ({side}) ML {int(prob*100)}% отклонен: всплеск {surge:.2f}x < 1.15x и ход 5m {pct_5m:+.2f}% < 0.20%", flush=True)
-                continue
-
-            # Защита от контртрендовых сделок (Мульти-таймфрейм 5m + 15m Trend Alignment)
-            trend = cand.get("trend", "CHOP")
-            pct_15m = cand.get("pct_15m", 0.0)
-            if side == "SHORT" and (trend == "BULLISH" or pct_5m > 0.40 or pct_15m > 0.40):
-                if should_log:
-                    print(f"🛑 [ТРЕНД-БЛОК] {sym} SHORT ML {int(prob*100)}% отклонен: монета растет (5m: {pct_5m:+.2f}%, 15m: {pct_15m:+.2f}%)", flush=True)
-                continue
-            if side == "LONG" and (trend == "BEARISH" or pct_5m < -0.40 or pct_15m < -0.40):
-                if should_log:
-                    print(f"🛑 [ТРЕНД-БЛОК] {sym} LONG ML {int(prob*100)}% отклонен: монета падает (5m: {pct_5m:+.2f}%, 15m: {pct_15m:+.2f}%)", flush=True)
-                continue
-
-            # Защита от распила в боковике BTC (CHOP Shield):
-            # В боковике BTC требуем объем от 1.30x и подтверждение ML модели
-            is_btc_chop = not btc_regime.get("is_dumping", False) and not btc_regime.get("is_pumping", False)
-            chop_min_surge = getattr(config, "CHOP_MIN_VOLUME_SURGE", 1.30)
-            if is_btc_chop and (surge < chop_min_surge or prob < min_ml_thresh):
-                if should_log:
-                    print(f"🛑 [CHOP БЛОК] {sym} ({side}) отклонен: BTC в боковике — требуется взрыв объема >={chop_min_surge:.1f}x (факт: {surge:.2f}x) и ML >= {int(min_ml_thresh*100)}% (факт: {int(prob*100)}%)", flush=True)
-                continue
-
-            candidates_to_eval.append(cand)
-            print(f"🔥 [A+ КАНДИДАТ - {side}] {sym}: ML {int(prob*100)}%, всплеск {surge:.2f}x, 5m: {pct_5m:+.2f}% | Передача в Groq AI...", flush=True)
-
-        # Передаем топ-2 сетапа для оценки Groq AI
-        candidates_to_eval = candidates_to_eval[:2]
-
-        # 4. GROQ SOFT GATE (JEV AI ENGINE)
+        # 6. GROQ SOFT GATE & ИСПОЛНЕНИЕ СДЕЛКИ
         for ctx in candidates_to_eval:
             sym = ctx["symbol"]
             cand_side = ctx.get("candidate_side", "LONG")
             portfolio.funnel_stats["groq_evaluated"] += 1
-            # КУЛДАУН: ставится ТОЛЬКО монете, которая реально отправлена на оценку в Groq (без блокировки остальных!)
             self.cooldowns[sym] = now
 
             approved, groq_eval = await groq_engine.evaluate_setup(ctx)
 
             default_sl = ctx["wick_stop_loss"] if cand_side == "LONG" else ctx.get("short_wick_sl", ctx["current_price"] * 1.01)
-            default_tp1 = round(ctx["current_price"] * (1.02 if cand_side == "LONG" else 0.98), 4)
+            default_tp1 = round(ctx["current_price"] * (1.0 + config.TP1_PCT if cand_side == "LONG" else 1.0 - config.TP1_PCT), 4)
 
             eval_entry = {
                 "symbol": sym,
@@ -243,6 +204,7 @@ class MarketScanner:
                 "sl": groq_eval.get("stop_loss") or default_sl,
                 "tp1": groq_eval.get("tp1") or default_tp1,
                 "surge": ctx["volume_surge_ratio"],
+                "score": ctx.get("score", 1.0),
                 "pullback": round(ctx.get("pullback_from_high_pct", 0) * 100, 2) if cand_side == "LONG" else round(ctx.get("bounce_from_low_pct", 0) * 100, 2),
                 "model": groq_eval.get("model", "unknown"),
                 "finish_reason": groq_eval.get("finish_reason", "unknown"),
@@ -254,49 +216,33 @@ class MarketScanner:
             if approved:
                 portfolio.funnel_stats["passed"] += 1
 
-                # 1. Проверка дневного лимита Circuit Breaker (если включен)
-                if getattr(config, "ENABLE_CIRCUIT_BREAKER", False) and portfolio.get_daily_loss() >= config.MAX_DAILY_LOSS_USD:
-                    print(f"🛑 [CIRCUIT BREAKER] Дневной лимит убытка (-${portfolio.get_daily_loss():.2f}) исчерпан. Защита депозита активна.", flush=True)
-                    continue
+                if portfolio.is_daily_limit_reached():
+                    print(f"🛑 [CIRCUIT BREAKER] Дневной лимит {config.DAILY_LOSS_LIMIT} убытка исчерпан. Защита депозита активна.", flush=True)
+                    break
 
                 entry_p = ctx["current_price"]
                 wick_sl = eval_entry["sl"]
 
-                # Минимальное расстояние тейк-профитов для защиты от микро-сделок:
-                # TP1: минимум 1.5% хода цены (+90.0% ROI при 60x)
-                # TP2: минимум 3.0% хода цены (+180.0% ROI при 60x)
                 min_tp1_dist = entry_p * config.TP1_PCT
                 min_tp2_dist = entry_p * config.TP2_PCT
 
                 if cand_side == "LONG":
-                    risk_per_coin = max(entry_p - wick_sl, entry_p * 0.002)
+                    risk_per_coin = max(entry_p - wick_sl, entry_p * 0.003)
                     tp1_2r = round(max(entry_p + (config.TARGET_1_R * risk_per_coin), entry_p + min_tp1_dist), 6)
                     tp2_3r = round(max(entry_p + (config.TARGET_2_R * risk_per_coin), entry_p + min_tp2_dist), 6)
                 else:  # SHORT
-                    risk_per_coin = max(wick_sl - entry_p, entry_p * 0.002)
+                    risk_per_coin = max(wick_sl - entry_p, entry_p * 0.003)
                     tp1_2r = round(min(entry_p - (config.TARGET_1_R * risk_per_coin), entry_p - min_tp1_dist), 6)
                     tp2_3r = round(min(entry_p - (config.TARGET_2_R * risk_per_coin), entry_p - min_tp2_dist), 6)
 
-                risk_pct = risk_per_coin / entry_p
-
-                # 2. ИНСТИТУЦИОНАЛЬНЫЙ РАСЧЕТ РАЗМЕРА ОТ СТОП-ЛОССА (TRUE RISK-BASED SIZING):
-                # Маржа подбирается математически так, чтобы при срабатывании стопа терялась ровно сумма risk_usd (10% от депо)
+                # ФИКСИРОВАННЫЙ РАЗМЕР МАРЖИ $5.00 (КАК В БЕКТЕСТЕ FIXED_5):
+                # Равный вес риска, защита депозита от перегруза
                 lev_to_use = getattr(portfolio, "current_leverage", config.LEVERAGE)
-                risk_pct = getattr(config, "COMPOUND_RISK_PCT", 0.10) if config.ENABLE_COMPOUNDING else 0.10
-                risk_usd = max(portfolio.cash * risk_pct, config.MAX_RISK_PER_TRADE_USD)
-
-                # Реальное расстояние до стопа (не менее 0.3% для безопасности)
-                stop_dist_pct = max(risk_per_coin / entry_p, 0.003)
-
-                # Формула: margin = risk_usd / (stop_dist_pct * leverage)
-                calc_margin = risk_usd / (stop_dist_pct * lev_to_use)
-
-                # Потолок: не более 45% от баланса портфеля и не менее $3.00 (минимальный лот биржи)
-                actual_margin = round(min(max(calc_margin, 3.0), portfolio.cash * 0.45), 2)
+                actual_margin = round(min(config.TRADE_AMOUNT_USDT, portfolio.cash * 0.45), 2)
 
                 # Проверка лимитов портфеля и открытие позиции
                 if len(portfolio.open_positions) < config.MAX_CONCURRENT_POSITIONS and portfolio.cash >= actual_margin:
-                    portfolio.open_position(
+                    opened = portfolio.open_position(
                         symbol=sym,
                         side=cand_side,
                         entry_price=entry_p,
@@ -304,27 +250,31 @@ class MarketScanner:
                         wick_sl=wick_sl,
                         tp1=tp1_2r,
                         tp2=tp2_3r,
-                        groq_reason=f"2R/3R Target | {eval_entry['reason']}",
+                        groq_reason=f"Selective A+ (Score: {ctx.get('score', 1.0)}) | {eval_entry['reason']}",
                         leverage=lev_to_use
                     )
+                    if opened:
+                        print(f"🟢 [TRADE OPEN] {cand_side} {sym} по ${entry_p:.4f} (Маржа: ${actual_margin:.2f}, Плечо: {lev_to_use}x) | SL: ${wick_sl:.4f} | TP1: ${tp1_2r:.4f}", flush=True)
+                        break
             else:
                 if groq_eval.get("decision") == "SKIP":
                     portfolio.funnel_stats["groq_skip"] = portfolio.funnel_stats.get("groq_skip", 0) + 1
                 elif groq_eval.get("confidence", 0.0) < config.GROQ_MIN_CONFIDENCE:
                     portfolio.funnel_stats["low_conf"] = portfolio.funnel_stats.get("low_conf", 0) + 1
 
-                # Сохраняем в Shadow Tracker для анализа отклонённых сетапов
                 portfolio.shadow_trades.insert(0, {
                     "symbol": sym,
                     "side": cand_side,
                     "rejected_at_price": ctx["current_price"],
+                    "sl": eval_entry["sl"],
+                    "tp1": eval_entry["tp1"],
                     "current_price": ctx["current_price"],
                     "price_change_pct": 0.0,
                     "outcome": "Ожидание хода...",
-                    "reason": eval_entry["reason"],
+                    "reason": groq_eval.get("reason", "Отклонено Groq"),
                     "time": time.strftime("%H:%M:%S"),
                     "timestamp": time.time(),
-                    "score": eval_entry["confidence"]
+                    "score": eval_entry.get("score", 1.0)
                 })
                 if len(portfolio.shadow_trades) > 50:
                     portfolio.shadow_trades = portfolio.shadow_trades[:50]

@@ -162,38 +162,54 @@ with st.sidebar:
         portfolio.save()
         st.rerun()
 
-    # Режим разгона депозита (Compounding Multiplier)
-    risk_mode = st.radio(
-        "Режим доходности:",
+    # Режим частоты и отбора сетапов (Day-Trader Strategies)
+    strategy_mode = st.radio(
+        "Режим стратегии:",
         [
-            "⚡ Институционал 30x (Рекомендуемый: макс винрейт, комиссии -50%)",
-            "🔥 Турбо 60x (Высокий разгон)",
-            "🎯 Стандарт 20x (Сверхбезопасный)"
+            "🔥 Максимум Хай-Профит (50x, +149.1% ROI, WR 70.6%)",
+            "🛡️ Сбалансированный Титан (40x, +119.2% ROI, WR 70.6%)",
+            "🎯 Снайпер A+ (30x, +18.0% ROI, WR 75.0%)"
         ],
         index=0
     )
-    if "Институционал" in risk_mode:
-        config.COMPOUND_RISK_PCT = 0.08
-        config.MAX_RISK_PER_TRADE_USD = 1.20
-        config.TRADE_AMOUNT_USDT = 5.0
-    elif "Турбо" in risk_mode:
-        config.COMPOUND_RISK_PCT = 0.10
-        config.MAX_RISK_PER_TRADE_USD = 1.50
-        config.TRADE_AMOUNT_USDT = 5.0
+    if "Максимум" in strategy_mode:
+        config.LEVERAGE = 50
+        portfolio.current_leverage = 50
+        config.MIN_5M_VOLUME_SURGE_RATIO = 1.25
+        config.MIN_5M_PRICE_IMPULSE_PCT = 0.50
+        config.WICK_REJECTION_MIN = 0.12
+        config.WICK_EXHAUSTION_MAX = 0.38
+        config.TP1_PCT = 0.012
+        config.TP2_PCT = 0.024
+        config.DAILY_LOSS_LIMIT = 3
+    elif "Сбалансированный" in strategy_mode:
+        config.LEVERAGE = 40
+        portfolio.current_leverage = 40
+        config.MIN_5M_VOLUME_SURGE_RATIO = 1.30
+        config.MIN_5M_PRICE_IMPULSE_PCT = 0.50
+        config.WICK_REJECTION_MIN = 0.12
+        config.WICK_EXHAUSTION_MAX = 0.38
+        config.TP1_PCT = 0.012
+        config.TP2_PCT = 0.024
+        config.DAILY_LOSS_LIMIT = 2
     else:
-        config.COMPOUND_RISK_PCT = 0.05
-        config.MAX_RISK_PER_TRADE_USD = 1.00
-        config.TRADE_AMOUNT_USDT = 5.0
+        config.LEVERAGE = 30
+        portfolio.current_leverage = 30
+        config.MIN_5M_VOLUME_SURGE_RATIO = 1.50
+        config.MIN_5M_PRICE_IMPULSE_PCT = 0.65
+        config.WICK_REJECTION_MIN = 0.25
+        config.WICK_EXHAUSTION_MAX = 0.30
+        config.TP1_PCT = 0.015
+        config.TP2_PCT = 0.030
+        config.DAILY_LOSS_LIMIT = 2
 
     st.text(f"Плечо для новых входов: {portfolio.current_leverage}x 🚀")
-    current_risk_usd = max(portfolio.cash * config.COMPOUND_RISK_PCT, config.MAX_RISK_PER_TRADE_USD) if config.ENABLE_COMPOUNDING else config.MAX_RISK_PER_TRADE_USD
-    st.text(f"Сложный процент: 🟢 ВКЛ ({int(config.COMPOUND_RISK_PCT*100)}% депо)")
-    st.text(f"Текущий риск на сделку: ${current_risk_usd:.2f}")
-    st.text(f"Расчет маржи: Динамический от стопа")
+    st.text(f"Маржа на сделку: Фиксированная $5.00 (Fixed-5)")
+    st.text(f"Лимит убытков: Макс {config.DAILY_LOSS_LIMIT} в день ({portfolio.daily_losses_count}/{config.DAILY_LOSS_LIMIT})")
+    st.text(f"Всплеск объема: от {config.MIN_5M_VOLUME_SURGE_RATIO:.2f}x | Ход: от {config.MIN_5M_PRICE_IMPULSE_PCT:.2f}%")
     st.text(f"Направления: 🟢 LONG + 🔻 SHORT")
-    st.text(f"Цели профита: 2R / 3.5R")
-    radar_limit = getattr(config, "SCAN_TICKERS_LIMIT", 100)
-    st.text(f"Радар рынка: 🚀 Ракеты + Мажоры ({radar_limit} пар)")
+    st.text(f"Цели профита: TP1 +{config.TP1_PCT*100:.1f}% / TP2 +{config.TP2_PCT*100:.1f}%")
+    st.text(f"Радар рынка: 🚀 60 пар (Объем от $10M + Ракеты)")
     st.text(f"Модель Groq: {config.GROQ_PRIMARY_MODEL}")
     has_key = bool(config.GROQ_API_KEY)
     st.text(f"ИИ Статус: {'🟢 Активен (Groq Cloud)' if has_key else '🟡 Резервный (Institutional)'}")
@@ -205,6 +221,8 @@ with st.sidebar:
         portfolio.trade_history.clear()
         portfolio.symbol_lockouts.clear()
         portfolio.consecutive_losses = 0
+        portfolio.daily_losses_count = 0
+        portfolio.daily_loss_day = time.strftime('%Y-%m-%d', time.gmtime())
         portfolio.pause_until = 0.0
         portfolio.current_leverage = getattr(config, "LEVERAGE", 30)
         portfolio.save()

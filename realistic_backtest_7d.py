@@ -81,6 +81,7 @@ def simulate_strategy(
     timestamps = sorted(list(all_timestamps))
     
     data_by_time = {s: {c["time"]: c for c in c_list} for s, c_list in all_data.items()}
+    time_to_idx = {s: {c["time"]: i for i, c in enumerate(c_list)} for s, c_list in all_data.items()}
     
     cash = initial_balance
     peak_equity = initial_balance
@@ -264,7 +265,7 @@ def simulate_strategy(
                 if not c_now:
                     continue
                     
-                c_idx = next((i for i, x in enumerate(c_list) if x["time"] == t_now), None)
+                c_idx = time_to_idx[sym].get(t_now)
                 if c_idx is None or c_idx < 15:
                     continue
                     
