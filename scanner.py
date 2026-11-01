@@ -50,7 +50,7 @@ class MarketScanner:
         btc_regime = await binance_client.fetch_btc_regime()
         portfolio.btc_regime_str = btc_regime.get("status_str", "")
 
-        # 1. UNIVERSE: Получаем проверенные пары топ-30 крипторынка
+        # 1. UNIVERSE: Получаем расширенный радар (Ракеты + Ликвидность)
         tickers = await binance_client.fetch_top_tickers(
             min_vol_usdt=config.MIN_24H_VOLUME_USDT,
             limit=config.SCAN_TICKERS_LIMIT
@@ -62,9 +62,11 @@ class MarketScanner:
         if should_log:
             self._last_log_time = now
             btc_p = btc_regime.get("pct_15m", 0.0)
-            print(f"📡 [РАДАР] {now_str} — Мониторинг {len(tickers)} пар Binance | BTC: {btc_p:+.2f}% | Оценок Groq: {portfolio.funnel_stats['groq_evaluated']}", flush=True)
+            print(f"📡 [РАДАР] {now_str} — Мониторинг {len(tickers)} пар Binance (Ракеты + Ликвидность) | BTC: {btc_p:+.2f}% | Оценок Groq: {portfolio.funnel_stats['groq_evaluated']}", flush=True)
 
-        sem = asyncio.Semaphore(12)  # 12 параллельных запросов для мгновенной скорости
+        # Предварительно загружаем стаканы всех пар за 1 сетевой вызов
+        await binance_client.fetch_all_book_tickers()
+        sem = asyncio.Semaphore(16)  # 16 параллельных потоков для высокой скорости
 
         async def check_ticker(t: Dict[str, Any]) -> Any:
             sym = t["symbol"]
@@ -96,8 +98,8 @@ class MarketScanner:
                     portfolio.funnel_stats["gate_failed"] = portfolio.funnel_stats.get("gate_failed", 0) + 1
                     return None
 
-                # 3. Получаем 5m свечной анализ
-                analysis = await binance_client.fetch_candles_analysis(sym, interval="5m", limit=30)
+                # 3. Получаем 5m свечной анализ (80 свечей для расчета EMA50, RSI14, ATR)
+                analysis = await binance_client.fetch_candles_analysis(sym, interval="5m", limit=80)
                 if not analysis:
                     return None
 

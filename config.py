@@ -80,24 +80,34 @@ TRAILING_STOP_PCT = float(os.getenv("TRAILING_STOP_PCT", "0.008"))  # 0.8% trail
 # ==============================================================================
 # 5. MARKET SCANNER & ELITE HIGH-LIQUIDITY UNIVERSE
 # ==============================================================================
-# Строго топ-ликвидные активы с глубоким стаканом (исключает манипулятивный мусор вроде BMT, NIL, GTC)
-MIN_24H_VOLUME_USDT = float(os.getenv("MIN_24H_VOLUME_USDT", "35000000"))  # $35M минимум
-SCAN_TICKERS_LIMIT = int(os.getenv("SCAN_TICKERS_LIMIT", "45"))
-STRICT_WHITELIST_ONLY = True  # СТРОГО топ-проверенные активы!
+# Радар рынка: сканирует топ по объему + топ-гейнеров (ракеты!) с суточным объемом от $2M
+MIN_24H_VOLUME_USDT = float(os.getenv("MIN_24H_VOLUME_USDT", "2000000"))  # $2.0M минимум (отсекает мертвые монеты без стакана, но не режет ракеты!)
+SCAN_TICKERS_LIMIT = int(os.getenv("SCAN_TICKERS_LIMIT", "100"))  # Расширенный институциональный радар (100 пар)
+STRICT_WHITELIST_ONLY = os.getenv("STRICT_WHITELIST_ONLY", "false").lower() == "true"  # false = динамический радар ракет; true = только белый список
 CHOP_MIN_VOLUME_SURGE = 2.50  # В боковике BTC требуем взрывной объем от 2.5x для входа!
 ML_CONFIDENCE_THRESHOLD = float(os.getenv("ML_CONFIDENCE_THRESHOLD", "0.68"))
 
-# Элитный юниверс криптовалют (только топ-ликвидность и институциональные пары)
+# Элитный юниверс криптовалют (140+ монет: мажоры, L1/L2, топовые мемкоины, AI, DeFi)
 TOP_CRYPTO_UNIVERSE = [
-    # Топ мажоры и L1 лидеры
+    # Топ-10 Мажоры и L1 гиганты
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT", "ADAUSDT", "TRXUSDT", "AVAXUSDT", "SUIUSDT",
-    # Топ L1/L2 инфраструктура с глубоким стаканом
+    # Топ L1/L2 и инфраструктурные лидеры
     "NEARUSDT", "LINKUSDT", "APTUSDT", "RENDERUSDT", "TIAUSDT", "SEIUSDT", "ENAUSDT", "JUPUSDT", "INJUSDT", "AAVEUSDT",
     "DOTUSDT", "LTCUSDT", "BCHUSDT", "OPUSDT", "ARBUSDT", "FILUSDT", "STXUSDT", "ONDOUSDT", "WLDUSDT", "TAOUSDT", "TONUSDT",
-    # Высоколиквидные мемкоины (стакан от $20M+)
-    "PEPEUSDT", "1000PEPEUSDT", "WIFUSDT", "SHIBUSDT", "BONKUSDT", "FLOKIUSDT", "BOMEUSDT", "POPCATUSDT",
-    # Топ DeFi & AI
-    "FETUSDT", "UNIUSDT", "PENDLEUSDT", "GALAUSDT", "SANDUSDT", "DYDXUSDT", "LDOUSDT", "RAYUSDT"
+    "ATOMUSDT", "XLMUSDT", "ETCUSDT", "KASUSDT", "ALGOUSDT", "THETAUSDT", "KAVAUSDT", "ZECUSDT", "XMRUSDT", "FTMUSDT", "EGLDUSDT",
+    # Высоколиквидные мемкоины и импульсные ракеты
+    "PEPEUSDT", "1000PEPEUSDT", "WIFUSDT", "SHIBUSDT", "1000SHIBUSDT", "BONKUSDT", "1000BONKUSDT", "FLOKIUSDT", "1000FLOKIUSDT",
+    "BOMEUSDT", "MEMEUSDT", "TURBOUSDT", "1000SATSUSDT", "NEIROUSDT", "PENGUUSDT", "POPCATUSDT", "MEWUSDT", "BRETTUSDT",
+    "MOODENGUSDT", "GOATUSDT", "ACTUSDT", "PNUTUSDT", "COWUSDT", "CETUSUSDT", "GRASSUSDT", "DRIFTUSDT", "VIRTUALUSDT", "AIXBTUSDT",
+    "DOGSUSDT", "NOTUSDT", "HMSTRUSDT", "CATIUSDT", "SLERFUSDT",
+    # Топ DeFi, AI и Web3 импульсы
+    "FETUSDT", "UNIUSDT", "PENDLEUSDT", "ZROUSDT", "STRKUSDT", "PYTHUSDT", "JTOUSDT", "BLURUSDT",
+    "GALAUSDT", "SANDUSDT", "MANAUSDT", "AXSUSDT", "CHZUSDT", "DYDXUSDT", "GMXUSDT", "LDOUSDT", "RAYUSDT", "ORDIUSDT",
+    "BEAMXUSDT", "HYPEUSDT", "QNTUSDT", "AINUSDT", "LSKUSDT", "QUSDT", "SOPHUSDT", "INTWUSDT", "BTWUSDT", "PUMPUSDT",
+    "BLESSUSDT", "AIOTUSDT", "MAGMAUSDT", "PARTIUSDT", "ETHFIUSDT", "REZUSDT", "BBUSDT", "IOUSDT", "ZKUSDT", "LISTAUSDT",
+    "WUSDT", "OMUSDT", "KAIAUSDT", "SAGAUSDT", "TNSRUSDT", "SAFEUSDT", "KMNOUSDT", "TRUUSDT", "LQTYUSDT", "SPELLUSDT",
+    "GASUSDT", "ARKUSDT", "LOOMUSDT", "HIFIUSDT", "POLUSDT", "BIGTIMEUSDT", "SUPERUSDT", "ARKMUSDT", "AIUSDT", "NFPUSDT",
+    "GLMUSDT", "ATHUSDT", "ARUSDT", "HNTUSDT", "MOBILEUSDT", "IOTXUSDT", "AIOZUSDT", "RONINUSDT", "METISUSDT", "MANTAUSDT", "SCRUSDT"
 ]
 
 # Черный список: стейблкоины, фиат, хаки и синтетические акции

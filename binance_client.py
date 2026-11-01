@@ -21,6 +21,8 @@ class BinanceClient:
         ]
         self.active_mirror_idx = 0
         self._session: Optional[aiohttp.ClientSession] = None
+        self._book_tickers_cache: Dict[str, Tuple[float, float]] = {}
+        self._book_tickers_cache_time: float = 0.0
 
     async def get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -76,7 +78,11 @@ class BinanceClient:
     async def fetch_top_tickers(self, min_vol_usdt: float = config.MIN_24H_VOLUME_USDT, limit: int = config.SCAN_TICKERS_LIMIT) -> List[Dict[str, Any]]:
         """
         Формирует институциональный торговый радар:
-        Сканирует самые ликвидные и волатильные пары Binance Futures (исключая стейблкоины и синтетические акции).
+        Сканирует самые ликвидные активы и топовые ракеты рынка (Top Gainers + High Volume):
+        1. Топ-Гейнеры (Ракеты!): монеты с максимальным суточным ростом % при наличии реального объема.
+        2. Институциональный объем: тяжеловесы с глубочайшим стаканом.
+        3. Топ-Лузеры: лучшие кандидаты для шорт-пробоев.
+        Исключает стейблкоины, фиат, токенизированные акции и неликвидный спам.
         """
         data = await self._request_with_fallback("ticker24")
         if not data or not isinstance(data, list):
@@ -85,8 +91,9 @@ class BinanceClient:
         excluded = getattr(config, "EXCLUDED_TICKERS", set())
         strict = getattr(config, "STRICT_WHITELIST_ONLY", False)
         whitelist = set(getattr(config, "TOP_CRYPTO_UNIVERSE", []))
+        lev_tokens = ("UPUSDT", "DOWNUSDT", "BEARUSDT", "BULLUSDT")
 
-        selected = []
+        valid_tickers = []
         for item in data:
             if not isinstance(item, dict):
                 continue
@@ -94,6 +101,11 @@ class BinanceClient:
             if not sym.endswith("USDT"):
                 continue
             if sym in excluded:
+                continue
+            if any(sym.endswith(lt) for lt in lev_tokens):
+                continue
+            # Фильтр: только валидные латинские символы и цифры
+            if not all(ord(c) < 128 and (c.isalnum() or c == '_') for c in sym):
                 continue
             if strict and sym not in whitelist:
                 continue
@@ -108,7 +120,7 @@ class BinanceClient:
                 pct = float(item.get("priceChangePercent", 0) or 0)
                 high_p = float(item.get("highPrice", 0) or 0)
                 low_p = float(item.get("lowPrice", 0) or 0)
-                selected.append({
+                valid_tickers.append({
                     "symbol": sym,
                     "price": last_p,
                     "volume_24h": vol,
@@ -119,8 +131,43 @@ class BinanceClient:
             except (ValueError, TypeError):
                 continue
 
-        # Сортируем по суточному объему (самые ликвидные и активные в топе)
-        selected.sort(key=lambda x: x["volume_24h"], reverse=True)
+        if not valid_tickers:
+            return []
+
+        # ДИНАМИЧЕСКИЙ РАДАР (Ракеты + Ликвидность + Шорт-радар):
+        # 1. Топ-Гейнеры (Ракеты прямо сейчас! Самый мощный импульс дня)
+        by_gainers = sorted(valid_tickers, key=lambda x: x["price_change_24h_pct"], reverse=True)
+        # 2. Топ по суточному объёму (Институциональные мажоры и L1/L2 гиганты)
+        by_volume = sorted(valid_tickers, key=lambda x: x["volume_24h"], reverse=True)
+        # 3. Топ-Лузеры (для поиска чистых шорт-пробоев)
+        by_losers = sorted(valid_tickers, key=lambda x: x["price_change_24h_pct"])
+
+        # Комбинируем без дубликатов, гарантируя присутствие ракет и ликвидности
+        combined_dict = {}
+        # Сначала отдаем 35% квоты под ракеты дня (Top Gainers)
+        g_quota = max(15, int(limit * 0.35))
+        for item in by_gainers[:g_quota]:
+            combined_dict[item["symbol"]] = item
+
+        # 45% квоты под топ-ликвидность (Volume Leaders)
+        v_quota = max(25, int(limit * 0.45))
+        for item in by_volume[:v_quota]:
+            combined_dict[item["symbol"]] = item
+
+        # 20% квоты под шорт-радар (Top Losers)
+        l_quota = max(10, int(limit * 0.20))
+        for item in by_losers[:l_quota]:
+            combined_dict[item["symbol"]] = item
+
+        # Если остался лимит, добираем следующими по объему
+        if len(combined_dict) < limit:
+            for item in by_volume:
+                if item["symbol"] not in combined_dict:
+                    combined_dict[item["symbol"]] = item
+                    if len(combined_dict) >= limit:
+                        break
+
+        selected = list(combined_dict.values())
         return selected[:limit]
 
     async def fetch_candles_analysis(self, symbol: str, interval: str = "5m", limit: int = 80) -> Optional[Dict[str, Any]]:
@@ -332,7 +379,41 @@ class BinanceClient:
             "status_str": status_str
         }
 
+    async def fetch_all_book_tickers(self) -> Dict[str, Tuple[float, float]]:
+        """
+        Пакетная загрузка стаканов (best bid/ask) всех пар рынка за 1 быстрый запрос.
+        Кэшируется на 4 секунды, избавляя от сотен повторных HTTP вызовов.
+        """
+        now = time.time()
+        if self._book_tickers_cache and (now - self._book_tickers_cache_time) < 4.0:
+            return self._book_tickers_cache
+
+        data = await self._request_with_fallback("book")
+        if data and isinstance(data, list):
+            res = {}
+            for item in data:
+                if isinstance(item, dict):
+                    sym = item.get("symbol", "")
+                    try:
+                        b = float(item.get("bidPrice", 0) or 0)
+                        a = float(item.get("askPrice", 0) or 0)
+                        if b > 0 and a >= b:
+                            res[sym] = (b, a)
+                    except (ValueError, TypeError):
+                        pass
+            self._book_tickers_cache = res
+            self._book_tickers_cache_time = now
+            return res
+        return self._book_tickers_cache
+
     async def fetch_orderbook_spread(self, symbol: str) -> Tuple[float, float, float]:
+        # Быстрый путь: берем из пакетного кэша стаканов (O(1) память)
+        cache = await self.fetch_all_book_tickers()
+        if symbol in cache:
+            bid, ask = cache[symbol]
+            spread = (ask - bid) / bid if bid > 0 else 0.0
+            return bid, ask, spread
+
         data = await self._request_with_fallback("book", params={"symbol": symbol})
         if not data:
             return 0.0, 0.0, 1.0
