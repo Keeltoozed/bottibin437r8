@@ -34,12 +34,17 @@ class MarketScanner:
 
     async def scan_market_once(self) -> List[Dict[str, Any]]:
         """Один высокоскоростной параллельный проход сканирования рынка."""
-        if portfolio.is_paused:
-            return []
-
         now = time.time()
         now_str = time.strftime("%H:%M:%S")
         portfolio.last_scan_str = now_str
+
+        # Проверка ручной паузы и предохранителя Circuit Breaker
+        pause_until = getattr(portfolio, "pause_until", 0.0)
+        if portfolio.is_paused or now < pause_until:
+            rem = int(pause_until - now)
+            if rem > 0:
+                portfolio.btc_regime_str = f"🛑 Пауза Circuit Breaker ({rem} сек)"
+            return []
 
         # 0. MACRO GUARD: Проверяем состояние Bitcoin (Поводырь рынка и защита от негативных новостей)
         btc_regime = await binance_client.fetch_btc_regime()
@@ -199,6 +204,15 @@ class MarketScanner:
             if side == "LONG" and (trend == "BEARISH" or pct_5m < -0.40 or pct_15m < -0.40):
                 if should_log:
                     print(f"🛑 [ТРЕНД-БЛОК] {sym} LONG ML {int(prob*100)}% отклонен: монета падает (5m: {pct_5m:+.2f}%, 15m: {pct_15m:+.2f}%)", flush=True)
+                continue
+
+            # Защита от распила в боковике BTC (CHOP Shield):
+            # В боковике BTC 80% альткоин-пробоев ложные. Входим ТОЛЬКО при мощном взрыве объема (от 2.5x) и уверенности ML от 75%
+            is_btc_chop = not btc_regime.get("is_dumping", False) and not btc_regime.get("is_pumping", False)
+            chop_min_surge = getattr(config, "CHOP_MIN_VOLUME_SURGE", 2.50)
+            if is_btc_chop and (surge < chop_min_surge or prob < 0.75):
+                if should_log:
+                    print(f"🛑 [CHOP БЛОК] {sym} ({side}) отклонен: BTC в боковике — требуется взрыв объема >={chop_min_surge:.1f}x (факт: {surge:.2f}x) и ML >= 75% (факт: {int(prob*100)}%)", flush=True)
                 continue
 
             candidates_to_eval.append(cand)

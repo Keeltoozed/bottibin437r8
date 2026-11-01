@@ -38,8 +38,10 @@ class PortfolioTracker:
         self.shadow_trades: List[Dict[str, Any]] = []
         self.live_ml_ranking: List[Dict[str, Any]] = []
         self.symbol_lockouts: Dict[str, float] = {}
+        self.consecutive_losses: int = 0
+        self.pause_until: float = 0.0
         self.is_paused = False
-        self.current_leverage = getattr(config, "LEVERAGE", 60)
+        self.current_leverage = getattr(config, "LEVERAGE", 30)
         self.btc_regime_str = "🟡 Анализ рынка BTC..."
         self.last_scan_str = "Ожидание..."
         self.load()
@@ -56,6 +58,8 @@ class PortfolioTracker:
             "recent_evaluations": self.recent_evaluations[-30:],  # последние 30 оценок
             "shadow_trades": self.shadow_trades[-50:],
             "symbol_lockouts": self.symbol_lockouts,
+            "consecutive_losses": self.consecutive_losses,
+            "pause_until": self.pause_until,
             "is_paused": self.is_paused,
             "last_updated": time.time()
         }
@@ -79,8 +83,10 @@ class PortfolioTracker:
                 self.recent_evaluations = state.get("recent_evaluations", [])
                 self.shadow_trades = state.get("shadow_trades", [])
                 self.symbol_lockouts = state.get("symbol_lockouts", {})
+                self.consecutive_losses = state.get("consecutive_losses", 0)
+                self.pause_until = state.get("pause_until", 0.0)
                 self.is_paused = state.get("is_paused", False)
-                self.current_leverage = int(state.get("current_leverage", getattr(config, "LEVERAGE", 60)))
+                self.current_leverage = int(state.get("current_leverage", getattr(config, "LEVERAGE", 30)))
                 config.LEVERAGE = self.current_leverage
                 print(f"✅ Портфель загружен: баланс ${self.cash:.2f}, открытых позиций: {len(self.open_positions)}, плечо: {self.current_leverage}x", flush=True)
         except Exception as e:
@@ -267,11 +273,22 @@ class PortfolioTracker:
             # Защита от повторных сливов (Anti-Revenge Lockout):
             # Если монета выбита по стопу или в минус — 45 минут карантина
             if realized_pnl < 0 or "Stop" in reason:
+                self.consecutive_losses += 1
                 self.symbol_lockouts[symbol] = time.time() + (45 * 60)
                 print(f"🔒 [КАРАНТИН] {symbol} помещен в карантин на 45 минут после стоп-лосса.", flush=True)
+
+                max_streak = getattr(config, "MAX_CONSECUTIVE_LOSSES", 2)
+                if self.consecutive_losses >= max_streak:
+                    pause_sec = getattr(config, "CONSECUTIVE_LOSS_PAUSE_SECONDS", 3600)
+                    self.pause_until = time.time() + pause_sec
+                    print(f"🛑 [CIRCUIT BREAKER] {self.consecutive_losses} убытка подряд! Защита капитала: новые входы заморожены на {pause_sec // 60} минут.", flush=True)
+            elif "TP1" in reason or "TP2" in reason or realized_pnl > 0:
+                self.consecutive_losses = 0
         else:
             pos["margin_usdt"] -= closed_margin
             pos["coins_qty"] *= (1.0 - partial_pct)
+            if "TP1" in reason or "TP2" in reason or realized_pnl > 0:
+                self.consecutive_losses = 0
 
         self.save()
 

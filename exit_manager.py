@@ -103,27 +103,7 @@ class ExitManager:
                     # ЛОГИКА ВЫХОДА ДЛЯ LONG
                     # ==========================================================
                     if side == "LONG":
-                        # 0. РАННИЙ МЯГКИЙ БЕЗУБЫТОК (Soft Breakeven):
-                        # При прохождении 45% пути к TP1 (+35%..+40% ROI) переносим стоп в безубыток (+0.08% для покрытия комиссий)
-                        be_ratio = getattr(config, "BREAKEVEN_TRIGGER_RATIO", 0.45)
-                        dist_tp1 = tp1 - entry
-                        if not pos.get("breakeven_set") and not pos["tp1_hit"] and dist_tp1 > 0:
-                            if (cur_price - entry) >= (dist_tp1 * be_ratio):
-                                pos["wick_sl"] = round(entry * 1.0008, 6)
-                                pos["breakeven_set"] = True
-                                portfolio.save()
-                                print(f"🛡️ [SOFT BREAKEVEN] {sym} (LONG): Пройдено {int(be_ratio*100)}% до TP1 (+{pos['pnl_pct']:.1f}% ROI). Стоп в безубытке (${pos['wick_sl']:.4f}). Риск обнулен!", flush=True)
-
-                        # 0.1 МАКРО-ЗАЩИТА ОТ ДАМПА BTC:
-                        if btc_reg.get("is_dumping") and not pos.get("breakeven_set") and pos.get("pnl_pct", 0.0) < -12.0:
-                            portfolio.close_position(
-                                sym, cur_price,
-                                reason=f"🚨 BTC Dump Cut ({pos['pnl_pct']:+.1f}%): спасение депозита при сливе BTC"
-                            )
-                            print(f"🚨 [BTC ESCAPE] {sym} LONG закрыт досрочно: BTC начал падать, предотвращен полный стоп-лосс!", flush=True)
-                            continue
-
-                        # 1. СТОП-ЛОСС ПОД ФИТИЛЬ (ИЛИ БЕЗУБЫТОК ПОСЛЕ TP1 / SOFT BE)
+                        # 1. СТОП-ЛОСС ПОД ФИТИЛЬ (ИЛИ БЕЗУБЫТОК ПОСЛЕ ВЗЯТИЯ TP1)
                         if cur_price <= wick_sl:
                             reason_label = (
                                 f"🛡️ Breakeven Exit ({pos['pnl_pct']:+.1f}%)"
@@ -139,15 +119,15 @@ class ExitManager:
                         # 2. ТЕЙК-ПРОФИТ 1 (TP1): Фиксация 50% объема в плюс
                         if not pos["tp1_hit"] and cur_price >= tp1:
                             pos["tp1_hit"] = True
-                            # После взятия крупного профита TP1 переносим стоп на остаток в гарантированный плюс (+0.2%)
-                            pos["wick_sl"] = round(entry * 1.002, 6)
+                            # После взятия крупного профита TP1 переносим стоп на остаток в гарантированный плюс (+0.25%)
+                            pos["wick_sl"] = round(entry * 1.0025, 6)
                             pos["breakeven_set"] = True
                             portfolio.close_position(
                                 sym, cur_price,
                                 reason=f"🎯 TP1 Hit (+{pos['pnl_pct']:.1f}%): Фиксация 50%",
                                 partial_pct=0.50
                             )
-                            print(f"🎯 [TP1 HIT] {sym} (LONG): Зафиксировано 50% прибыли! Стоп на остаток в плюсе (${pos['wick_sl']:.4f}).", flush=True)
+                            print(f"🎯 [TP1 HIT] {sym} (LONG): Зафиксировано 50% прибыли! Стоп на остаток перенесен в плюс (+0.25%).", flush=True)
                             continue
 
                         # 3. ТЕЙК-ПРОФИТ 2 (TP2): Фиксация еще 25% объема
@@ -158,7 +138,7 @@ class ExitManager:
                                 reason=f"🎯 TP2 Hit (+{pos['pnl_pct']:.1f}%): Фиксация 25%",
                                 partial_pct=0.50
                             )
-                            print(f"🎯 [TP2 HIT] {sym} (LONG): Зафиксировано еще 25% на цели 3R!", flush=True)
+                            print(f"🎯 [TP2 HIT] {sym} (LONG): Зафиксировано еще 25% на цели TP2!", flush=True)
                             continue
 
                         # 4. ТРЕЙЛИНГ-СТОП ДЛЯ ОСТАТКА (активен только после взятия TP1)
@@ -180,26 +160,7 @@ class ExitManager:
                     # ЛОГИКА ВЫХОДА ДЛЯ SHORT
                     # ==========================================================
                     else:
-                        # 0. РАННИЙ МЯГКИЙ БЕЗУБЫТОК (Soft Breakeven):
-                        be_ratio = getattr(config, "BREAKEVEN_TRIGGER_RATIO", 0.45)
-                        dist_tp1 = entry - tp1
-                        if not pos.get("breakeven_set") and not pos["tp1_hit"] and dist_tp1 > 0:
-                            if (entry - cur_price) >= (dist_tp1 * be_ratio):
-                                pos["wick_sl"] = round(entry * 0.9992, 6)
-                                pos["breakeven_set"] = True
-                                portfolio.save()
-                                print(f"🛡️ [SOFT BREAKEVEN] {sym} (SHORT): Пройдено {int(be_ratio*100)}% до TP1 (+{pos['pnl_pct']:.1f}% ROI). Стоп в безубытке (${pos['wick_sl']:.4f}). Риск обнулен!", flush=True)
-
-                        # 0.1 МАКРО-ЗАЩИТА ОТ ПАМПА BTC:
-                        if btc_reg.get("is_pumping") and not pos.get("breakeven_set") and pos.get("pnl_pct", 0.0) < -12.0:
-                            portfolio.close_position(
-                                sym, cur_price,
-                                reason=f"🚨 BTC Pump Cut ({pos['pnl_pct']:+.1f}%): спасение депозита при пампе BTC"
-                            )
-                            print(f"🚨 [BTC ESCAPE] {sym} SHORT закрыт досрочно: BTC начал расти, предотвращен полный стоп-лосс!", flush=True)
-                            continue
-
-                        # 1. СТОП-ЛОСС НАД ФИТИЛЕМ (ИЛИ БЕЗУБЫТОК ПОСЛЕ TP1 / SOFT BE)
+                        # 1. СТОП-ЛОСС НАД ФИТИЛЕМ (ИЛИ БЕЗУБЫТОК ПОСЛЕ TP1)
                         if cur_price >= wick_sl:
                             reason_label = (
                                 f"🛡️ Breakeven Exit ({pos['pnl_pct']:+.1f}%)"
@@ -215,15 +176,15 @@ class ExitManager:
                         # 2. ТЕЙК-ПРОФИТ 1 (TP1): Фиксация 50% объема (цена упала до tp1)
                         if not pos["tp1_hit"] and cur_price <= tp1:
                             pos["tp1_hit"] = True
-                            # После взятия крупного профита TP1 переносим стоп на остаток в гарантированный плюс (+0.2% ниже входа)
-                            pos["wick_sl"] = round(entry * 0.998, 6)
+                            # После взятия крупного профита TP1 переносим стоп на остаток в гарантированный плюс (-0.25% ниже входа)
+                            pos["wick_sl"] = round(entry * 0.9975, 6)
                             pos["breakeven_set"] = True
                             portfolio.close_position(
                                 sym, cur_price,
                                 reason=f"🎯 TP1 Hit (+{pos['pnl_pct']:.1f}%): Фиксация 50%",
                                 partial_pct=0.50
                             )
-                            print(f"🎯 [TP1 HIT] {sym} (SHORT): Зафиксировано 50% прибыли! Стоп на остаток в плюсе (${pos['wick_sl']:.4f}).", flush=True)
+                            print(f"🎯 [TP1 HIT] {sym} (SHORT): Зафиксировано 50% прибыли! Стоп на остаток в плюсе (+0.25%).", flush=True)
                             continue
 
                         # 3. ТЕЙК-ПРОФИТ 2 (TP2): Фиксация еще 25% объема
@@ -234,7 +195,7 @@ class ExitManager:
                                 reason=f"🎯 TP2 Hit (+{pos['pnl_pct']:.1f}%): Фиксация 25%",
                                 partial_pct=0.50
                             )
-                            print(f"🎯 [TP2 HIT] {sym} (SHORT): Зафиксировано еще 25% на цели 3R!", flush=True)
+                            print(f"🎯 [TP2 HIT] {sym} (SHORT): Зафиксировано еще 25% на цели TP2!", flush=True)
                             continue
 
                         # 4. ТРЕЙЛИНГ-СТОП ДЛЯ ШОРТА (следует сверху за локальным минимумом, активен после TP1)

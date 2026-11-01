@@ -123,7 +123,7 @@ class BinanceClient:
         selected.sort(key=lambda x: x["volume_24h"], reverse=True)
         return selected[:limit]
 
-    async def fetch_candles_analysis(self, symbol: str, interval: str = "5m", limit: int = 30) -> Optional[Dict[str, Any]]:
+    async def fetch_candles_analysis(self, symbol: str, interval: str = "5m", limit: int = 80) -> Optional[Dict[str, Any]]:
         """
         Запрашивает свечи и производит институциональный технический расчет:
         - Всплеск объема (Volume Surge)
@@ -132,6 +132,7 @@ class BinanceClient:
         - Локальный минимум/максимум под фитилем (Wick Stop Loss)
         - Индекс относительной силы RSI-14
         - Экспоненциальные скользящие средние EMA-9 и EMA-21 (Trend Alignment)
+        - Передает список свечей для квантового инференса в QuantMLEngine
         """
         raw_candles = await self._request_with_fallback("klines", params={"symbol": symbol, "interval": interval, "limit": limit})
         if not raw_candles or len(raw_candles) < 8:
@@ -141,6 +142,7 @@ class BinanceClient:
         for c in raw_candles:
             try:
                 candles.append({
+                    "time": int(c[0]),
                     "open": float(c[1]),
                     "high": float(c[2]),
                     "low": float(c[3]),
@@ -281,7 +283,8 @@ class BinanceClient:
             "ema9": ema9,
             "ema21": ema21,
             "trend": trend,
-            "atr14_pct": atr14_pct
+            "atr14_pct": atr14_pct,
+            "candles": candles
         }
 
     async def fetch_btc_regime(self) -> Dict[str, Any]:

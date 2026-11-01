@@ -151,7 +151,7 @@ with st.sidebar:
     st.markdown("### 🎯 Параметры стратегии ($20)")
     
     # Выбор кредитного плеча
-    lev_options = [60, 75, 50, 35, 25, 20, 10, 5]
+    lev_options = [30, 25, 35, 50, 60, 75, 20, 10]
     cur_lev = getattr(portfolio, "current_leverage", config.LEVERAGE)
     cur_idx = lev_options.index(cur_lev) if cur_lev in lev_options else 0
     chosen_leverage = st.selectbox("⚡ Кредитное плечо (для новых сделок):", lev_options, index=cur_idx)
@@ -166,24 +166,24 @@ with st.sidebar:
     risk_mode = st.radio(
         "Режим доходности:",
         [
-            "⚡ Оптимал 60x (Высокий профит +93%, сниженная просадка)",
-            "🔥 Турбо 75x (Максимальный разгон)",
-            "🎯 Стандарт 25x (Консервативный разгон)"
+            "⚡ Институционал 30x (Рекомендуемый: макс винрейт, комиссии -50%)",
+            "🔥 Турбо 60x (Высокий разгон)",
+            "🎯 Стандарт 20x (Сверхбезопасный)"
         ],
         index=0
     )
-    if "Оптимал 60x" in risk_mode:
-        config.COMPOUND_RISK_PCT = 0.10
-        config.MAX_RISK_PER_TRADE_USD = 1.50
-        config.TRADE_AMOUNT_USDT = 6.0
+    if "Институционал" in risk_mode:
+        config.COMPOUND_RISK_PCT = 0.08
+        config.MAX_RISK_PER_TRADE_USD = 1.20
+        config.TRADE_AMOUNT_USDT = 5.0
     elif "Турбо" in risk_mode:
         config.COMPOUND_RISK_PCT = 0.10
         config.MAX_RISK_PER_TRADE_USD = 1.50
-        config.TRADE_AMOUNT_USDT = 6.0
+        config.TRADE_AMOUNT_USDT = 5.0
     else:
         config.COMPOUND_RISK_PCT = 0.05
         config.MAX_RISK_PER_TRADE_USD = 1.00
-        config.TRADE_AMOUNT_USDT = 6.0
+        config.TRADE_AMOUNT_USDT = 5.0
 
     st.text(f"Плечо для новых входов: {portfolio.current_leverage}x 🚀")
     current_risk_usd = max(portfolio.cash * config.COMPOUND_RISK_PCT, config.MAX_RISK_PER_TRADE_USD) if config.ENABLE_COMPOUNDING else config.MAX_RISK_PER_TRADE_USD
@@ -203,6 +203,9 @@ with st.sidebar:
         portfolio.open_positions.clear()
         portfolio.trade_history.clear()
         portfolio.symbol_lockouts.clear()
+        portfolio.consecutive_losses = 0
+        portfolio.pause_until = 0.0
+        portfolio.current_leverage = getattr(config, "LEVERAGE", 30)
         portfolio.save()
         st.success("Баланс сброшен до $20.00!")
         st.rerun()
