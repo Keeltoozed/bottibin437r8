@@ -198,11 +198,11 @@ with st.sidebar:
 
     est_risk_usd = round(max(15.0, portfolio.get_portfolio_summary()["equity"]) * config.RISK_PER_TRADE_PCT, 2)
     st.text(f"Плечо входов: {portfolio.current_leverage}x | Риск 1R: ${est_risk_usd:.2f} ({config.RISK_PER_TRADE_PCT*100:.1f}%)")
-    st.text(f"Вход: Пробой 20 баров + RVOL ≥ {config.MIN_5M_VOLUME_SURGE_RATIO:.2f}x + CLV ≥ {int(config.MIN_CLOSE_STRENGTH*100)}%")
+    st.text(f"Вход: 15m MTF Trend + Пробой 20 баров + RVOL ≥ {config.MIN_5M_VOLUME_SURGE_RATIO:.2f}x")
     st.text(f"Выход: 30% (1.5R) / 30% (3R) / 40% (2.5×ATR Трейл)")
-    st.text(f"Time-Stop: {config.TIME_STOP_MINUTES} мин без импульса | Стоп: 0.5%..2.2%")
+    st.text(f"Выход из застоя: 18 мин скретч | 35 мин Time-Stop")
     st.text(f"Лимит стопов: Макс {config.DAILY_LOSS_LIMIT} в день ({portfolio.daily_losses_count}/{config.DAILY_LOSS_LIMIT})")
-    st.text(f"Радар рынка: 🚀 {config.SCAN_TICKERS_LIMIT} пар (24h High/Low + Объем)")
+    st.text(f"Радар рынка: 🚀 {config.SCAN_TICKERS_LIMIT} пар Binance (MTF + Ликвидность)")
     st.text(f"Модель Groq: {config.GROQ_PRIMARY_MODEL}")
     has_key = bool(config.GROQ_API_KEY)
     st.text(f"ИИ Статус: {'🟢 Активен (Groq Cloud)' if has_key else '🟡 Резервный (Institutional)'}")
@@ -234,7 +234,7 @@ st.title("🚀 Binance Autonomous Groq Trader (Rocket Hunter Engine)")
 last_scan_info = getattr(portfolio, "last_scan_str", "Ожидание...")
 btc_regime_info = getattr(portfolio, "btc_regime_str", "🟡 Анализ Bitcoin...")
 st.caption(f"🌍 **Макро-щит (Защита от пролива/выноса BTC):** {btc_regime_info}")
-st.caption(f"Конвейер Structural Rocket Hunter: Радар {config.SCAN_TICKERS_LIMIT} пар → Пробой 20 баров + RVOL ≥ {config.MIN_5M_VOLUME_SURGE_RATIO}x → ML + Groq AI → Выход 30%/30%/40% ATR Трейл | Режим: {'🧪 Paper Trading' if config.PAPER_TRADING else '⚡ Live Trading'} | Последний скан: {last_scan_info}")
+st.caption(f"Конвейер Structural Rocket Hunter: Радар {config.SCAN_TICKERS_LIMIT} пар Binance → 15m MTF Guard + Пробой 20 баров + RVOL ≥ {config.MIN_5M_VOLUME_SURGE_RATIO}x → ML + Groq AI → Выход 30%/30%/40% ATR Трейл + 18m Скретч | Режим: {'🧪 Paper Trading' if config.PAPER_TRADING else '⚡ Live Trading'} | Последний скан: {last_scan_info}")
 
 # Оповещение и ручной сброс Circuit Breaker (если включен)
 if getattr(config, "ENABLE_CIRCUIT_BREAKER", False) and summary["circuit_breaker"]:

@@ -91,11 +91,11 @@ class BinanceClient:
             return []
 
         # Адаптация порога ликвидности под активное зеркало:
-        # На fapi (Perpetual Futures) $8M отбирает ~120 пар; на vision/spot $650K Spot USDT эквивалентны ~$8M Futures!
+        # На fapi (Perpetual Futures) $5M отбирает 200+ пар; на vision/spot $350K Spot USDT эквивалентны ~$5M Futures!
         is_spot_mirror = (self.active_mirror_name != "fapi")
-        if is_spot_mirror and min_vol_usdt >= 2_000_000.0:
-            spot_floor = float(getattr(config, "SPOT_MIRROR_MIN_VOL_USDT", 650_000.0))
-            effective_min_vol = max(spot_floor, min_vol_usdt * 0.08)
+        if is_spot_mirror and min_vol_usdt >= 1_500_000.0:
+            spot_floor = float(getattr(config, "SPOT_MIRROR_MIN_VOL_USDT", 350_000.0))
+            effective_min_vol = max(spot_floor, min_vol_usdt * 0.07)
         else:
             effective_min_vol = min_vol_usdt
 
@@ -104,6 +104,7 @@ class BinanceClient:
         strict = getattr(config, "STRICT_WHITELIST_ONLY", False)
         whitelist = set(getattr(config, "TOP_CRYPTO_UNIVERSE", []))
         max_24h_cap = float(getattr(config, "MAX_24H_CHANGE_CAP", 38.0))
+        min_trades = int(getattr(config, "MIN_24H_TRADES_COUNT", 2500))
         lev_tokens = ("UPUSDT", "DOWNUSDT", "BEARUSDT", "BULLUSDT")
         fiat_commodities = {"XAU", "XAUT", "PAXG", "XAG", "EUR", "EURI", "AEUR", "GBP", "AUD", "BRL", "TRY", "JPY"}
         real_crypto_b = {"BNB", "ARB", "SHIB", "1000SHIB", "TRB", "BB", "CKB", "YB", "PHB", "AMB"}
@@ -135,6 +136,11 @@ class BinanceClient:
                 # Защита от делистнутых/архивных пар на data-api.binance.vision (closeTime старше 5 минут)
                 close_time_ms = int(item.get("closeTime", 0) or 0)
                 if close_time_ms > 0 and (now_ms - close_time_ms) > 300_000:
+                    continue
+
+                # Фильтр минимального количества сделок за 24ч (отсев монет-зомби с искусственным объемом)
+                cnt = int(item.get("count", 0) or 0)
+                if cnt > 0 and cnt < min_trades:
                     continue
 
                 vol = float(item.get("quoteVolume", 0) or 0)
@@ -339,6 +345,30 @@ class BinanceClient:
             rs = avg_gain / avg_loss
             rsi = round(100.0 - (100.0 / (1.0 + rs)), 1)
 
+        # 15m Multi-Timeframe (MTF) Trend Analysis (строго по закрытым 5m барам)
+        c15_closes = [closed_candles[i]["close"] for i in range(2, len(closed_candles), 3)]
+        if len(c15_closes) >= 7:
+            ema9_15m = round(calc_ema(c15_closes, 9), 6)
+            ema21_15m = round(calc_ema(c15_closes, 21) if len(c15_closes) >= 21 else calc_ema(c15_closes, len(c15_closes)), 6)
+            cur_15m = c15_closes[-1]
+            if cur_15m >= ema21_15m * 0.998 and ema9_15m >= ema21_15m * 0.998:
+                trend_15m = "BULL"
+            elif cur_15m <= ema21_15m * 1.002 and ema9_15m <= ema21_15m * 1.002:
+                trend_15m = "BEAR"
+            else:
+                trend_15m = "CHOP"
+        else:
+            trend_15m = "CHOP"
+            ema9_15m = ema9
+            ema21_15m = ema21
+
+        is_mtf_long_ok = (trend_15m in ("BULL", "CHOP"))
+        is_mtf_short_ok = (trend_15m in ("BEAR", "CHOP"))
+
+        # 3-свечной кумулятивный приток объема (Volume Persistence за последние 15 минут)
+        prior_3_vols = [c["quote_vol"] for c in closed_candles[-3:]]
+        v3_surge = round((sum(prior_3_vols) / 3.0) / max(avg_vol, 1.0), 2)
+
         # Структурные уровни пробоя Дончиана (предшествующие закрытые бары БЕЗ сигнальной свечи)
         lookback = int(getattr(config, "BREAKOUT_LOOKBACK_BARS", 20))
         fast_lb = int(getattr(config, "FAST_IGNITION_LOOKBACK_BARS", 12))
@@ -419,6 +449,11 @@ class BinanceClient:
             "short_sl_pct_distance": true_short_sl_pct,
             "pct_5m": pct_5m,
             "pct_15m": pct_15m,
+            "trend_15m": trend_15m,
+            "is_mtf_long_ok": is_mtf_long_ok,
+            "is_mtf_short_ok": is_mtf_short_ok,
+            "v3_surge": v3_surge,
+            "avg_5m_quote_vol": round(avg_vol, 1),
             "last_quote_volume": closed_signal_c["quote_vol"],
             "rsi": rsi,
             "ema9": ema9,

@@ -124,19 +124,29 @@ class MarketScanner:
                 dist_s_pct = analysis.get("dist_to_breakout_short_pct", 1.0)
 
                 min_req_impulse = max(config.MIN_5M_PRICE_IMPULSE_PCT, atr_pct * 100.0 * 0.90)
+                avg_5m_qvol = float(analysis.get("avg_5m_quote_vol", 0.0) or 0.0)
+                v3_surge = float(analysis.get("v3_surge", 1.0) or 1.0)
+                min_avg_vol = float(getattr(config, "MIN_AVG_5M_QUOTE_VOL", 2500.0))
+                min_v3 = float(getattr(config, "MIN_V3_VOLUME_PERSISTENCE", 1.15))
+                is_mtf_long = analysis.get("is_mtf_long_ok", True) if getattr(config, "ENABLE_MTF_15M_FILTER", True) else True
+                is_mtf_short = analysis.get("is_mtf_short_ok", True) if getattr(config, "ENABLE_MTF_15M_FILTER", True) else True
 
                 # ==============================================================
                 # 4. ПРАВИЛА ВХОДА STRUCTURAL ROCKET HUNTER (LONG & SHORT)
                 # - Подтвержденный пробой 20-барного уровня Дончиана (или 12-барный Ignition при RVOL >= 2.8x)
-                # - Реальный взрыв объема RVOL >= 1.80x
+                # - Реальный взрыв объема RVOL >= 1.80x и 15m приток объема v3 >= 1.15x
+                # - Минимальная ликвидность свечи (avg 5m >= $2500, отсев монет-призраков)
+                # - 15m MTF Guard: запрет лонга в падающий рынок, запрет шорта в растущий
                 # - Сильное закрытие свечи у экстремума (CLV >= 0.68, Marubozu проходят на 100%!)
                 # - Встречный фитиль <= 28% (защита от Bull/Bear Trap)
-                # - Выравнивание EMA9/EMA21 без поздней перерастяжки (>3.5% от EMA21 отсекается)
                 # - Честный структурный стоп 0.50%..2.20%
                 # ==============================================================
                 tech_long = (
                     analysis.get("is_breakout_long", False) and
                     surge >= config.MIN_5M_VOLUME_SURGE_RATIO and
+                    v3_surge >= min_v3 and
+                    avg_5m_qvol >= min_avg_vol and
+                    is_mtf_long and
                     pct_5m >= min_req_impulse and
                     clv_long >= config.MIN_CLOSE_STRENGTH and
                     upper_wick <= config.WICK_EXHAUSTION_MAX and
@@ -153,6 +163,9 @@ class MarketScanner:
                     config.ENABLE_SHORT and
                     analysis.get("is_breakout_short", False) and
                     surge >= config.MIN_5M_VOLUME_SURGE_RATIO and
+                    v3_surge >= min_v3 and
+                    avg_5m_qvol >= min_avg_vol and
+                    is_mtf_short and
                     pct_5m <= -min_req_impulse and
                     clv_short >= config.MIN_CLOSE_STRENGTH and
                     lower_wick <= config.WICK_EXHAUSTION_MAX and
@@ -181,8 +194,16 @@ class MarketScanner:
                     if (tech_long and not is_long) or (tech_short and not is_short):
                         w_status = "🛑 Заблокировано импульсом BTC"
                     elif brk_flag:
-                        if surge < config.MIN_5M_VOLUME_SURGE_RATIO:
+                        if watch_side == "LONG" and not is_mtf_long:
+                            w_status = "⏳ 15m тренд медвежий (против тренда)"
+                        elif watch_side == "SHORT" and not is_mtf_short:
+                            w_status = "⏳ 15m тренд бычий (против тренда)"
+                        elif avg_5m_qvol < min_avg_vol:
+                            w_status = f"💤 Тонкая монета (${avg_5m_qvol:.0f} < ${min_avg_vol:.0f})"
+                        elif surge < config.MIN_5M_VOLUME_SURGE_RATIO:
                             w_status = f"📊 Пробой есть, ждем RVOL ({surge:.1f}x < {config.MIN_5M_VOLUME_SURGE_RATIO:.1f}x)"
+                        elif v3_surge < min_v3:
+                            w_status = f"📊 Одиночный всплеск (RVOL 3b: {v3_surge:.2f}x < {min_v3:.2f}x)"
                         elif abs(pct_5m) < min_req_impulse:
                             w_status = f"⚡ Слабый импульс ({pct_5m:+.2f}% < {min_req_impulse:.2f}%)"
                         elif clv_w < config.MIN_CLOSE_STRENGTH or wick_w > config.WICK_EXHAUSTION_MAX:

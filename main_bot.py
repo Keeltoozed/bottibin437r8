@@ -40,12 +40,12 @@ async def heartbeat_loop():
 async def start_autonomous_bot():
     """
     Запуск автономного конвейера Structural Rocket Hunter:
-      1. Сканер пробоев (115+ ликвидных пар -> 20-бар пробой + RVOL >= 1.8x -> ML + Groq AI)
-      2. Асимметричный менеджер выхода (30% 1.5R / 30% 3R / 40% ATR Трейл + 35m Time-Stop)
+      1. Сканер пробоев (200+ ликвидных пар Binance -> 20-бар пробой + 15m MTF Guard + RVOL >= 1.8x -> ML + Groq AI)
+      2. Асимметричный менеджер выхода (30% 1.5R / 30% 3R / 40% ATR Трейл + 18m Скретч + 35m Time-Stop)
       3. Heartbeat-монитор
     """
     print("=" * 70, flush=True)
-    print("🚀 BINANCE AUTONOMOUS GROQ TRADER (STRUCTURAL ROCKET HUNTER)", flush=True)
+    print("🚀 BINANCE AUTONOMOUS GROQ TRADER (STRUCTURAL ROCKET HUNTER 200+ UNIVERSE)", flush=True)
     print(f"💰 Стартовый банкролл: ${portfolio.cash:.2f} USDT", flush=True)
     risk_pct = getattr(config, "RISK_PER_TRADE_PCT", 0.025) * 100.0
     est_1r = portfolio.cash * getattr(config, "RISK_PER_TRADE_PCT", 0.025)
@@ -53,7 +53,7 @@ async def start_autonomous_bot():
     groq_model = getattr(config, "GROQ_PRIMARY_MODEL", "openai/gpt-oss-120b")
     paper_mode = getattr(config, "PAPER_TRADING", True)
     print(f"🎯 Фиксированный риск 1R: {risk_pct:.1f}% (~${est_1r:.2f}) | Плечо: {leverage_val}x | Макс позиций: {config.MAX_CONCURRENT_POSITIONS}", flush=True)
-    print(f"📡 Вход: Пробой {config.BREAKOUT_LOOKBACK_BARS} баров + RVOL >= {config.MIN_5M_VOLUME_SURGE_RATIO}x + CLV >= {config.MIN_CLOSE_STRENGTH}", flush=True)
+    print(f"📡 Радар рынка: до {config.SCAN_TICKERS_LIMIT} пар (24h Volume + 15m MTF Guard + RVOL >= {config.MIN_5M_VOLUME_SURGE_RATIO}x)", flush=True)
     print(f"🤖 Groq Модель: {groq_model}", flush=True)
     print(f"🧪 Режим: {'PAPER TRADING (Симуляция на реальных котировках)' if paper_mode else 'LIVE TRADING'}", flush=True)
     print("=" * 70, flush=True)

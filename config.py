@@ -94,14 +94,19 @@ RUNNER_ATR_MULT = float(os.getenv("RUNNER_ATR_MULT", "2.5")) # Chandelier ATR т
 RUNNER_ACTIVATION_R = float(os.getenv("RUNNER_ACTIVATION_R", "2.2"))  # Включение подтяжки трейла от +2.2R (не душит откат после TP1!)
 TRAILING_STOP_PCT = float(os.getenv("TRAILING_STOP_PCT", "0.013"))    # Минимальная дистанция трейла 1.3% против рыночного шума
 TIME_STOP_MINUTES = int(os.getenv("TIME_STOP_MINUTES", "35"))         # Time-Stop: выход через 35 мин, если импульс затух (< +0.45R без TP1)
+STAGNATION_EXIT_MINUTES = int(os.getenv("STAGNATION_EXIT_MINUTES", "18"))  # Быстрый скретч-выход через 18 мин, если монета застряла в мертвом флэте
 TAKER_FEE_PCT = float(os.getenv("TAKER_FEE_PCT", "0.0005"))           # 0.05% биржевой сбор тейкера
 
 # ==============================================================================
-# 6. MARKET SCANNER & LIQUID ROCKET UNIVERSE
+# 6. MARKET SCANNER & EXPANDED LIQUID BINANCE UNIVERSE (200+ ПАР)
 # ==============================================================================
-MIN_24H_VOLUME_USDT = max(float(os.getenv("MIN_24H_VOLUME_USDT", "8000000")), 8000000.0)  # Строгий пол $8M на fapi (авто-масштаб $650K на Spot/Vision зеркале)
-SPOT_MIRROR_MIN_VOL_USDT = float(os.getenv("SPOT_MIRROR_MIN_VOL_USDT", "650000"))         # Эквивалент ~$8M фьючерсного объема на зеркале data-api.binance.vision (US Render)
-SCAN_TICKERS_LIMIT = min(int(os.getenv("SCAN_TICKERS_LIMIT", "115")), 120)                # Оптимальный радар до 120 пар без риска бана 429
+MIN_24H_VOLUME_USDT = max(float(os.getenv("MIN_24H_VOLUME_USDT", "5000000")), 5000000.0)  # $5M на fapi Perpetual
+SPOT_MIRROR_MIN_VOL_USDT = float(os.getenv("SPOT_MIRROR_MIN_VOL_USDT", "350000"))         # $350K Spot USDT на vision (охват 200+ реальных пар Binance)
+SCAN_TICKERS_LIMIT = min(int(os.getenv("SCAN_TICKERS_LIMIT", "220")), 250)                # Охват до 220-250 крипто-пар Binance
+MIN_24H_TRADES_COUNT = int(os.getenv("MIN_24H_TRADES_COUNT", "2500"))                      # Минимум 2500 сделок в сутки (защита от монет-призраков)
+MIN_AVG_5M_QUOTE_VOL = float(os.getenv("MIN_AVG_5M_QUOTE_VOL", "2500.0"))                 # Минимум $2500 средний объем 5m свечи (отсев $178 свечей как на HEMI)
+MIN_V3_VOLUME_PERSISTENCE = float(os.getenv("MIN_V3_VOLUME_PERSISTENCE", "1.15"))          # Кумулятивный приток объема за 3 свечи (15 мин) >= 1.15x
+ENABLE_MTF_15M_FILTER = os.getenv("ENABLE_MTF_15M_FILTER", "true").lower() == "true"       # 15m Multi-Timeframe Guard (защита от лонгов против падающего рынка)
 MAX_24H_CHANGE_CAP = float(os.getenv("MAX_24H_CHANGE_CAP", "38.0"))       # Отсев перегретых +40% пампов на стадии раздачи
 STRICT_WHITELIST_ONLY = os.getenv("STRICT_WHITELIST_ONLY", "false").lower() == "true"
 CHOP_MIN_VOLUME_SURGE = float(os.getenv("CHOP_MIN_VOLUME_SURGE", "1.50"))
