@@ -88,13 +88,14 @@ async def run_suite():
     assert len(portfolio.trade_history) == 0, "Частичный тейк НЕ должен раздувать историю сделок до закрытия позиции!"
     assert "PEPEUSDT" in portfolio.open_positions
 
-    # Шаг 2: TP2 (+3.6% = 3.0R) -> закрываем еще 30% от исходной (42.86% от остатка), оставляя 40% ранера
-    portfolio.close_position("PEPEUSDT", 10.36, "🎯 TP2 3.0R: еще 30% в кэш", partial_pct=config.TP2_PARTIAL_OF_REMAINING)
+    # Шаг 2: TP2 (+3.6% = 3.0R) -> закрываем еще 25% от исходной, оставляя 50% ранера
+    portfolio.close_position("PEPEUSDT", 10.36, "🎯 TP2 3.0R: еще 25% в кэш", partial_pct=config.TP2_PARTIAL_OF_REMAINING)
     assert len(portfolio.trade_history) == 0
     rem_mg = portfolio.open_positions["PEPEUSDT"]["margin_usdt"]
-    assert abs(rem_mg - 3.80 * 0.40) < 0.02, f"Доля ранера должна быть 40% ($1.52), получено ${rem_mg:.2f}"
+    expected_runner_mg = 3.80 * (1.0 - config.TP1_PARTIAL_PCT - (1.0 - config.TP1_PARTIAL_PCT) * config.TP2_PARTIAL_OF_REMAINING)
+    assert abs(rem_mg - expected_runner_mg) < 0.05, f"Доля ранера должна быть ${expected_runner_mg:.2f}, получено ${rem_mg:.2f}"
 
-    # Шаг 3: Ранер 40% ловит ракету +7.5% ($10.75) и закрывается по ATR-трейлингу!
+    # Шаг 3: Ранер ловит ракету +7.5% ($10.75) и закрывается по ATR-трейлингу!
     portfolio.close_position("PEPEUSDT", 10.75, "🚀 ATR Runner Trail", partial_pct=1.0)
     assert "PEPEUSDT" not in portfolio.open_positions
     assert len(portfolio.trade_history) == 1, "Вся позиция (TP1+TP2+Runner) должна записаться ровно как 1 сделка!"
@@ -109,18 +110,18 @@ async def run_suite():
     assert portfolio.daily_losses_count == 0, "Околонулевой скретч по Time-Stop не должен тратить дневной лимит стопов!"
     print(f"  ✓ Time-Stop закрыл вялую сделку (${portfolio.trade_history[-1]['realized_pnl']:+.2f}) без срабатывания аварийного лимита стопов.")
 
-    # 5. ТЕСТ CIRCUIT BREAKER НА РЕАЛЬНЫХ СТОП-ЛОССАХ
-    print("\n[ТЕСТ 5/6] Проверка защиты капитала при 2 реальных стоп-лоссах подряд...")
+    # 5. ТЕСТ РЕЖИМА НЕПРЕРЫВНОЙ ТОРГОВЛИ БЕЗ ЗАМОРОЗОК (CIRCUIT BREAKER = FALSE)
+    print("\n[ТЕСТ 5/6] Проверка непрерывной торговли без заморозок (Circuit Breaker отключен)...")
     portfolio.consecutive_losses = 0
     portfolio.pause_until = 0.0
-    portfolio.open_position(" LOSS1USDT", "LONG", 1.0, 4.0, 0.988, 1.018, 1.036, "SL1", 12)
+    portfolio.open_position(" LOSS1USDT", "LONG", 1.0, 4.0, 0.988, 1.018, 1.036, "SL1", 15)
     portfolio.close_position(" LOSS1USDT", 0.988, "🛑 Structural Stop", partial_pct=1.0)
     assert portfolio.consecutive_losses == 1 and portfolio.pause_until == 0.0
 
-    portfolio.open_position("LOSS2USDT", "LONG", 1.0, 4.0, 0.988, 1.018, 1.036, "SL2", 12)
+    portfolio.open_position("LOSS2USDT", "LONG", 1.0, 4.0, 0.988, 1.018, 1.036, "SL2", 15)
     portfolio.close_position("LOSS2USDT", 0.988, "🛑 Structural Stop", partial_pct=1.0)
-    assert portfolio.consecutive_losses == 2 and portfolio.pause_until > time.time()
-    print(f"  ✓ После 2 реальных стопов активирована пауза охлаждения на {int(portfolio.pause_until - time.time())} сек!")
+    assert portfolio.pause_until == 0.0, "При отключенном Circuit Breaker бот НЕ должен уходить в заморозку!"
+    print("  ✓ Бот успешно торгует непрерывно: после 2 стопов заморозка НЕ активируется (пауза 0 сек)!")
 
     # 6. ТЕСТ СОГЛАСОВАННОСТИ GROQ ENGINE С RSI 78 НА ПРОБОЕ
     print("\n[ТЕСТ 6/6] Проверка одобрения пробоя с RSI=79 и Marubozu-свечой (нижний фитиль 0%)...")

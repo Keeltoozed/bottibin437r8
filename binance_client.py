@@ -325,7 +325,13 @@ class BinanceClient:
 
         ema9 = round(calc_ema(closed_closes, 9), 6)
         ema21 = round(calc_ema(closed_closes, 21) if len(closed_closes) >= 21 else calc_ema(closed_closes, len(closed_closes)), 6)
+        ema50 = round(calc_ema(closed_closes, 50) if len(closed_closes) >= 50 else calc_ema(closed_closes, len(closed_closes)), 6)
         ema21_ext_pct = round(abs(closed_signal_c["close"] - ema21) / max(ema21, 1e-9), 4)
+
+        # Макро-фильтр старшей скользящей (EMA-50 на 5m = тренд 4+ часов):
+        # Не покупаем актив, падающий глубоко под 4h средней, и не шортим актив, взлетающий высоко над ней!
+        is_macro_trend_long = (closed_signal_c["close"] >= ema50 * 0.995)
+        is_macro_trend_short = (closed_signal_c["close"] <= ema50 * 1.005)
 
         gains, losses = [], []
         for i in range(1, len(closed_closes)):
@@ -452,6 +458,9 @@ class BinanceClient:
             "trend_15m": trend_15m,
             "is_mtf_long_ok": is_mtf_long_ok,
             "is_mtf_short_ok": is_mtf_short_ok,
+            "ema50": ema50,
+            "is_macro_trend_long": is_macro_trend_long,
+            "is_macro_trend_short": is_macro_trend_short,
             "v3_surge": v3_surge,
             "avg_5m_quote_vol": round(avg_vol, 1),
             "last_quote_volume": closed_signal_c["quote_vol"],
@@ -485,8 +494,8 @@ class BinanceClient:
         trend = analysis.get("trend", "CHOP")
         rsi = analysis.get("rsi", 50.0)
 
-        is_dumping = (p15 <= -0.45) or (p5 <= -0.35) or (trend == "BEARISH" and rsi < 32.0 and p5 < -0.20)
-        is_pumping = (p15 >= +0.45) or (p5 >= +0.35) or (trend == "BULLISH" and rsi > 68.0 and p5 > +0.20)
+        is_dumping = (p15 <= -0.30) or (p5 <= -0.22) or (trend == "BEARISH" and (p5 < -0.15 or rsi < 38.0))
+        is_pumping = (p15 >= +0.30) or (p5 >= +0.22) or (trend == "BULLISH" and (p5 > +0.15 or rsi > 62.0))
 
         if is_dumping:
             status_str = f"🔴 Медвежий импульс BTC ({p15:+.2f}%, {trend}) — ЛОНГИ ЗАБЛОКИРОВАНЫ | Приоритет: SHORT"

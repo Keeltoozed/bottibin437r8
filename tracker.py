@@ -95,14 +95,19 @@ class PortfolioTracker:
                 self.daily_loss_day = state.get("daily_loss_day", time.strftime('%Y-%m-%d', time.gmtime()))
                 self.pause_until = state.get("pause_until", 0.0)
                 self.is_paused = state.get("is_paused", False)
-                raw_lev = int(state.get("current_leverage", getattr(config, "LEVERAGE", 12)))
-                self.current_leverage = raw_lev if 5 <= raw_lev <= 25 else getattr(config, "LEVERAGE", 12)
+                if not getattr(config, "ENABLE_CIRCUIT_BREAKER", False):
+                    self.pause_until = 0.0
+                    self.is_paused = False
+                raw_lev = int(state.get("current_leverage", getattr(config, "LEVERAGE", 15)))
+                self.current_leverage = raw_lev if 5 <= raw_lev <= 25 else getattr(config, "LEVERAGE", 15)
                 print(f"✅ Портфель загружен: кэш ${self.cash:.2f}, открытых позиций: {len(self.open_positions)}, плечо: {self.current_leverage}x", flush=True)
         except Exception as e:
             print(f"⚠️ Ошибка чтения portfolio.json: {e}", flush=True)
 
     def is_daily_limit_reached(self) -> bool:
         """Проверяет дневной лимит убыточных сделок (Circuit Breaker)."""
+        if not getattr(config, "ENABLE_CIRCUIT_BREAKER", False):
+            return False
         if getattr(self, "circuit_breaker_override", False):
             return False
         today_utc = time.strftime('%Y-%m-%d', time.gmtime())
@@ -110,7 +115,7 @@ class PortfolioTracker:
             self.daily_loss_day = today_utc
             self.daily_losses_count = 0
             self.save()
-        limit = getattr(config, "DAILY_LOSS_LIMIT", 3)
+        limit = getattr(config, "DAILY_LOSS_LIMIT", 999)
         return self.daily_losses_count >= limit
 
     def add_evaluation(self, eval_data: Dict[str, Any]):
@@ -347,8 +352,10 @@ class PortfolioTracker:
 
         # Умная защита от тильта и серийных убытков:
         # Околонулевой выход по Time-Stop (например -$0.04) не считается за аварийный стоп-лосс,
-        # а реальный убыток (<= -$0.12) активирует карантин монеты и счетчик Circuit Breaker!
-        if total_realized <= -0.12:
+        # а реальный стоп-лосс (<= -$0.20 или Structural Stop) активирует 3-часовой карантин монеты и Circuit Breaker!
+        is_full_stop = (total_realized <= -0.20) or ("Structural Stop" in full_reason)
+        
+        if is_full_stop:
             self.consecutive_losses += 1
             today_utc = time.strftime('%Y-%m-%d', time.gmtime())
             if self.daily_loss_day != today_utc:
@@ -357,23 +364,32 @@ class PortfolioTracker:
             self.daily_losses_count += 1
             self.circuit_breaker_override = False
 
-            self.symbol_lockouts[symbol] = time.time() + (45 * 60)
+            # Жесткий 3-часовой (180 минут) карантин на монету после полного стопа:
+            # Защищает от повторного входа в тот же раздающий/сливающий актив (устраняет ошибку двойного стопа RUNE)!
+            self.symbol_lockouts[symbol] = time.time() + (180 * 60)
             print(
-                f"🔒 [КАРАНТИН] {symbol} на 45 мин после убытка ${total_realized:+.2f}. "
+                f"🔒 [КАРАНТИН 3 ЧАСА] {symbol} после полного стопа ${total_realized:+.2f}. "
                 f"(Дневных стопов: {self.daily_losses_count}/{getattr(config, 'DAILY_LOSS_LIMIT', 3)})",
                 flush=True
             )
 
-            if self.is_daily_limit_reached():
-                print(f"🛑 [CIRCUIT BREAKER] Дневной лимит ({config.DAILY_LOSS_LIMIT} стопа) достигнут! Защита капитала до завтра.", flush=True)
+            if getattr(config, "ENABLE_CIRCUIT_BREAKER", False):
+                if self.is_daily_limit_reached():
+                    print(f"🛑 [CIRCUIT BREAKER] Дневной лимит ({config.DAILY_LOSS_LIMIT} стопа) достигнут! Защита капитала до завтра.", flush=True)
 
-            max_streak = getattr(config, "MAX_CONSECUTIVE_LOSSES", 2)
-            if self.consecutive_losses >= max_streak:
-                pause_sec = getattr(config, "CONSECUTIVE_LOSS_PAUSE_SECONDS", 2700)
-                self.pause_until = time.time() + pause_sec
-                print(f"🛑 [CIRCUIT BREAKER] {self.consecutive_losses} стопа подряд! Пауза на {pause_sec // 60} мин.", flush=True)
+                max_streak = getattr(config, "MAX_CONSECUTIVE_LOSSES", 2)
+                if self.consecutive_losses >= max_streak:
+                    pause_sec = getattr(config, "CONSECUTIVE_LOSS_PAUSE_SECONDS", 2700)
+                    if pause_sec > 0:
+                        self.pause_until = time.time() + pause_sec
+                        print(f"🛑 [CIRCUIT BREAKER] {self.consecutive_losses} стопа подряд! Пауза на {pause_sec // 60} мин.", flush=True)
+            else:
+                self.pause_until = 0.0
+        elif total_realized <= -0.08:
+            # Промежуточный минус: 45 минут карантина на монету
+            self.symbol_lockouts[symbol] = time.time() + (45 * 60)
         elif total_realized <= 0.0:
-            # Легкий скретч / Time-Stop: 20 минут паузы только по этой монете
+            # Легкий околонулевой скретч / Time-Stop: 20 минут паузы только по этой монете
             self.symbol_lockouts[symbol] = time.time() + (20 * 60)
         else:
             self.consecutive_losses = 0

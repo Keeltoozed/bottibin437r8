@@ -39,15 +39,16 @@ class MarketScanner:
         portfolio.last_scan_str = now_str
 
         pause_until = getattr(portfolio, "pause_until", 0.0)
-        if portfolio.is_paused or now < pause_until:
-            rem = int(pause_until - now)
-            if rem > 0:
-                portfolio.btc_regime_str = f"🛑 Пауза Circuit Breaker ({rem} сек)"
-            return []
+        if getattr(config, "ENABLE_CIRCUIT_BREAKER", False):
+            if portfolio.is_paused or now < pause_until:
+                rem = int(pause_until - now)
+                if rem > 0:
+                    portfolio.btc_regime_str = f"🛑 Пауза Circuit Breaker ({rem} сек)"
+                return []
 
-        if portfolio.is_daily_limit_reached():
-            portfolio.btc_regime_str = f"🛑 Дневной лимит убытков достигнут ({portfolio.daily_losses_count}/{config.DAILY_LOSS_LIMIT})"
-            return []
+            if portfolio.is_daily_limit_reached():
+                portfolio.btc_regime_str = f"🛑 Дневной лимит убытков достигнут ({portfolio.daily_losses_count}/{config.DAILY_LOSS_LIMIT})"
+                return []
 
         if len(portfolio.open_positions) >= config.MAX_CONCURRENT_POSITIONS:
             return []
@@ -130,6 +131,8 @@ class MarketScanner:
                 min_v3 = float(getattr(config, "MIN_V3_VOLUME_PERSISTENCE", 1.15))
                 is_mtf_long = analysis.get("is_mtf_long_ok", True) if getattr(config, "ENABLE_MTF_15M_FILTER", True) else True
                 is_mtf_short = analysis.get("is_mtf_short_ok", True) if getattr(config, "ENABLE_MTF_15M_FILTER", True) else True
+                is_macro_long = analysis.get("is_macro_trend_long", True)
+                is_macro_short = analysis.get("is_macro_trend_short", True)
 
                 # ==============================================================
                 # 4. ПРАВИЛА ВХОДА STRUCTURAL ROCKET HUNTER (LONG & SHORT)
@@ -147,6 +150,7 @@ class MarketScanner:
                     v3_surge >= min_v3 and
                     avg_5m_qvol >= min_avg_vol and
                     is_mtf_long and
+                    is_macro_long and
                     pct_5m >= min_req_impulse and
                     clv_long >= config.MIN_CLOSE_STRENGTH and
                     upper_wick <= config.WICK_EXHAUSTION_MAX and
@@ -166,6 +170,7 @@ class MarketScanner:
                     v3_surge >= min_v3 and
                     avg_5m_qvol >= min_avg_vol and
                     is_mtf_short and
+                    is_macro_short and
                     pct_5m <= -min_req_impulse and
                     clv_short >= config.MIN_CLOSE_STRENGTH and
                     lower_wick <= config.WICK_EXHAUSTION_MAX and
@@ -356,20 +361,36 @@ class MarketScanner:
             if approved:
                 portfolio.funnel_stats["passed"] += 1
 
-                if portfolio.is_daily_limit_reached():
+                if getattr(config, "ENABLE_CIRCUIT_BREAKER", False) and portfolio.is_daily_limit_reached():
                     print(f"🛑 [CIRCUIT BREAKER] Дневной лимит {config.DAILY_LOSS_LIMIT} убытка исчерпан.", flush=True)
                     break
 
                 # ПРОФЕССИОНАЛЬНЫЙ ФИКСИРОВАННЫЙ ДОЛЛАРОВЫЙ РИСК (PROP-DESK SIZING):
-                # Независимо от ширины структурного стопа (0.6% или 1.8%), максимальный риск на сделку
-                # фиксирован (~2.5% эквити = $0.50 при $20 депозите с учетом комиссий 0.12%!)
+                # Риск 3.5% эквити (~$0.70 при $20 депозите) с эффективным плечом 15x
                 cur_equity = max(15.0, portfolio.get_portfolio_summary()["equity"])
                 risk_usd = round(cur_equity * config.RISK_PER_TRADE_PCT, 3)
                 sl_dist_pct = abs(entry_p - exact_sl) / max(entry_p, 1e-9)
                 lev_to_use = getattr(portfolio, "current_leverage", config.LEVERAGE)
 
                 target_notional = risk_usd / (sl_dist_pct + 0.0012)
-                actual_margin = round(min(target_notional / lev_to_use, portfolio.cash * 0.45), 2)
+                actual_margin = round(min(target_notional / lev_to_use, portfolio.cash * 0.50), 2)
+
+                # ЗАЩИТА ОТ КОРРЕЛЯЦИОННОГО РИСКА (CORRELATION GUARD):
+                # Если 1 позиция уже открыта, открывать ВТОРУЮ позицию в том же самом направлении
+                # разрешено ТОЛЬКО если BTC строго подтверждает тренд (не флэт/CHOP)!
+                # Это полностью предотвращает одновременный двойной стоп (как MARSCOIN + 1000CAT)!
+                if len(portfolio.open_positions) == 1:
+                    existing_pos = list(portfolio.open_positions.values())[0]
+                    existing_side = existing_pos.get("side", "")
+                    if cand_side == existing_side:
+                        btc_trend = btc_regime.get("trend", "CHOP")
+                        btc_5m = btc_regime.get("pct_5m", 0.0)
+                        if cand_side == "SHORT" and (btc_trend != "BEARISH" or btc_5m > 0.0):
+                            print(f"⚠️ [CORRELATION GUARD] Вторая позиция SHORT по {sym} отклонена: BTC ({btc_trend}, {btc_5m:+.2f}%) не в медвежьем тренде!", flush=True)
+                            continue
+                        elif cand_side == "LONG" and (btc_trend != "BULLISH" or btc_5m < 0.0):
+                            print(f"⚠️ [CORRELATION GUARD] Вторая позиция LONG по {sym} отклонена: BTC ({btc_trend}, {btc_5m:+.2f}%) не в бычьем тренде!", flush=True)
+                            continue
 
                 if len(portfolio.open_positions) < config.MAX_CONCURRENT_POSITIONS and actual_margin >= 1.50 and portfolio.cash >= actual_margin:
                     opened = portfolio.open_position(

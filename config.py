@@ -37,20 +37,20 @@ PAPER_TRADING = os.getenv("PAPER_TRADING", "true").lower() == "true"
 INITIAL_BALANCE = float(os.getenv("INITIAL_BALANCE", "20.0"))
 
 # Фиксированный долларовый риск на сделку (Prop-Desk Risk Sizing):
-# 2.5% от эквити ($0.50 на $20 депозита с учетом комиссий) — любой стоп контролируем,
-# а пойманная ракета 3R-6R приносит +$1.20..+$2.50+!
-RISK_PER_TRADE_PCT = float(os.getenv("RISK_PER_TRADE_PCT", "0.025"))
-TRADE_AMOUNT_USDT = float(os.getenv("TRADE_AMOUNT_USDT", "4.5"))  # Базовый ориентир маржи (ограничен 45% свободного кэша)
-MAX_CONCURRENT_POSITIONS = min(int(os.getenv("MAX_POSITIONS", "2")), 2)  # Строго не более 2 позиций одновременно для $20 депозита
-LEVERAGE = int(os.getenv("LEVERAGE", "12"))                       # 12x оптимальное плечо под риск-сайзинг
+# 3.5% от эквити (~$0.70 на $20 депозита с плечом 15x) — ощутимо разгоняет суточный профит с ракет!
+RISK_PER_TRADE_PCT = float(os.getenv("RISK_PER_TRADE_PCT", "0.035"))
+TRADE_AMOUNT_USDT = float(os.getenv("TRADE_AMOUNT_USDT", "6.0"))  # Базовый ориентир маржи (до 50% свободного кэша)
+MAX_CONCURRENT_POSITIONS = int(os.getenv("MAX_POSITIONS", "2"))   # До 2 параллельных независимых позиций
+LEVERAGE = int(os.getenv("LEVERAGE", "15"))                       # 15x эффективное плечо под разгон ракет
 ENABLE_SHORT = os.getenv("ENABLE_SHORT", "true").lower() == "true"
 
-# Институциональный предохранитель депозита (Circuit Breaker):
-DAILY_LOSS_LIMIT = int(os.getenv("DAILY_LOSS_LIMIT", "3"))
-ENABLE_CIRCUIT_BREAKER = True
-MAX_CONSECUTIVE_LOSSES = 2
-CONSECUTIVE_LOSS_PAUSE_SECONDS = 2700  # 45 минут охлаждения после 2 полных стопов подряд
-MAX_DAILY_LOSS_USD = float(os.getenv("MAX_DAILY_LOSS_USD", "2.00"))
+# Предохранитель депозита (Circuit Breaker):
+# По запросу пользователя заморозка торговли при серии минусов ОТКЛЮЧЕНА (бот торгует непрерывно 24/7):
+ENABLE_CIRCUIT_BREAKER = os.getenv("ENABLE_CIRCUIT_BREAKER", "false").lower() == "true"
+DAILY_LOSS_LIMIT = int(os.getenv("DAILY_LOSS_LIMIT", "99"))
+MAX_CONSECUTIVE_LOSSES = int(os.getenv("MAX_CONSECUTIVE_LOSSES", "99"))
+CONSECUTIVE_LOSS_PAUSE_SECONDS = int(os.getenv("CONSECUTIVE_LOSS_PAUSE_SECONDS", "0"))  # Без пауз заморозки
+MAX_DAILY_LOSS_USD = float(os.getenv("MAX_DAILY_LOSS_USD", "999.00"))
 
 # ==============================================================================
 # 4. STRUCTURAL BREAKOUT FILTERS (MOMENTUM IGNITION — БЕЗ ОШИБКИ НИЖНЕГО ФИТИЛЯ!)
@@ -82,10 +82,10 @@ MIN_PULLBACK_PCT = float(os.getenv("MIN_PULLBACK_PCT", "0.0005"))
 # ==============================================================================
 # 5. ASYMMETRIC TREND-FOLLOWING EXIT ENGINE (30% / 30% / 40% ATR RUNNER + TIME-STOP)
 # ==============================================================================
-TARGET_1_R = float(os.getenv("TARGET_1_R", "1.5"))           # TP1 на +1.5R: фиксация 30% + стоп в безубыток (+0.20%)
-TARGET_2_R = float(os.getenv("TARGET_2_R", "3.0"))           # TP2 на +3.0R: фиксация еще 30% + защита +1.2R
-TP1_PARTIAL_PCT = 0.30                                       # 30% от начальной позиции на TP1
-TP2_PARTIAL_OF_REMAINING = round(0.30 / 0.70, 4)             # 42.86% от остатка (30% от начальной), оставляя 40% ранера!
+TARGET_1_R = float(os.getenv("TARGET_1_R", "1.5"))           # TP1 на +1.5R: фиксация 25% + стоп в безубыток (+0.20%)
+TARGET_2_R = float(os.getenv("TARGET_2_R", "3.0"))           # TP2 на +3.0R: фиксация еще 25% + защита +1.2R
+TP1_PARTIAL_PCT = 0.25                                       # 25% от начальной позиции на TP1
+TP2_PARTIAL_OF_REMAINING = round(0.25 / 0.75, 4)             # 33.33% от остатка (25% от начальной), оставляя 50% ранера!
 
 TP1_PCT = float(os.getenv("TP1_PCT", "0.012"))               # Минимальный порог TP1 (1.2% хода цены)
 TP2_PCT = float(os.getenv("TP2_PCT", "0.024"))               # Минимальный порог TP2 (2.4% хода цены)

@@ -1,7 +1,7 @@
 {
   "cash": 20.0,
   "initial_balance": 20.0,
-  "current_leverage": 12,
+  "current_leverage": 15,
   "open_positions": {},
   "trade_history": [],
   "funnel_stats": {
