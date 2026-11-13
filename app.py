@@ -199,7 +199,7 @@ with st.sidebar:
     est_risk_usd = round(max(15.0, portfolio.get_portfolio_summary()["equity"]) * config.RISK_PER_TRADE_PCT, 2)
     st.text(f"Плечо входов: {portfolio.current_leverage}x | Риск 1R: ${est_risk_usd:.2f} ({config.RISK_PER_TRADE_PCT*100:.1f}%)")
     st.text(f"Вход: 15m MTF Trend + Пробой 20 баров + RVOL ≥ {config.MIN_5M_VOLUME_SURGE_RATIO:.2f}x")
-    st.text(f"Выход: 30% (1.5R) / 30% (3R) / 40% (2.5×ATR Трейл)")
+    st.text(f"Выход: 25% (2.0R) / 25% (3.5R) / 50% (2.5×ATR Трейл)")
     st.text(f"Выход из застоя: 18 мин скретч | 35 мин Time-Stop")
     st.text(f"Лимит стопов: Макс {config.DAILY_LOSS_LIMIT} в день ({portfolio.daily_losses_count}/{config.DAILY_LOSS_LIMIT})")
     st.text(f"Радар рынка: 🚀 {config.SCAN_TICKERS_LIMIT} пар Binance (MTF + Ликвидность)")
@@ -234,7 +234,7 @@ st.title("🚀 Binance Autonomous Groq Trader (Rocket Hunter Engine)")
 last_scan_info = getattr(portfolio, "last_scan_str", "Ожидание...")
 btc_regime_info = getattr(portfolio, "btc_regime_str", "🟡 Анализ Bitcoin...")
 st.caption(f"🌍 **Макро-щит (Защита от пролива/выноса BTC):** {btc_regime_info}")
-st.caption(f"Конвейер Structural Rocket Hunter: Радар {config.SCAN_TICKERS_LIMIT} пар Binance → 15m MTF Guard + Пробой 20 баров + RVOL ≥ {config.MIN_5M_VOLUME_SURGE_RATIO}x → ML + Groq AI → Выход 30%/30%/40% ATR Трейл + 18m Скретч | Режим: {'🧪 Paper Trading' if config.PAPER_TRADING else '⚡ Live Trading'} | Последний скан: {last_scan_info}")
+st.caption(f"Конвейер Structural Rocket Hunter: Радар {config.SCAN_TICKERS_LIMIT} пар Binance → 15m MTF Guard + Пробой 20 баров + RVOL ≥ {config.MIN_5M_VOLUME_SURGE_RATIO}x → ML + Groq AI → Выход 25%/25%/50% ATR Трейл + 18m Скретч | Режим: {'🧪 Paper Trading' if config.PAPER_TRADING else '⚡ Live Trading'} | Последний скан: {last_scan_info}")
 
 # Оповещение и ручной сброс Circuit Breaker (если включен)
 if getattr(config, "ENABLE_CIRCUIT_BREAKER", False) and summary["circuit_breaker"]:
@@ -579,7 +579,7 @@ with tab_timemachine:
     **Честная проверка реальной логики Structural Rocket Hunter против старого скальпера (`$20` старт):**
     * **Нулевой Lookahead Bias:** сигнал рассчитывается строго по закрытой свече `[t-1]`, вход по цене открытия следующей свечи `[t]`.
     * **Реальные издержки биржи:** `0.05%` комиссия тейкера + `0.01%` проскальзывание на каждую сторону (`0.12%` на круг) и строгий учет `1 позиция = 1 сделка`.
-    * **Асимметричный выход:** `30%` на `1.5R` + безубыток, `30%` на `3.0R`, `40%` ранер по `2.5×ATR` Chandelier-трейлингу + `35м` Time-Stop.
+    * **Асимметричный выход:** `25%` на `2.0R` + безубыток, `25%` на `3.5R`, `50%` ранер по `2.5×ATR` Chandelier-трейлингу + `35м` Time-Stop.
     """)
 
     if st.button("▶ Запустить честный аудит стратегий (Rocket Hunter vs Старый скальпер)", type="primary"):

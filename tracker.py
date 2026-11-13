@@ -364,11 +364,11 @@ class PortfolioTracker:
             self.daily_losses_count += 1
             self.circuit_breaker_override = False
 
-            # Жесткий 3-часовой (180 минут) карантин на монету после полного стопа:
-            # Защищает от повторного входа в тот же раздающий/сливающий актив (устраняет ошибку двойного стопа RUNE)!
-            self.symbol_lockouts[symbol] = time.time() + (180 * 60)
+            # Умеренный карантин после полного стопа: защищает от мгновенного реванша,
+            # но не блокирует повторный вход в монету на весь день (чтобы не пропускать новые ракеты).
+            self.symbol_lockouts[symbol] = time.time() + (90 * 60)
             print(
-                f"🔒 [КАРАНТИН 3 ЧАСА] {symbol} после полного стопа ${total_realized:+.2f}. "
+                f"🔒 [КАРАНТИН] {symbol} после полного стопа ${total_realized:+.2f}. "
                 f"(Дневных стопов: {self.daily_losses_count}/{getattr(config, 'DAILY_LOSS_LIMIT', 3)})",
                 flush=True
             )
@@ -386,11 +386,11 @@ class PortfolioTracker:
             else:
                 self.pause_until = 0.0
         elif total_realized <= -0.08:
-            # Промежуточный минус: 45 минут карантина на монету
-            self.symbol_lockouts[symbol] = time.time() + (45 * 60)
+            # Промежуточный минус: 30 минут карантина на монету
+            self.symbol_lockouts[symbol] = time.time() + (30 * 60)
         elif total_realized <= 0.0:
-            # Легкий околонулевой скретч / Time-Stop: 20 минут паузы только по этой монете
-            self.symbol_lockouts[symbol] = time.time() + (20 * 60)
+            # Легкий околонулевой скретч / Time-Stop: 10 минут паузы только по этой монете
+            self.symbol_lockouts[symbol] = time.time() + (10 * 60)
         else:
             self.consecutive_losses = 0
 

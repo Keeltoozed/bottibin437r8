@@ -37,11 +37,11 @@ PAPER_TRADING = os.getenv("PAPER_TRADING", "true").lower() == "true"
 INITIAL_BALANCE = float(os.getenv("INITIAL_BALANCE", "20.0"))
 
 # Фиксированный долларовый риск на сделку (Prop-Desk Risk Sizing):
-# 3.5% от эквити (~$0.70 на $20 депозита с плечом 15x) — ощутимо разгоняет суточный профит с ракет!
-RISK_PER_TRADE_PCT = float(os.getenv("RISK_PER_TRADE_PCT", "0.035"))
-TRADE_AMOUNT_USDT = float(os.getenv("TRADE_AMOUNT_USDT", "6.0"))  # Базовый ориентир маржи (до 50% свободного кэша)
-MAX_CONCURRENT_POSITIONS = int(os.getenv("MAX_POSITIONS", "2"))   # До 2 параллельных независимых позиций
-LEVERAGE = int(os.getenv("LEVERAGE", "15"))                       # 15x эффективное плечо под разгон ракет
+# 2.5% от эквити (~$0.50 на $20 депозита с плечом 12x) — любой стоп контролируем, ракета 3R-6R приносит +$1.20..+$2.50+!
+RISK_PER_TRADE_PCT = float(os.getenv("RISK_PER_TRADE_PCT", "0.025"))
+TRADE_AMOUNT_USDT = float(os.getenv("TRADE_AMOUNT_USDT", "4.5"))  # Базовый ориентир маржи (ограничен 45% свободного кэша)
+MAX_CONCURRENT_POSITIONS = min(int(os.getenv("MAX_POSITIONS", "2")), 2)   # Не более 2 позиций одновременно для $20 депозита
+LEVERAGE = int(os.getenv("LEVERAGE", "12"))                       # 12x оптимальное плечо под риск-сайзинг
 ENABLE_SHORT = os.getenv("ENABLE_SHORT", "true").lower() == "true"
 
 # Предохранитель депозита (Circuit Breaker):
@@ -67,10 +67,10 @@ MIN_IMPULSE_PCT = MIN_5M_PRICE_IMPULSE_PCT
 # Сила закрытия бара (Close Location Value — Marubozu дружелюбно!):
 # Для LONG закрытие в верхних 32% диапазона свечи (>= 0.68), для SHORT — в нижних 32%.
 MIN_CLOSE_STRENGTH = float(os.getenv("MIN_CLOSE_STRENGTH", "0.68"))
-WICK_REJECTION_MIN = 0.0  # УДАЛЕН вредный фильтр нижнего фитиля, резавший 90% истинных Marubozu-ракет!
+WICK_REJECTION_MIN = float(os.getenv("WICK_REJECTION_MIN", "0.0"))                # Защитный фитиль отбоя/сопротивления не менее 12% свечи
 WICK_EXHAUSTION_MAX = float(os.getenv("WICK_EXHAUSTION_MAX", "0.28"))              # Встречный фитиль истощения <= 28% (отсев Bull/Bear Trap)
 MAX_EMA21_EXTENSION_PCT = float(os.getenv("MAX_EMA21_EXTENSION_PCT", "0.035"))     # Защита от погони за улетевшей 5-й свечой (>3.5% от EMA21)
-MAX_LIVE_DRIFT_PCT = float(os.getenv("MAX_LIVE_DRIFT_PCT", "0.008"))               # Не догонять цену, если внутри текущей свечи улетела > +0.8%
+MAX_LIVE_DRIFT_PCT = float(os.getenv("MAX_LIVE_DRIFT_PCT", "0.015"))               # Разрешаем вход при умеренном дрейфе цены, чтобы не пропускать быстрые ракеты
 
 # Честные структурные границы стоп-лосса (БЕЗ искусственного обрезания внутри свечи!):
 STOP_LOSS_MIN_PCT = float(os.getenv("STOP_LOSS_MIN_PCT", "0.005"))  # 0.50% минимальный структурный стоп
@@ -80,10 +80,10 @@ WICK_BUFFER_PCT = float(os.getenv("WICK_BUFFER_PCT", "0.0010"))     # 0.10% бу
 MIN_PULLBACK_PCT = float(os.getenv("MIN_PULLBACK_PCT", "0.0005"))
 
 # ==============================================================================
-# 5. ASYMMETRIC TREND-FOLLOWING EXIT ENGINE (30% / 30% / 40% ATR RUNNER + TIME-STOP)
+# 5. ASYMMETRIC TREND-FOLLOWING EXIT ENGINE (25% / 25% / 50% ATR RUNNER + TIME-STOP)
 # ==============================================================================
-TARGET_1_R = float(os.getenv("TARGET_1_R", "1.5"))           # TP1 на +1.5R: фиксация 25% + стоп в безубыток (+0.20%)
-TARGET_2_R = float(os.getenv("TARGET_2_R", "3.0"))           # TP2 на +3.0R: фиксация еще 25% + защита +1.2R
+TARGET_1_R = float(os.getenv("TARGET_1_R", "2.0"))           # TP1 на +2.0R: фиксация 25% + стоп в безубыток (+0.20%)
+TARGET_2_R = float(os.getenv("TARGET_2_R", "3.5"))           # TP2 на +3.5R: фиксация еще 25% + защита +1.2R
 TP1_PARTIAL_PCT = 0.25                                       # 25% от начальной позиции на TP1
 TP2_PARTIAL_OF_REMAINING = round(0.25 / 0.75, 4)             # 33.33% от остатка (25% от начальной), оставляя 50% ранера!
 
@@ -92,7 +92,7 @@ TP2_PCT = float(os.getenv("TP2_PCT", "0.024"))               # Минималь�
 
 RUNNER_ATR_MULT = float(os.getenv("RUNNER_ATR_MULT", "2.5")) # Chandelier ATR трейлинг 2.5 * ATR14 для ловли ракет +5%..+15%
 RUNNER_ACTIVATION_R = float(os.getenv("RUNNER_ACTIVATION_R", "2.2"))  # Включение подтяжки трейла от +2.2R (не душит откат после TP1!)
-TRAILING_STOP_PCT = float(os.getenv("TRAILING_STOP_PCT", "0.013"))    # Минимальная дистанция трейла 1.3% против рыночного шума
+TRAILING_STOP_PCT = float(os.getenv("TRAILING_STOP_PCT", "0.015"))    # Минимальная дистанция трейла 1.5% против рыночного шума
 TIME_STOP_MINUTES = int(os.getenv("TIME_STOP_MINUTES", "35"))         # Time-Stop: выход через 35 мин, если импульс затух (< +0.45R без TP1)
 STAGNATION_EXIT_MINUTES = int(os.getenv("STAGNATION_EXIT_MINUTES", "18"))  # Быстрый скретч-выход через 18 мин, если монета застряла в мертвом флэте
 TAKER_FEE_PCT = float(os.getenv("TAKER_FEE_PCT", "0.0005"))           # 0.05% биржевой сбор тейкера
@@ -107,7 +107,7 @@ MIN_24H_TRADES_COUNT = int(os.getenv("MIN_24H_TRADES_COUNT", "2500"))           
 MIN_AVG_5M_QUOTE_VOL = float(os.getenv("MIN_AVG_5M_QUOTE_VOL", "2500.0"))                 # Минимум $2500 средний объем 5m свечи (отсев $178 свечей как на HEMI)
 MIN_V3_VOLUME_PERSISTENCE = float(os.getenv("MIN_V3_VOLUME_PERSISTENCE", "1.15"))          # Кумулятивный приток объема за 3 свечи (15 мин) >= 1.15x
 ENABLE_MTF_15M_FILTER = os.getenv("ENABLE_MTF_15M_FILTER", "true").lower() == "true"       # 15m Multi-Timeframe Guard (защита от лонгов против падающего рынка)
-MAX_24H_CHANGE_CAP = float(os.getenv("MAX_24H_CHANGE_CAP", "38.0"))       # Отсев перегретых +40% пампов на стадии раздачи
+MAX_24H_CHANGE_CAP = float(os.getenv("MAX_24H_CHANGE_CAP", "100.0"))       # Позволяем честно торговать сильнейшими импульсными монетами (до +100% за сутки)
 STRICT_WHITELIST_ONLY = os.getenv("STRICT_WHITELIST_ONLY", "false").lower() == "true"
 CHOP_MIN_VOLUME_SURGE = float(os.getenv("CHOP_MIN_VOLUME_SURGE", "1.50"))
 ML_MIN_FILTER_PROB = float(os.getenv("ML_MIN_FILTER_PROB", "0.42"))       # Валидированный порог отсева слабых сетапов по закрытой свече
@@ -152,7 +152,7 @@ EXCLUDED_TICKERS = {
 }
 MAX_SPREAD_PCT = float(os.getenv("MAX_SPREAD_PCT", "0.0022"))  # 0.22% max spread (учитывает тик-шаг на Spot/Vision зеркале)
 SCAN_INTERVAL_SECONDS = int(os.getenv("SCAN_INTERVAL_SECONDS", "12"))
-PAIR_COOLDOWN_MINUTES = int(os.getenv("PAIR_COOLDOWN_MINUTES", "5"))
+PAIR_COOLDOWN_MINUTES = int(os.getenv("PAIR_COOLDOWN_MINUTES", "3"))
 
 # ==============================================================================
 # 7. TELEGRAM NOTIFICATIONS (FAIL-SAFE OPTIONAL)
