@@ -124,33 +124,37 @@ class MarketScanner:
                 dist_l_pct = analysis.get("dist_to_breakout_long_pct", 1.0)
                 dist_s_pct = analysis.get("dist_to_breakout_short_pct", 1.0)
 
-                min_req_impulse = max(config.MIN_5M_PRICE_IMPULSE_PCT, atr_pct * 100.0 * 0.90)
+                min_req_impulse = max(config.MIN_5M_PRICE_IMPULSE_PCT, atr_pct * 100.0 * 0.85)
                 avg_5m_qvol = float(analysis.get("avg_5m_quote_vol", 0.0) or 0.0)
                 v3_surge = float(analysis.get("v3_surge", 1.0) or 1.0)
-                min_avg_vol = float(getattr(config, "MIN_AVG_5M_QUOTE_VOL", 50000.0))
-                # [FIX v2] на фьючерсном fapi обороты 5m-свечей выше, чем на споте: порог масштабируем
-                if binance_client.active_mirror_name == "fapi":
-                    min_avg_vol *= float(getattr(config, "MIN_AVG_5M_QUOTE_VOL_FAPI_MULT", 3.0))
-                min_v3 = float(getattr(config, "MIN_V3_VOLUME_PERSISTENCE", 1.15))
+                min_avg_vol = float(getattr(config, "MIN_AVG_5M_QUOTE_VOL", 2500.0))
+                min_v3 = float(getattr(config, "MIN_V3_VOLUME_PERSISTENCE", 1.10))
                 is_mtf_long = analysis.get("is_mtf_long_ok", True) if getattr(config, "ENABLE_MTF_15M_FILTER", True) else True
                 is_mtf_short = analysis.get("is_mtf_short_ok", True) if getattr(config, "ENABLE_MTF_15M_FILTER", True) else True
                 is_macro_long = analysis.get("is_macro_trend_long", True)
                 is_macro_short = analysis.get("is_macro_trend_short", True)
+                is_live_ign = analysis.get("is_live_ignition", False)
+                brk_type = analysis.get("breakout_type", "STRUCT_12B")
+
+                # Подтверждение объема: либо мощный всплеск текущей свечи (RVOL >= 1.45x),
+                # либо устойчивый 15m приток (RVOL >= 1.25x и v3 >= 1.10x), либо живой внутрисвечной взрыв!
+                vol_confirmed = (
+                    surge >= config.MIN_5M_VOLUME_SURGE_RATIO or
+                    (surge >= 1.25 and v3_surge >= min_v3) or
+                    is_live_ign
+                )
 
                 # ==============================================================
-                # 4. ПРАВИЛА ВХОДА STRUCTURAL ROCKET HUNTER (LONG & SHORT)
-                # - Подтвержденный пробой 20-барного уровня Дончиана (или 12-барный Ignition при RVOL >= 2.8x)
-                # - Реальный взрыв объема RVOL >= 1.80x и 15m приток объема v3 >= 1.15x
-                # - Минимальная ликвидность свечи (avg 5m >= $2500, отсев монет-призраков)
-                # - 15m MTF Guard: запрет лонга в падающий рынок, запрет шорта в растущий
-                # - Сильное закрытие свечи у экстремума (CLV >= 0.68, Marubozu проходят на 100%!)
-                # - Встречный фитиль <= 28% (защита от Bull/Bear Trap)
-                # - Честный структурный стоп 0.50%..2.20%
+                # 4. ПРАВИЛА ВХОДА 3-STAGE ROCKET HUNTER (LONG & SHORT)
+                # - Фаза 1: Пробой 12-барного уровня Дончиана (или 8-барный Fast Ignition)
+                # - Фаза 2: Пробой 5-барного Bull/Bear Flag в активном 15m тренде (EMA9>EMA21>EMA50)
+                # - Фаза 3: Живой внутрисвечной перехват (Live Intra-Bar Ignition)
+                # - Подтвержденный приток объема, 15m MTF + EMA50 Macro Guard, CLV >= 0.66
+                # - Умный структурный стоп 0.50%..2.40% с сохранением точности цены
                 # ==============================================================
                 tech_long = (
                     analysis.get("is_breakout_long", False) and
-                    surge >= config.MIN_5M_VOLUME_SURGE_RATIO and
-                    v3_surge >= min_v3 and
+                    vol_confirmed and
                     avg_5m_qvol >= min_avg_vol and
                     is_mtf_long and
                     is_macro_long and
@@ -169,8 +173,7 @@ class MarketScanner:
                 tech_short = (
                     config.ENABLE_SHORT and
                     analysis.get("is_breakout_short", False) and
-                    surge >= config.MIN_5M_VOLUME_SURGE_RATIO and
-                    v3_surge >= min_v3 and
+                    vol_confirmed and
                     avg_5m_qvol >= min_avg_vol and
                     is_mtf_short and
                     is_macro_short and
@@ -262,7 +265,7 @@ class MarketScanner:
 
                 ml_mult = (0.5 + chosen["ml_prob"]) if ml_res.get("ml_active") else 1.0
                 chosen["score"] = round(abs(pct_5m) * surge * clv_used * ml_mult, 3)
-                chosen["radar_status"] = "🚀 ПРОБОЙ АКТИВЕН (Передан в Groq AI)"
+                chosen["radar_status"] = f"🚀 ПРОБОЙ [{brk_type}] (Передан в Groq AI)"
                 return {"kind": "candidate", "data": chosen}
 
         tasks = [check_ticker(t) for t in tickers]
@@ -331,15 +334,15 @@ class MarketScanner:
 
             entry_p = ctx["current_price"]
             if cand_side == "LONG":
-                exact_sl = ctx.get("wick_stop_loss", round(entry_p * 0.990, 6))
+                exact_sl = ctx.get("wick_stop_loss", config.round_price(entry_p * 0.990))
                 risk_per_coin = max(entry_p - exact_sl, entry_p * config.STOP_LOSS_MIN_PCT)
-                tp1_target = round(entry_p + max(config.TARGET_1_R * risk_per_coin, entry_p * config.TP1_PCT), 6)
-                tp2_target = round(entry_p + max(config.TARGET_2_R * risk_per_coin, entry_p * config.TP2_PCT), 6)
+                tp1_target = config.round_price(entry_p + max(config.TARGET_1_R * risk_per_coin, entry_p * config.TP1_PCT))
+                tp2_target = config.round_price(entry_p + max(config.TARGET_2_R * risk_per_coin, entry_p * config.TP2_PCT))
             else:
-                exact_sl = ctx.get("short_wick_stop_loss", round(entry_p * 1.010, 6))
+                exact_sl = ctx.get("short_wick_stop_loss", config.round_price(entry_p * 1.010))
                 risk_per_coin = max(exact_sl - entry_p, entry_p * config.STOP_LOSS_MIN_PCT)
-                tp1_target = round(entry_p - max(config.TARGET_1_R * risk_per_coin, entry_p * config.TP1_PCT), 6)
-                tp2_target = round(entry_p - max(config.TARGET_2_R * risk_per_coin, entry_p * config.TP2_PCT), 6)
+                tp1_target = config.round_price(entry_p - max(config.TARGET_1_R * risk_per_coin, entry_p * config.TP1_PCT))
+                tp2_target = config.round_price(entry_p - max(config.TARGET_2_R * risk_per_coin, entry_p * config.TP2_PCT))
 
             eval_entry = {
                 "symbol": sym,
@@ -368,12 +371,13 @@ class MarketScanner:
                     print(f"🛑 [CIRCUIT BREAKER] Дневной лимит {config.DAILY_LOSS_LIMIT} убытка исчерпан.", flush=True)
                     break
 
-                # ПРОФЕССИОНАЛЬНЫЙ ФИКСИРОВАННЫЙ ДОЛЛАРОВЫЙ РИСК (PROP-DESK SIZING):
-                # Риск 3.5% эквити (~$0.70 при $20 депозите) с эффективным плечом 15x
-                # [FIX v2] РАНЬШЕ: max(15.0, equity) — при капитале $4 бот рисковал как при $15 (10% вместо 2.5% за сделку)
-                # и ускоренно сливал остаток. ТЕПЕРЬ риск считается от РЕАЛЬНОГО эквити.
-                cur_equity = max(0.0, portfolio.get_portfolio_summary()["equity"])
-                risk_usd = round(cur_equity * config.RISK_PER_TRADE_PCT, 3)
+                # ПРОФЕССИОНАЛЬНЫЙ ДОЛЛАРОВЫЙ РИСК С БУСТОМ НА A+ РАКЕТАХ (CONVICTION PROP SIZING):
+                # Базовый риск 3.5% эквити + 1.35x буст при высокой уверенности ML (>=58%) и RVOL (>=1.9x)
+                cur_equity = max(15.0, portfolio.get_portfolio_summary()["equity"])
+                conv_mult = 1.0
+                if float(ctx.get("ml_prob", 0.5)) >= 0.58 and float(ctx.get("volume_surge_ratio", 1.0)) >= 1.90:
+                    conv_mult = float(getattr(config, "CONVICTION_RISK_MULT", 1.35))
+                risk_usd = round(cur_equity * config.RISK_PER_TRADE_PCT * conv_mult, 3)
                 sl_dist_pct = abs(entry_p - exact_sl) / max(entry_p, 1e-9)
                 lev_to_use = getattr(portfolio, "current_leverage", config.LEVERAGE)
 
@@ -397,7 +401,7 @@ class MarketScanner:
                             print(f"⚠️ [CORRELATION GUARD] Вторая позиция LONG по {sym} отклонена: BTC ({btc_trend}, {btc_5m:+.2f}%) не в бычьем тренде!", flush=True)
                             continue
 
-                if len(portfolio.open_positions) < config.MAX_CONCURRENT_POSITIONS and actual_margin * lev_to_use >= config.MIN_NOTIONAL_USDT and portfolio.cash >= actual_margin:
+                if len(portfolio.open_positions) < config.MAX_CONCURRENT_POSITIONS and actual_margin >= 1.50 and portfolio.cash >= actual_margin:
                     opened = portfolio.open_position(
                         symbol=sym,
                         side=cand_side,

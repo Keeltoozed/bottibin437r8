@@ -37,11 +37,12 @@ PAPER_TRADING = os.getenv("PAPER_TRADING", "true").lower() == "true"
 INITIAL_BALANCE = float(os.getenv("INITIAL_BALANCE", "20.0"))
 
 # Фиксированный долларовый риск на сделку (Prop-Desk Risk Sizing):
-# 2.5% от эквити (~$0.50 на $20 депозита с плечом 12x) — любой стоп контролируем, ракета 3R-6R приносит +$1.20..+$2.50+!
-RISK_PER_TRADE_PCT = float(os.getenv("RISK_PER_TRADE_PCT", "0.025"))
+# 3.5% от эквити (~$0.70 на $20 депозита с плечом 15x) + 1.35x буст на A+ ракетах (ML >= 58%, RVOL >= 1.9x)!
+RISK_PER_TRADE_PCT = float(os.getenv("RISK_PER_TRADE_PCT", "0.035"))
+CONVICTION_RISK_MULT = float(os.getenv("CONVICTION_RISK_MULT", "1.35"))
 TRADE_AMOUNT_USDT = float(os.getenv("TRADE_AMOUNT_USDT", "4.5"))  # Базовый ориентир маржи (ограничен 45% свободного кэша)
-MAX_CONCURRENT_POSITIONS = min(int(os.getenv("MAX_POSITIONS", "2")), 2)   # Не более 2 позиций одновременно для $20 депозита
-LEVERAGE = int(os.getenv("LEVERAGE", "12"))                       # 12x оптимальное плечо под риск-сайзинг
+MAX_CONCURRENT_POSITIONS = min(int(os.getenv("MAX_POSITIONS", "2")), 3)   # До 2-3 позиций одновременно для $20 депозита
+LEVERAGE = int(os.getenv("LEVERAGE", "15"))                       # 15x оптимальное плечо под риск-сайзинг
 ENABLE_SHORT = os.getenv("ENABLE_SHORT", "true").lower() == "true"
 
 # Предохранитель депозита (Circuit Breaker):
@@ -53,102 +54,144 @@ CONSECUTIVE_LOSS_PAUSE_SECONDS = int(os.getenv("CONSECUTIVE_LOSS_PAUSE_SECONDS",
 MAX_DAILY_LOSS_USD = float(os.getenv("MAX_DAILY_LOSS_USD", "999.00"))
 
 # ==============================================================================
-# 4. STRUCTURAL BREAKOUT FILTERS (MOMENTUM IGNITION — БЕЗ ОШИБКИ НИЖНЕГО ФИТИЛЯ!)
+# 4. STRUCTURAL BREAKOUT & CONTINUATION FILTERS (3-STAGE ROCKET CATCHER)
 # ==============================================================================
-BREAKOUT_LOOKBACK_BARS = int(os.getenv("BREAKOUT_LOOKBACK_BARS", "20"))  # Пробой хая/лоя за 20 закрытых 5m свечей (1ч 40м структуры)
-FAST_IGNITION_LOOKBACK_BARS = int(os.getenv("FAST_IGNITION_LOOKBACK_BARS", "12"))  # Быстрый пробой 1ч базы при взрывном объеме >= 2.8x
-FAST_IGNITION_SURGE = float(os.getenv("FAST_IGNITION_SURGE", "2.80"))
+BREAKOUT_LOOKBACK_BARS = int(os.getenv("BREAKOUT_LOOKBACK_BARS", "12"))  # Пробой хая/лоя за 12 закрытых 5m свечей (1ч структуры)
+FAST_IGNITION_LOOKBACK_BARS = int(os.getenv("FAST_IGNITION_LOOKBACK_BARS", "8"))   # Быстрый пробой 40м базы при взрывном объеме >= 2.4x
+FAST_IGNITION_SURGE = float(os.getenv("FAST_IGNITION_SURGE", "2.40"))
+CONTINUATION_LOOKBACK_BARS = int(os.getenv("CONTINUATION_LOOKBACK_BARS", "5"))     # 5-барный Bull/Bear Flag пробой продолжения тренда
+ENABLE_FLAG_CONTINUATION = os.getenv("ENABLE_FLAG_CONTINUATION", "true").lower() == "true"
+ENABLE_LIVE_INTRABAR_IGNITION = os.getenv("ENABLE_LIVE_INTRABAR_IGNITION", "true").lower() == "true"
 
-MIN_5M_VOLUME_SURGE_RATIO = float(os.getenv("MIN_5M_VOLUME_SURGE_RATIO", "3.00"))  # [FIX v2] RVOL >= 3.0x (было 1.8x — слабые всплески почти всегда ложные пробои; бэктест: avgR -0.04 -> +0.06)
+MIN_5M_VOLUME_SURGE_RATIO = float(os.getenv("MIN_5M_VOLUME_SURGE_RATIO", "1.45"))  # Валидированный всплеск RVOL >= 1.45x к 20-свечной средней
 MIN_VOLUME_SURGE = MIN_5M_VOLUME_SURGE_RATIO
-MIN_5M_PRICE_IMPULSE_PCT = float(os.getenv("MIN_5M_PRICE_IMPULSE_PCT", "0.60"))    # Импульс свечи от 0.60% (и >= 0.9 * ATR14)
+MIN_5M_PRICE_IMPULSE_PCT = float(os.getenv("MIN_5M_PRICE_IMPULSE_PCT", "0.40"))    # Импульс свечи от 0.40% (и >= 0.85 * ATR14)
 MIN_IMPULSE_PCT = MIN_5M_PRICE_IMPULSE_PCT
 
 # Сила закрытия бара (Close Location Value — Marubozu дружелюбно!):
-# Для LONG закрытие в верхних 32% диапазона свечи (>= 0.68), для SHORT — в нижних 32%.
-MIN_CLOSE_STRENGTH = float(os.getenv("MIN_CLOSE_STRENGTH", "0.68"))
-WICK_REJECTION_MIN = float(os.getenv("WICK_REJECTION_MIN", "0.0"))                # Защитный фитиль отбоя/сопротивления не менее 12% свечи
+# Для LONG закрытие в верхних 34% диапазона свечи (>= 0.66), для SHORT — в нижних 34%.
+MIN_CLOSE_STRENGTH = float(os.getenv("MIN_CLOSE_STRENGTH", "0.66"))
+WICK_REJECTION_MIN = float(os.getenv("WICK_REJECTION_MIN", "0.0"))
 WICK_EXHAUSTION_MAX = float(os.getenv("WICK_EXHAUSTION_MAX", "0.28"))              # Встречный фитиль истощения <= 28% (отсев Bull/Bear Trap)
 MAX_EMA21_EXTENSION_PCT = float(os.getenv("MAX_EMA21_EXTENSION_PCT", "0.035"))     # Защита от погони за улетевшей 5-й свечой (>3.5% от EMA21)
-MAX_LIVE_DRIFT_PCT = float(os.getenv("MAX_LIVE_DRIFT_PCT", "0.015"))               # Разрешаем вход при умеренном дрейфе цены, чтобы не пропускать быстрые ракеты
+MAX_LIVE_DRIFT_PCT = float(os.getenv("MAX_LIVE_DRIFT_PCT", "0.018"))               # Разрешаем вход при умеренном дрейфе цены, чтобы не пропускать быстрые ракеты
 
-# Честные структурные границы стоп-лосса (БЕЗ искусственного обрезания внутри свечи!):
+# Честные структурные границы стоп-лосса (с умной ATR-привязкой на широких свечах):
 STOP_LOSS_MIN_PCT = float(os.getenv("STOP_LOSS_MIN_PCT", "0.005"))  # 0.50% минимальный структурный стоп
-STOP_LOSS_MAX_PCT = float(os.getenv("STOP_LOSS_MAX_PCT", "0.022"))  # 2.20% максимальный структурный стоп (шире — сетап пропускается)
+STOP_LOSS_MAX_PCT = float(os.getenv("STOP_LOSS_MAX_PCT", "0.024"))  # 2.40% максимальный структурный стоп
 MAX_ALLOWED_SL_PCT = STOP_LOSS_MAX_PCT
 WICK_BUFFER_PCT = float(os.getenv("WICK_BUFFER_PCT", "0.0010"))     # 0.10% буфер за экстремум фитиля
 MIN_PULLBACK_PCT = float(os.getenv("MIN_PULLBACK_PCT", "0.0005"))
 
 # ==============================================================================
-# 5. ASYMMETRIC TREND-FOLLOWING EXIT ENGINE (25% / 25% / 50% ATR RUNNER + TIME-STOP)
+# 5. ASYMMETRIC TREND-FOLLOWING EXIT ENGINE (30% / 30% / 40% ATR RUNNER + TIME-STOP)
 # ==============================================================================
-TARGET_1_R = float(os.getenv("TARGET_1_R", "2.0"))           # TP1 на +2.0R: фиксация 25% + стоп в безубыток (+0.20%)
-TARGET_2_R = float(os.getenv("TARGET_2_R", "3.5"))           # TP2 на +3.5R: фиксация еще 25% + защита +1.2R
-TP1_PARTIAL_PCT = 0.25                                       # 25% от начальной позиции на TP1
-TP2_PARTIAL_OF_REMAINING = round(0.25 / 0.75, 4)             # 33.33% от остатка (25% от начальной), оставляя 50% ранера!
+TARGET_1_R = float(os.getenv("TARGET_1_R", "1.8"))           # TP1 на +1.8R: фиксация 30% + стоп в безубыток (+0.20%)
+TARGET_2_R = float(os.getenv("TARGET_2_R", "3.0"))           # TP2 на +3.0R: фиксация еще 30% + защита +1.2R
+TP1_PARTIAL_PCT = 0.30                                       # 30% от начальной позиции на TP1
+TP2_PARTIAL_OF_REMAINING = round(0.30 / 0.70, 4)             # 42.86% от остатка (30% от начальной), оставляя 40% ранера!
 
 TP1_PCT = float(os.getenv("TP1_PCT", "0.012"))               # Минимальный порог TP1 (1.2% хода цены)
 TP2_PCT = float(os.getenv("TP2_PCT", "0.024"))               # Минимальный порог TP2 (2.4% хода цены)
 
 RUNNER_ATR_MULT = float(os.getenv("RUNNER_ATR_MULT", "2.5")) # Chandelier ATR трейлинг 2.5 * ATR14 для ловли ракет +5%..+15%
 RUNNER_ACTIVATION_R = float(os.getenv("RUNNER_ACTIVATION_R", "2.2"))  # Включение подтяжки трейла от +2.2R (не душит откат после TP1!)
-TRAILING_STOP_PCT = float(os.getenv("TRAILING_STOP_PCT", "0.015"))    # Минимальная дистанция трейла 1.5% против рыночного шума
-TIME_STOP_MINUTES = int(os.getenv("TIME_STOP_MINUTES", "60"))         # [FIX v2] Time-Stop 60 мин (было 35: 59% сделок закрывались по времени и отдавали комиссии)
-TIME_STOP_MIN_R = float(os.getenv("TIME_STOP_MIN_R", "0.30"))          # [FIX v2] выход по времени только если прибыль < +0.30R (было 0.45R)
-STAGNATION_EXIT_MINUTES = int(os.getenv("STAGNATION_EXIT_MINUTES", "18"))  # Быстрый скретч-выход через 18 мин, если монета застряла в мертвом флэте
+TRAILING_STOP_PCT = float(os.getenv("TRAILING_STOP_PCT", "0.013"))    # Минимальная дистанция трейла 1.3% против рыночного шума
+TIME_STOP_MINUTES = int(os.getenv("TIME_STOP_MINUTES", "35"))         # Time-Stop: выход через 35 мин, если импульс затух (< +0.45R без TP1)
+STAGNATION_EXIT_MINUTES = int(os.getenv("STAGNATION_EXIT_MINUTES", "18"))
 TAKER_FEE_PCT = float(os.getenv("TAKER_FEE_PCT", "0.0005"))           # 0.05% биржевой сбор тейкера
 
 # ==============================================================================
-# 6. MARKET SCANNER & EXPANDED LIQUID BINANCE UNIVERSE (200+ ПАР)
+# 6. MARKET SCANNER & EXPANDED LIQUID BINANCE UNIVERSE (200+ ЧИСТЫХ КРИПТО-ПАР)
 # ==============================================================================
-MIN_24H_VOLUME_USDT = max(float(os.getenv("MIN_24H_VOLUME_USDT", "60000000")), 5000000.0)  # [FIX v2] $60M на fapi (было $5M — бот торговал тонкими монетами)
-SPOT_MIRROR_MIN_VOL_USDT = float(os.getenv("SPOT_MIRROR_MIN_VOL_USDT", "8000000"))         # $350K Spot USDT на vision (охват 200+ реальных пар Binance)
-SCAN_TICKERS_LIMIT = min(int(os.getenv("SCAN_TICKERS_LIMIT", "80")), 250)                # Охват до 220-250 крипто-пар Binance
-MIN_24H_TRADES_COUNT = int(os.getenv("MIN_24H_TRADES_COUNT", "15000"))                      # Минимум 2500 сделок в сутки (защита от монет-призраков)
-MIN_AVG_5M_QUOTE_VOL = float(os.getenv("MIN_AVG_5M_QUOTE_VOL", "50000.0"))   # [FIX v2] спот-зеркало: средний 5m оборот >= $50k (было $2.5k). На fapi порог х3 (см. MIN_AVG_5M_QUOTE_VOL_FAPI_MULT)
-MIN_AVG_5M_QUOTE_VOL_FAPI_MULT = float(os.getenv("MIN_AVG_5M_QUOTE_VOL_FAPI_MULT", "3.0"))
-MIN_NOTIONAL_USDT = float(os.getenv("MIN_NOTIONAL_USDT", "6.0"))             # [FIX v2] минимальный размер позиции (Binance: от $5)                 # Минимум $2500 средний объем 5m свечи (отсев $178 свечей как на HEMI)
-MIN_V3_VOLUME_PERSISTENCE = float(os.getenv("MIN_V3_VOLUME_PERSISTENCE", "1.15"))          # Кумулятивный приток объема за 3 свечи (15 мин) >= 1.15x
-ENABLE_MTF_15M_FILTER = os.getenv("ENABLE_MTF_15M_FILTER", "true").lower() == "true"       # 15m Multi-Timeframe Guard (защита от лонгов против падающего рынка)
-MAX_24H_CHANGE_CAP = float(os.getenv("MAX_24H_CHANGE_CAP", "30.0"))       # Позволяем честно торговать сильнейшими импульсными монетами (до +100% за сутки)
+MIN_24H_VOLUME_USDT = max(float(os.getenv("MIN_24H_VOLUME_USDT", "4000000")), 3500000.0)  # $3.5M-$4M на fapi Perpetual
+SPOT_MIRROR_MIN_VOL_USDT = float(os.getenv("SPOT_MIRROR_MIN_VOL_USDT", "350000"))         # $350K Spot USDT на vision
+SCAN_TICKERS_LIMIT = min(int(os.getenv("SCAN_TICKERS_LIMIT", "220")), 250)                # Охват до 220-250 чистых крипто-пар Binance
+MIN_24H_TRADES_COUNT = int(os.getenv("MIN_24H_TRADES_COUNT", "2500"))                      # Минимум 2500 сделок в сутки (защита от монет-призраков)
+MIN_AVG_5M_QUOTE_VOL = float(os.getenv("MIN_AVG_5M_QUOTE_VOL", "2500.0"))                 # Минимум $2500 средний объем 5m свечи
+MIN_V3_VOLUME_PERSISTENCE = float(os.getenv("MIN_V3_VOLUME_PERSISTENCE", "1.10"))          # Кумулятивный приток объема за 3 свечи
+ENABLE_MTF_15M_FILTER = os.getenv("ENABLE_MTF_15M_FILTER", "true").lower() == "true"       # 15m Multi-Timeframe Guard
+MAX_24H_CHANGE_CAP = float(os.getenv("MAX_24H_CHANGE_CAP", "100.0"))       # Позволяем честно торговать сильнейшими импульсными ракетами (до +100% за сутки)
 STRICT_WHITELIST_ONLY = os.getenv("STRICT_WHITELIST_ONLY", "false").lower() == "true"
-CHOP_MIN_VOLUME_SURGE = float(os.getenv("CHOP_MIN_VOLUME_SURGE", "1.50"))
-ML_MIN_FILTER_PROB = float(os.getenv("ML_MIN_FILTER_PROB", "0.42"))       # Валидированный порог отсева слабых сетапов по закрытой свече
-ML_CONFIDENCE_THRESHOLD = float(os.getenv("ML_CONFIDENCE_THRESHOLD", "0.52"))
+CHOP_MIN_VOLUME_SURGE = float(os.getenv("CHOP_MIN_VOLUME_SURGE", "1.45"))
+ML_MIN_FILTER_PROB = float(os.getenv("ML_MIN_FILTER_PROB", "0.54"))       # Валидированный институциональный порог ML (>= 54%, PF 1.97)
+ML_CONFIDENCE_THRESHOLD = float(os.getenv("ML_CONFIDENCE_THRESHOLD", "0.54"))
+
+def round_price(val: float) -> float:
+    """Форматирует цену с сохранением 8 значащих цифр (защита мемов и дешевых монет от обрезки round(x, 6))."""
+    if val is None or val <= 0:
+        return 0.0
+    if val >= 1.0:
+        return round(val, 6)
+    return float(f"{val:.8g}")
 
 # Элитный юниверс доказанной ликвидности (топ мажоры, L1/L2, импульсные мемкоины и ракеты):
 TOP_CRYPTO_UNIVERSE = [
-    "SOLUSDT", "PEPEUSDT", "DOGEUSDT", "NEARUSDT", "SUIUSDT",
+    "SOLUSDT", "1000PEPEUSDT", "DOGEUSDT", "NEARUSDT", "SUIUSDT",
     "ENAUSDT", "JUPUSDT", "RENDERUSDT", "WIFUSDT", "APTUSDT",
     "TIAUSDT", "SEIUSDT", "AVAXUSDT", "LINKUSDT", "INJUSDT",
     "FETUSDT", "OPUSDT", "ARBUSDT", "BTCUSDT", "ETHUSDT",
-    "BNBUSDT", "XRPUSDT", "SHIBUSDT", "1000PEPEUSDT", "1000SHIBUSDT",
-    "BONKUSDT", "1000BONKUSDT", "FLOKIUSDT", "POPCATUSDT", "NEIROUSDT",
-    "MOODENGUSDT", "GOATUSDT", "ACTUSDT", "PNUTUSDT", "DRIFTUSDT",
-    "GRASSUSDT", "VIRTUALUSDT", "AIXBTUSDT", "PENDLEUSDT", "UNIUSDT",
-    "AAVEUSDT", "DOTUSDT", "LTCUSDT", "BCHUSDT", "FILUSDT",
-    "TONUSDT", "TAOUSDT", "PYTHUSDT", "JTOUSDT", "RAYUSDT",
-    "ORDIUSDT", "BEAMXUSDT", "POWRUSDT", "GTCUSDT", "WLDUSDT", "ONDOUSDT"
+    "BNBUSDT", "XRPUSDT", "1000SHIBUSDT", "1000BONKUSDT", "1000FLOKIUSDT",
+    "POPCATUSDT", "NEIROUSDT", "MOODENGUSDT", "GOATUSDT", "ACTUSDT",
+    "PNUTUSDT", "DRIFTUSDT", "GRASSUSDT", "VIRTUALUSDT", "AIXBTUSDT",
+    "PENDLEUSDT", "UNIUSDT", "AAVEUSDT", "DOTUSDT", "LTCUSDT",
+    "BCHUSDT", "FILUSDT", "TONUSDT", "TAOUSDT", "PYTHUSDT",
+    "JTOUSDT", "RAYUSDT", "ORDIUSDT", "BEAMXUSDT", "POWRUSDT",
+    "GTCUSDT", "WLDUSDT", "ONDOUSDT", "PEPEUSDT", "SHIBUSDT", "BONKUSDT", "FLOKIUSDT"
 ]
 
+# Полный список 255 не-криптовалютных контрактов TradFi (акции США/Гонконга/Кореи/Китая, ETF, сырье, индексы):
+TRADFI_EXCLUSION_SET = {
+    "AAOIUSDT", "AAPLUSDT", "ABBVUSDT", "ACNUSDT", "ADBEUSDT", "AGPUUSDT", "AKAMUSDT", "ALABUSDT",
+    "ALLUSDT", "AMATUSDT", "AMCUSDT", "AMDLUSDT", "AMDUSDT", "AMGNUSDT", "AMZNUSDT", "ANETUSDT",
+    "ANTHROPICUSDT", "ANTUSDT", "APLDUSDT", "APPUSDT", "ARMUSDT", "ARTYUSDT", "ASMLUSDT", "ASTSUSDT",
+    "AVGOUSDT", "AXTIUSDT", "BABAUSDT", "BACUSDT", "BBXUSDT", "BEUSDT", "BITOUSDT", "BMNRUSDT",
+    "BNCUSDT", "BOTUSDT", "BRKBUSDT", "BSPUSDT", "BTCDOMUSDT", "BTCUSDT_261225", "BTCUSDT_270326",
+    "BWETUSDT", "BXUSDT", "BYDUSDT", "BZUSDT", "CATUSDT", "CBRSUSDT", "CCJUSDT", "CEGUSDT",
+    "CIENUSDT", "CLUSDT", "COHRUSDT", "COINUSDT", "COPPERUSDT", "COSTUSDT", "CRCLUSDT", "CRDOUSDT",
+    "CRMLUSDT", "CRMUSDT", "CRWDUSDT", "CRWVUSDT", "CSCOUSDT", "CSOPSAMSUNG2LUSDT", "CSOPSKHYNIX2LUSDT",
+    "CVNAUSDT", "CXMTUSDT", "CYPHUSDT", "DDOGUSDT", "DEFIUSDT", "DELLUSDT", "DISUSDT", "DJTUSDT",
+    "DKNGUSDT", "DRAMUSDT", "EBAYUSDT", "EIDOUSDT", "EQTUSDT", "ETHUSDT_261225", "ETHUSDT_270326",
+    "ETNUSDT", "EWJUSDT", "EWTUSDT", "EWYUSDT", "EWZSUSDT", "EWZUSDT", "FLEXUSDT", "FLNCUSDT",
+    "FRHCUSDT", "FWDIUSDT", "GDXUSDT", "GEVUSDT", "GIGADEVUSDT", "GLWUSDT", "GMEUSDT", "GOOGLUSDT",
+    "GPROUSDT", "GSUSDT", "GTLBUSDT", "HANMIUSDT", "HDUSDT", "HIMSUSDT", "HK0625USDT", "HK0700USDT",
+    "HK0992USDT", "HK1810USDT", "HOODUSDT", "HPEUSDT", "HUTUSDT", "HYUNDAIUSDT", "IBITUSDT",
+    "IBKRUSDT", "IBMUSDT", "IGVUSDT", "INTCUSDT", "INTWUSDT", "IONQUSDT", "IRENUSDT", "IWMUSDT",
+    "JNJUSDT", "JPMUSDT", "KLACUSDT", "KODEX200USDT", "KORUUSDT", "KOUSDT", "KSTRUSDT", "KUAISHOUUSDT",
+    "LGELECTRONICSUSDT", "LITEUSDT", "LLYUSDT", "LRCXUSDT", "LYTEUSDT", "MARAUSDT", "MCDUSDT",
+    "MDBUSDT", "MDTUSDT", "MEITUANUSDT", "MELIUSDT", "METAUSDT", "MINIMAXUSDT", "MOONSHOTUSDT",
+    "MPUSDT", "MRKUSDT", "MRNAUSDT", "MRVLUSDT", "MSFTUSDT", "MSTRUSDT", "MSTUUSDT", "MUUSDT",
+    "MUUUSDT", "MVLLUSDT", "NATGASUSDT", "NAVERUSDT", "NBISUSDT", "NETUSDT", "NFLXUSDT", "NIOUSDT",
+    "NKEUSDT", "NOKUSDT", "NOWUSDT", "NUUSDT", "NVDAUSDT", "NVDLUSDT", "NVOUSDT", "OKLOUSDT",
+    "ONDSUSDT", "OPENAIUSDT", "ORCLUSDT", "OURAUSDT", "OXYUSDT", "PANWUSDT", "PATHUSDT", "PAYPUSDT",
+    "PDDUSDT", "PENGUSDT", "PFEUSDT", "PLTRUSDT", "POPMARTUSDT", "PREDICTUSDT", "PYPLUSDT", "QCOMUSDT",
+    "QNTXUSDT", "QQQUSDT", "RAMUSDT", "RDDTUSDT", "RDWUSDT", "RIVNUSDT", "RKLBUSDT", "RUMUSDT",
+    "SAMSUNGEMUSDT", "SAMSUNGUSDT", "SECZUSDT", "SHAZUSDT", "SHOPUSDT", "SKDDUSDT", "SKHYNIXUSDT",
+    "SKHYUSDT", "SKUUUSDT", "SMCIUSDT", "SMHUSDT", "SMRUSDT", "SNDKUSDT", "SNOWUSDT", "SNPSUSDT",
+    "SNXXUSDT", "SOFIUSDT", "SONYUSDT", "SOXLUSDT", "SOXSUSDT", "SOXXUSDT", "SPCXUSD1", "SPCXUSDT",
+    "SPYUSDT", "SQQQUSDT", "STMUSDT", "STRCUSDT", "STXXUSDT", "TBTUSDT", "TEAMUSDT", "TEMUSDT",
+    "TENCENTUSDT", "TERUSDT", "TMFUSDT", "TQQQUSDT", "TSLAUSDT", "TSLLUSDT", "TSMUSDT", "TTWOUSDT",
+    "TWSTUSDT", "TXNUSDT", "TZAUSDT", "UBERUSDT", "UNHUSDT", "UNITREEUSDT", "URNMUSDT", "USARUSDT",
+    "USDBRLUSDT", "USDEXUSDT", "UVXYUSDT", "VKTXUSDT", "VRTUSDT", "VSTUSDT", "VUSDT", "WDCUSDT",
+    "WENUSDT", "WMTUSDT", "XAGUSDT", "XAUUSDT", "XBIUSDT", "XLEUSDT", "XOMUSDT", "XPDUSDT",
+    "XPTUSDT", "ZCSHUSDT", "ZHIPUUSDT", "ZHONGJIUSDT", "ZMUSDT", "ZSUSDT"
+}
+
 # Корни токенизированных акций и ETF (отсекают как <ROOT>USDT, так и <ROOT>BUSDT на Spot/Vision):
-STOCK_TICKER_ROOTS = {
+STOCK_TICKER_ROOTS = {s[:-4] for s in TRADFI_EXCLUSION_SET if s.endswith("USDT")} | {
     "NVDA", "TSLA", "AAPL", "MSFT", "AMZN", "GOOG", "GOOGL", "META", "MSTR",
     "COIN", "QQQ", "SPY", "SOXL", "SOXS", "INTC", "INTW", "SNDK", "CRCL",
     "SPCX", "SKHY", "SKHYNIX", "KORU", "AMD", "PLTR", "HOOD", "NFLX", "BABA",
-    "MU", "BNC", "AKE"
+    "MU", "BNC", "AKE", "TQQQ", "SQQQ", "LRCX", "QCOM", "ASML", "SMH", "AVGO", "PANW", "UNITREE"
 }
 
-# Черный список: стейблкоины, фиат, золото/металлы, хаки и синтетические акции
-EXCLUDED_TICKERS = {
+# Черный список: стейблкоины, фиат, золото/металлы, хаки и все 255 синтетических акций/TradFi
+EXCLUDED_TICKERS = TRADFI_EXCLUSION_SET | {
     # Стейблкоины, синтетический доллар, фиат и золото
     "USDCUSDT", "FDUSDUSDT", "TUSDUSDT", "BUSDUSDT", "EURUSDT", "EURIUSDT", "AEURUSDT",
     "DAIUSDT", "USTCUSDT", "USD1USDT", "USDEUSDT", "RLUSDUSDT", "RWUSDUSDT", "UUSDT",
     "BFUSDUSDT", "PAXGUSDT", "XAUUSDT", "XAUTUSDT", "XAGUSDT",
-    # Традиционные акции и ETF
-    "GOOGLUSDT", "MSTRUSDT", "QQQUSDT", "MUUSDT", "SOXSUSDT", "SPYUSDT", "NVDAUSDT",
-    "TSLAUSDT", "AAPLUSDT", "AMZNUSDT", "MSFTUSDT", "COINBUSDT", "SOXLUSDT", "INTCUSDT", "SNDKUSDT",
-    "SKHYNIXUSDT", "SKHYUSDT", "KORUUSDT", "SPCXUSDT", "AKEUSDT", "CRCLUSDT",
+    "COINBUSDT", "AKEUSDT",
     # Хакнутые/делистнутые/проблемные токены
     "INITUSDT", "CRVUSDT", "MEGAUSDT", "AVAUSDT", "SOLVUSDT", "BIRBUSDT",
     "COCOSUSDT", "RNDRUSDT", "GALUSDT", "POLYUSDT"

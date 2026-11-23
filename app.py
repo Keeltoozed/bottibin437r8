@@ -150,36 +150,36 @@ with st.sidebar:
     st.divider()
     st.markdown("### 🚀 Structural Rocket Hunter ($20)")
 
-    # Режим риск-профиля (без поломки структурных фильтров пробоя!)
+    # Режим риск-профиля (3-Stage Super-Profitable Rocket Hunter)
     strategy_mode = st.radio(
         "Профиль риск-менеджмента:",
         [
-            "🚀 Охотник за Ракетами — Стандарт (12x, риск 2.5% = ~$0.50)",
-            "🛡️ Консервативный Проп (10x, риск 2.0% = ~$0.40)",
-            "🔥 Агрессивный Трендовик (15x, риск 3.2% = ~$0.65)"
+            "🚀 Охотник за Ракетами — Ultra 3-Stage (15x, риск 3.5% + A+ Boost)",
+            "🔥 Высокий Импульс (18x, риск 3.8% + A+ Boost)",
+            "🛡️ Стандарт Проп (12x, риск 2.5% = ~$0.50)"
         ],
         index=0
     )
-    if "Консервативный" in strategy_mode:
-        default_lev = 10
-        config.RISK_PER_TRADE_PCT = 0.020
-        config.MIN_5M_VOLUME_SURGE_RATIO = 1.80
-        config.MIN_CLOSE_STRENGTH = 0.70
-        config.DAILY_LOSS_LIMIT = 3
-    elif "Агрессивный" in strategy_mode:
-        default_lev = 15
-        config.RISK_PER_TRADE_PCT = 0.032
-        config.MIN_5M_VOLUME_SURGE_RATIO = 1.80
-        config.MIN_CLOSE_STRENGTH = 0.68
-        config.DAILY_LOSS_LIMIT = 3
-    else:
+    if "Стандарт" in strategy_mode:
         default_lev = 12
         config.RISK_PER_TRADE_PCT = 0.025
-        config.MIN_5M_VOLUME_SURGE_RATIO = 1.80
-        config.MIN_CLOSE_STRENGTH = 0.68
-        config.DAILY_LOSS_LIMIT = 3
+        config.MIN_5M_VOLUME_SURGE_RATIO = 1.45
+        config.MIN_CLOSE_STRENGTH = 0.66
+        config.DAILY_LOSS_LIMIT = 99
+    elif "Высокий" in strategy_mode:
+        default_lev = 18
+        config.RISK_PER_TRADE_PCT = 0.038
+        config.MIN_5M_VOLUME_SURGE_RATIO = 1.50
+        config.MIN_CLOSE_STRENGTH = 0.66
+        config.DAILY_LOSS_LIMIT = 99
+    else:
+        default_lev = 15
+        config.RISK_PER_TRADE_PCT = 0.035
+        config.MIN_5M_VOLUME_SURGE_RATIO = 1.45
+        config.MIN_CLOSE_STRENGTH = 0.66
+        config.DAILY_LOSS_LIMIT = 99
 
-    lev_options = [10, 12, 15, 20, 25]
+    lev_options = [10, 12, 15, 18, 20, 25]
     if getattr(st.session_state, "_prev_mode", None) != strategy_mode:
         st.session_state["_prev_mode"] = strategy_mode
         portfolio.current_leverage = default_lev
@@ -589,10 +589,10 @@ with tab_timemachine:
             pre = precompute_indicators(cdata)
 
             configs = [
-                ("🚀 Rocket Hunter Standard (12x, Риск 2.5%, ML≥42%)", dict(leverage=12, risk_pct=0.025, ml_min_prob=0.42)),
-                ("🔥 Rocket Hunter Compound (15x, Риск 3.2%, ML≥42%)", dict(leverage=15, risk_pct=0.032, ml_min_prob=0.42)),
-                ("🛡️ Rocket Hunter Conservative (10x, Риск 2.0%, ML≥48%)", dict(leverage=10, risk_pct=0.020, ml_min_prob=0.48)),
-                ("⚡ Rocket Hunter Pure Price-Action (Без ML фильтра)", dict(leverage=12, risk_pct=0.025, ml_min_prob=0.00)),
+                ("🚀 Rocket Hunter 3-Stage Ultra (15x, Риск 3.5%, ML≥55%)", dict(leverage=15, risk_pct=0.035, lookback=12, min_surge=1.45, min_impulse=0.40, ml_min_prob=0.55, tp1_r=1.8)),
+                ("🔥 Rocket Hunter High-Conviction (18x, Риск 3.8%, ML≥56%)", dict(leverage=18, risk_pct=0.038, lookback=12, min_surge=1.50, min_impulse=0.45, ml_min_prob=0.56, tp1_r=1.7)),
+                ("🛡️ Rocket Hunter Standard (12x, Риск 2.5%, ML≥54%)", dict(leverage=12, risk_pct=0.025, lookback=12, min_surge=1.45, min_impulse=0.40, ml_min_prob=0.54, tp1_r=1.8)),
+                ("⚡ Rocket Hunter Pure Price-Action (Без ML фильтра)", dict(leverage=15, risk_pct=0.035, lookback=15, min_surge=1.35, min_impulse=0.55, ml_min_prob=0.00, tp1_r=1.5, use_continuation=False, use_ema50_macro=False, use_conviction_sizing=False)),
                 ("❌ Старый скальпер (Фитиль≥12%, Трейл 0.7%, Обрез SL)", dict(leverage=10, legacy_churn_mode=True)),
             ]
 

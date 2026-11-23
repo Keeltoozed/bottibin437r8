@@ -1,6 +1,8 @@
 import os
 import json
 import time
+import threading
+import requests
 from typing import Dict, List, Any, Optional
 import config
 from obsidian_vault import obsidian_vault
@@ -213,7 +215,34 @@ class PortfolioTracker:
         except Exception as e:
             print(f"⚠️ [Obsidian Log Error] {e}", flush=True)
 
+        self._send_telegram_async(
+            f"🚀 *ROCKET OPEN: {side} {symbol}* ({leverage}x)\n"
+            f"• Вход: `${entry_price}` | Маржа: `${margin_usdt:.2f}` (Риск 1R: `${risk_usd:.2f}`)\n"
+            f"• SL: `${wick_sl}` | TP1: `${tp1}` | TP2: `${tp2}`\n"
+            f"• Тезис: _{groq_reason}_"
+        )
         return True
+
+    def _send_telegram_async(self, text: str):
+        """Неблокирующая отправка уведомлений в Telegram (если настроены токен и chat_id)."""
+        if not getattr(self, "persist_enabled", True) or not getattr(config, "ENABLE_TELEGRAM", False):
+            return
+        token = getattr(config, "TELEGRAM_BOT_TOKEN", "")
+        chat_id = getattr(config, "TELEGRAM_CHAT_ID", "")
+        if not token or not chat_id:
+            return
+
+        def _worker():
+            try:
+                requests.post(
+                    f"https://api.telegram.org/bot{token}/sendMessage",
+                    json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"},
+                    timeout=5
+                )
+            except Exception:
+                pass
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def update_leverage(self, new_leverage: int):
         """Обновляет плечо для открытых позиций."""
@@ -322,7 +351,7 @@ class PortfolioTracker:
         total_gross = round(pos["gross_pnl_accum"], 3)
         total_fees = round(pos["fees_accum"], 4)
         w_den = max(pos.get("weighted_exit_den", closed_margin), 1e-9)
-        blended_exit = round(pos.get("weighted_exit_num", closed_margin * exit_price) / w_den, 6)
+        blended_exit = config.round_price(pos.get("weighted_exit_num", closed_margin * exit_price) / w_den)
         total_roi_pct = round((total_realized / initial_mg) * 100, 2)
 
         notes = pos.get("partial_notes", [])
@@ -413,6 +442,12 @@ class PortfolioTracker:
             f"🏁 [POSITION CLOSED] {symbol} (средний выход ${blended_exit:.4f}) | "
             f"Итоговый PnL: ${total_realized:+.2f} ({total_roi_pct:+.1f}%) | {full_reason}",
             flush=True
+        )
+        self._send_telegram_async(
+            f"🏁 *POSITION CLOSED: {pos['side']} {symbol}*\n"
+            f"• Итоговый PnL: `{total_realized:+.2f} USDT` (`{total_roi_pct:+.1f}%`)\n"
+            f"• Вход: `${entry}` ➔ Средний выход: `${blended_exit}`\n"
+            f"• Причина: _{full_reason}_"
         )
 
     def close_all(self, reason: str = "Ручное закрытие (Panic Close)"):

@@ -158,13 +158,18 @@ def extract_features_from_candles(candles: List[Dict[str, Any]], side: str = "LO
         return None
 
     # Если последняя свеча еще формируется в реальном времени (< 5 минут с момента открытия),
-    # отсекаем её, чтобы скоринг ML оценивал именно закрытый сигнальный бар (candles[-2])!
+    # отсекаем её, ЕСЛИ в ней еще не набрался реальный пробойный объем (>= 1.25x от средней 20 свечей).
+    # Это защищает от пустой 3-секундной свечи, но позволяет оценивать Live Intra-Bar ракеты в реальном времени!
     working_candles = candles
     if len(candles) >= 16:
         try:
             last_open_ms = int(candles[-1].get("time", 0))
             now_ms = int(time.time() * 1000)
-            if last_open_ms > 0 and (now_ms - last_open_ms) < 299_000:
+            prior_vols = [float(c.get("quote_vol", c.get("volume", 0.0))) for c in candles[-21:-1]]
+            avg_prior_v = (sum(prior_vols) / len(prior_vols)) if prior_vols else 1.0
+            last_v = float(candles[-1].get("quote_vol", candles[-1].get("volume", 0.0)))
+            is_live_volume_explosion = (now_ms - last_open_ms) >= 40_000 and avg_prior_v > 0 and (last_v / avg_prior_v) >= 1.45
+            if last_open_ms > 0 and (now_ms - last_open_ms) < 299_000 and not is_live_volume_explosion:
                 working_candles = candles[:-1]
         except (ValueError, TypeError):
             working_candles = candles[:-1]

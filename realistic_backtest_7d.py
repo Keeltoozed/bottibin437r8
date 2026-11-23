@@ -148,6 +148,7 @@ def precompute_indicators(all_data: Dict[str, List[Dict[str, float]]]) -> Dict[s
         entry: Dict[str, Any] = {
             "ema9": _calc_ema_series(closes, 9),
             "ema21": _calc_ema_series(closes, 21),
+            "ema50": _calc_ema_series(closes, 50),
             "rsi": _calc_rsi_series(closes, 14),
             "atr": _calc_atr_series(cdls, 14),
             "time_idx": {c["time"]: i for i, c in enumerate(cdls)},
@@ -171,18 +172,21 @@ def precompute_indicators(all_data: Dict[str, List[Dict[str, float]]]) -> Dict[s
 
 def simulate_strategy(
     all_data: Dict[str, List[Dict[str, float]]],
-    leverage: int = 12,
-    risk_pct: float = 0.025,
-    lookback: int = 20,
-    min_surge: float = 1.80,
-    min_impulse: float = 0.60,
-    min_clv: float = 0.68,
+    leverage: int = 15,
+    risk_pct: float = 0.035,
+    lookback: int = 12,
+    min_surge: float = 1.45,
+    min_impulse: float = 0.40,
+    min_clv: float = 0.66,
     max_wick_exh: float = 0.28,
-    ml_min_prob: float = 0.42,
-    tp1_r: float = 1.5,
+    ml_min_prob: float = 0.55,
+    tp1_r: float = 1.8,
     tp2_r: float = 3.0,
     atr_trail_mult: float = 2.5,
     time_stop_bars: int = 7,
+    use_continuation: bool = True,
+    use_ema50_macro: bool = True,
+    use_conviction_sizing: bool = True,
     legacy_churn_mode: bool = False,
     initial_balance: float = 20.0,
     precomputed: Optional[Dict[str, Dict[str, Any]]] = None
@@ -418,6 +422,7 @@ def simulate_strategy(
                 clv_l = (sig["close"] - sig["low"]) / rng
                 clv_s = (sig["high"] - sig["close"]) / rng
                 ema9, ema21 = ind[sym]["ema9"][idx - 1], ind[sym]["ema21"][idx - 1]
+                ema50 = ind[sym].get("ema50", ind[sym]["ema21"])[idx - 1]
                 if abs(sig["close"] - ema21) / max(ema21, 1e-9) > 0.035:
                     continue
 
@@ -425,8 +430,23 @@ def simulate_strategy(
                 sl20 = min(x["low"] for x in cdls[idx - 1 - lookback: idx - 1])
                 sh12 = max(x["high"] for x in cdls[idx - 13: idx - 1])
                 sl12 = min(x["low"] for x in cdls[idx - 13: idx - 1])
+                pct_15m = (sig["close"] - cdls[idx - 4]["close"]) / cdls[idx - 4]["close"] * 100.0
 
                 brk_l = (sig["close"] > sh20) or (surge >= 2.8 and sig["close"] > sh12 and ema9 >= ema21)
+                brk_s = (sig["close"] < sl20) or (surge >= 2.8 and sig["close"] < sl12 and ema9 <= ema21)
+
+                if use_continuation and ml_min_prob > 0.0:
+                    sh5 = max(x["high"] for x in cdls[idx - 6: idx - 1])
+                    sl5 = min(x["low"] for x in cdls[idx - 6: idx - 1])
+                    brk_l = brk_l or (sig["close"] > sh5 and ema9 > ema21 > ema50 and pct_15m >= 0.80 and surge >= 1.65)
+                    brk_s = brk_s or (sig["close"] < sl5 and ema9 < ema21 < ema50 and pct_15m <= -0.80 and surge >= 1.65)
+
+                if use_ema50_macro and ml_min_prob > 0.0:
+                    if sig["close"] < ema50 * 0.996:
+                        brk_l = False
+                    if sig["close"] > ema50 * 1.004:
+                        brk_s = False
+
                 sl_dist_l = max((ep - min(prev["low"], sig["low"]) * 0.999) / ep, 1.2 * atr_pct, 0.005)
                 is_l = (
                     brk_l and pct_5m >= max(min_impulse, atr_pct * 90.0) and
@@ -435,7 +455,6 @@ def simulate_strategy(
                     48.0 <= rsi <= 86.0 and 0.005 <= sl_dist_l <= 0.022 and not btc_dump
                 )
 
-                brk_s = (sig["close"] < sl20) or (surge >= 2.8 and sig["close"] < sl12 and ema9 <= ema21)
                 sl_dist_s = max((max(prev["high"], sig["high"]) * 1.001 - ep) / ep, 1.2 * atr_pct, 0.005)
                 is_s = (
                     brk_s and pct_5m <= -max(min_impulse, atr_pct * 90.0) and
@@ -447,21 +466,27 @@ def simulate_strategy(
                 if is_l:
                     mlp = float(ind[sym]["ml_long"][idx - 1])
                     if mlp >= ml_min_prob:
-                        cands.append((abs(pct_5m) * surge * clv_l * (0.5 + mlp), sym, "LONG", ep, sl_dist_l))
+                        cands.append((abs(pct_5m) * surge * clv_l * (0.5 + mlp), sym, "LONG", ep, sl_dist_l, mlp, surge))
                 elif is_s:
                     mlp = float(ind[sym]["ml_short"][idx - 1])
                     if mlp >= ml_min_prob:
-                        cands.append((abs(pct_5m) * surge * clv_s * (0.5 + mlp), sym, "SHORT", ep, sl_dist_s))
+                        cands.append((abs(pct_5m) * surge * clv_s * (0.5 + mlp), sym, "SHORT", ep, sl_dist_s, mlp, surge))
 
             cands.sort(reverse=True)
             slots = 1 if legacy_churn_mode else (2 - len(open_pos))
-            for _, sym, side, ep, sl_dist in cands[:slots]:
+            for item in cands[:slots]:
+                if len(item) == 5:
+                    _, sym, side, ep, sl_dist = item
+                    mlp, surge = 0.5, 1.5
+                else:
+                    _, sym, side, ep, sl_dist, mlp, surge = item
                 cur_eq = max(15.0, cash + sum(p["margin"] for p in open_pos.values()))
                 if legacy_churn_mode:
                     mg = min(4.0, cash * 0.45)
                     risk_usd = mg * leverage * sl_dist
                 else:
-                    risk_usd = cur_eq * risk_pct
+                    r_mult = 1.35 if (use_conviction_sizing and mlp >= 0.58 and surge >= 1.90) else 1.0
+                    risk_usd = cur_eq * risk_pct * r_mult
                     mg = min((risk_usd / (sl_dist + 2 * rt_cost_per_side)) / leverage, cash * 0.45)
 
                 if mg < 1.5 or cash < mg + 0.1:
@@ -532,10 +557,10 @@ if __name__ == "__main__":
     print("-" * 122)
 
     configs = [
-        ("🚀 Rocket Hunter Standard (12x, Риск 2.5%, ML>=42%)", dict(leverage=12, risk_pct=0.025, ml_min_prob=0.42)),
-        ("🔥 Rocket Hunter Compound (15x, Риск 3.2%, ML>=42%)", dict(leverage=15, risk_pct=0.032, ml_min_prob=0.42)),
-        ("🛡️ Rocket Hunter Conservative (10x, Риск 2.0%, ML>=48%)", dict(leverage=10, risk_pct=0.020, ml_min_prob=0.48)),
-        ("⚡ Rocket Hunter Pure Price-Action (Без ML фильтра)", dict(leverage=12, risk_pct=0.025, ml_min_prob=0.00)),
+        ("🚀 Rocket Hunter 3-Stage Ultra (15x, Риск 3.5%, ML>=55%)", dict(leverage=15, risk_pct=0.035, lookback=12, min_surge=1.45, min_impulse=0.40, ml_min_prob=0.55, tp1_r=1.8)),
+        ("🔥 Rocket Hunter High-Conviction (18x, Риск 3.8%, ML>=56%)", dict(leverage=18, risk_pct=0.038, lookback=12, min_surge=1.50, min_impulse=0.45, ml_min_prob=0.56, tp1_r=1.7)),
+        ("🛡️ Rocket Hunter Standard (12x, Риск 2.5%, ML>=54%)", dict(leverage=12, risk_pct=0.025, lookback=12, min_surge=1.45, min_impulse=0.40, ml_min_prob=0.54, tp1_r=1.8)),
+        ("⚡ Rocket Hunter Pure Price-Action (Без ML фильтра)", dict(leverage=15, risk_pct=0.035, lookback=15, min_surge=1.35, min_impulse=0.55, ml_min_prob=0.00, tp1_r=1.5, use_continuation=False, use_ema50_macro=False, use_conviction_sizing=False)),
         ("❌ Старый скальпер (Фитиль>=12%, Трейл 0.7%, Обрез SL)", dict(leverage=10, legacy_churn_mode=True)),
     ]
 
