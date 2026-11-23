@@ -105,9 +105,9 @@ class GroqEngine:
 Metrics: Price ${cur_p}, Confirmed 20-bar Range Breakout: YES, 5m RVOL: {vol_surge}x, Close Strength (CLV): {clv_pct:.0f}%, 5m Impulse: {p5m:+.2f}%, 15m: {p15m:+.2f}%, EMA21 Extension: {ema21_ext:.2f}%, RSI14: {rsi_val}, Trend: {trend_val}, Upper/Lower Wick: {u_wick:.1f}%/{l_wick:.1f}%, ATR14: {atr_pct:.2f}%, Structural SL: ${sl_price} ({sl_dist:.2f}%), BTC: {btc_reg}.
 Quant & Memory: {ml_prob_str} | {token_mem}
 Prop-Desk Rules:
-1. Fresh volume breakouts (RVOL >= 1.8x, CLV >= 68%) naturally print RSI 70-85 on ignition — DO NOT reject for RSI <= 86!
-2. Approve ("BUY", confidence 0.70-0.92) when volume expansion is strong, upper wick <= 28%, and EMA21 extension <= 3.5%.
-3. Reject ("SKIP") ONLY if obvious Bull Trap (upper wick > 28%), extreme late climax (RSI > 86 or EMA21 extension > 3.5%), or BTC is dumping.
+1. Be a skeptical filter: most 5m breakouts fail within 30 minutes. Approve ("BUY", confidence 0.70-0.90) only when volume expansion is genuine (RVOL >= 3x), the candle closes near its high (CLV >= 68%), the upper wick is small (<= 28%), and price is not already extended (EMA21 extension <= 3.5%).
+2. Reject ("SKIP") on any bull-trap sign: long upper wick, climax candle after a big run (RSI > 82 or 15m move already > 3%), thin or choppy tape, BTC dumping, or if the Quant ML probability is below 45%.
+3. When unsure, SKIP: a skipped trade costs nothing, a bad entry costs 1R plus fees.
 Return ONLY valid JSON matching exact keys:
 {{"trap_risk": false, "decision": "BUY", "confidence": 0.78, "reason": "Concise 1-sentence prop-trader thesis in Russian"}}"""
         else:
@@ -118,9 +118,9 @@ Return ONLY valid JSON matching exact keys:
 Metrics: Price ${cur_p}, Confirmed 20-bar Range Breakdown: YES, 5m RVOL: {vol_surge}x, Bear Close Strength: {clv_pct:.0f}%, 5m Impulse: {p5m:+.2f}%, 15m: {p15m:+.2f}%, EMA21 Extension: {ema21_ext:.2f}%, RSI14: {rsi_val}, Trend: {trend_val}, Upper/Lower Wick: {u_wick:.1f}%/{l_wick:.1f}%, ATR14: {atr_pct:.2f}%, Structural SL: ${sl_price} ({sl_dist:.2f}%), BTC: {btc_reg}.
 Quant & Memory: {ml_prob_str} | {token_mem}
 Prop-Desk Rules:
-1. Fresh breakdowns (RVOL >= 1.8x, Bear Close Strength >= 68%) naturally print RSI 15-30 on ignition — DO NOT reject for RSI >= 14!
-2. Approve ("SHORT", confidence 0.70-0.92) when breakdown volume is real, lower wick <= 28%, and EMA21 extension <= 3.5%.
-3. Reject ("SKIP") ONLY if obvious Bear Trap absorption (lower wick > 28%), extreme late exhaustion (RSI < 14 or EMA21 extension > 3.5%), or BTC is pumping.
+1. Be a skeptical filter: most 5m breakdowns fail within 30 minutes. Approve ("SHORT", confidence 0.70-0.90) only when breakdown volume is genuine (RVOL >= 3x), the candle closes near its low (Bear Close Strength >= 68%), the lower wick is small (<= 28%), and price is not already extended (EMA21 extension <= 3.5%).
+2. Reject ("SKIP") on any bear-trap sign: long lower wick (absorption), capitulation candle after a big drop (RSI < 18 or 15m move already < -3%), thin or choppy tape, BTC pumping, or if the Quant ML probability is below 45%.
+3. When unsure, SKIP: a skipped trade costs nothing, a bad entry costs 1R plus fees.
 Return ONLY valid JSON matching exact keys:
 {{"trap_risk": false, "decision": "SHORT", "confidence": 0.78, "reason": "Concise 1-sentence prop-trader thesis in Russian"}}"""
 
@@ -232,7 +232,9 @@ Return ONLY valid JSON matching exact keys:
                         "reason": f"Отказ: слабая сила закрытия ({clv*100:.0f}%) или верхний фитиль продавцов {upper_wick*100:.0f}%."}
 
             score = 0.72
-            if surge >= 2.20:
+            if surge < config.MIN_5M_VOLUME_SURGE_RATIO:
+                score = 0.40
+            if surge >= 3.50:
                 score += 0.10
             if clv >= 0.80:
                 score += 0.08
@@ -265,7 +267,9 @@ Return ONLY valid JSON matching exact keys:
                         "reason": f"Отказ: откуп снизу (нижний фитиль {lower_wick*100:.0f}%, сила закрытия {clv*100:.0f}%)."}
 
             score = 0.72
-            if surge >= 2.20:
+            if surge < config.MIN_5M_VOLUME_SURGE_RATIO:
+                score = 0.40
+            if surge >= 3.50:
                 score += 0.10
             if clv >= 0.80:
                 score += 0.08

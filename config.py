@@ -59,7 +59,7 @@ BREAKOUT_LOOKBACK_BARS = int(os.getenv("BREAKOUT_LOOKBACK_BARS", "20"))  # Пр�
 FAST_IGNITION_LOOKBACK_BARS = int(os.getenv("FAST_IGNITION_LOOKBACK_BARS", "12"))  # Быстрый пробой 1ч базы при взрывном объеме >= 2.8x
 FAST_IGNITION_SURGE = float(os.getenv("FAST_IGNITION_SURGE", "2.80"))
 
-MIN_5M_VOLUME_SURGE_RATIO = float(os.getenv("MIN_5M_VOLUME_SURGE_RATIO", "1.80"))  # Реальный всплеск RVOL >= 1.80x к 20-свечной средней
+MIN_5M_VOLUME_SURGE_RATIO = float(os.getenv("MIN_5M_VOLUME_SURGE_RATIO", "3.00"))  # [FIX v2] RVOL >= 3.0x (было 1.8x — слабые всплески почти всегда ложные пробои; бэктест: avgR -0.04 -> +0.06)
 MIN_VOLUME_SURGE = MIN_5M_VOLUME_SURGE_RATIO
 MIN_5M_PRICE_IMPULSE_PCT = float(os.getenv("MIN_5M_PRICE_IMPULSE_PCT", "0.60"))    # Импульс свечи от 0.60% (и >= 0.9 * ATR14)
 MIN_IMPULSE_PCT = MIN_5M_PRICE_IMPULSE_PCT
@@ -93,21 +93,24 @@ TP2_PCT = float(os.getenv("TP2_PCT", "0.024"))               # Минималь�
 RUNNER_ATR_MULT = float(os.getenv("RUNNER_ATR_MULT", "2.5")) # Chandelier ATR трейлинг 2.5 * ATR14 для ловли ракет +5%..+15%
 RUNNER_ACTIVATION_R = float(os.getenv("RUNNER_ACTIVATION_R", "2.2"))  # Включение подтяжки трейла от +2.2R (не душит откат после TP1!)
 TRAILING_STOP_PCT = float(os.getenv("TRAILING_STOP_PCT", "0.015"))    # Минимальная дистанция трейла 1.5% против рыночного шума
-TIME_STOP_MINUTES = int(os.getenv("TIME_STOP_MINUTES", "35"))         # Time-Stop: выход через 35 мин, если импульс затух (< +0.45R без TP1)
+TIME_STOP_MINUTES = int(os.getenv("TIME_STOP_MINUTES", "60"))         # [FIX v2] Time-Stop 60 мин (было 35: 59% сделок закрывались по времени и отдавали комиссии)
+TIME_STOP_MIN_R = float(os.getenv("TIME_STOP_MIN_R", "0.30"))          # [FIX v2] выход по времени только если прибыль < +0.30R (было 0.45R)
 STAGNATION_EXIT_MINUTES = int(os.getenv("STAGNATION_EXIT_MINUTES", "18"))  # Быстрый скретч-выход через 18 мин, если монета застряла в мертвом флэте
 TAKER_FEE_PCT = float(os.getenv("TAKER_FEE_PCT", "0.0005"))           # 0.05% биржевой сбор тейкера
 
 # ==============================================================================
 # 6. MARKET SCANNER & EXPANDED LIQUID BINANCE UNIVERSE (200+ ПАР)
 # ==============================================================================
-MIN_24H_VOLUME_USDT = max(float(os.getenv("MIN_24H_VOLUME_USDT", "5000000")), 5000000.0)  # $5M на fapi Perpetual
-SPOT_MIRROR_MIN_VOL_USDT = float(os.getenv("SPOT_MIRROR_MIN_VOL_USDT", "350000"))         # $350K Spot USDT на vision (охват 200+ реальных пар Binance)
-SCAN_TICKERS_LIMIT = min(int(os.getenv("SCAN_TICKERS_LIMIT", "220")), 250)                # Охват до 220-250 крипто-пар Binance
-MIN_24H_TRADES_COUNT = int(os.getenv("MIN_24H_TRADES_COUNT", "2500"))                      # Минимум 2500 сделок в сутки (защита от монет-призраков)
-MIN_AVG_5M_QUOTE_VOL = float(os.getenv("MIN_AVG_5M_QUOTE_VOL", "2500.0"))                 # Минимум $2500 средний объем 5m свечи (отсев $178 свечей как на HEMI)
+MIN_24H_VOLUME_USDT = max(float(os.getenv("MIN_24H_VOLUME_USDT", "60000000")), 5000000.0)  # [FIX v2] $60M на fapi (было $5M — бот торговал тонкими монетами)
+SPOT_MIRROR_MIN_VOL_USDT = float(os.getenv("SPOT_MIRROR_MIN_VOL_USDT", "8000000"))         # $350K Spot USDT на vision (охват 200+ реальных пар Binance)
+SCAN_TICKERS_LIMIT = min(int(os.getenv("SCAN_TICKERS_LIMIT", "80")), 250)                # Охват до 220-250 крипто-пар Binance
+MIN_24H_TRADES_COUNT = int(os.getenv("MIN_24H_TRADES_COUNT", "15000"))                      # Минимум 2500 сделок в сутки (защита от монет-призраков)
+MIN_AVG_5M_QUOTE_VOL = float(os.getenv("MIN_AVG_5M_QUOTE_VOL", "50000.0"))   # [FIX v2] спот-зеркало: средний 5m оборот >= $50k (было $2.5k). На fapi порог х3 (см. MIN_AVG_5M_QUOTE_VOL_FAPI_MULT)
+MIN_AVG_5M_QUOTE_VOL_FAPI_MULT = float(os.getenv("MIN_AVG_5M_QUOTE_VOL_FAPI_MULT", "3.0"))
+MIN_NOTIONAL_USDT = float(os.getenv("MIN_NOTIONAL_USDT", "6.0"))             # [FIX v2] минимальный размер позиции (Binance: от $5)                 # Минимум $2500 средний объем 5m свечи (отсев $178 свечей как на HEMI)
 MIN_V3_VOLUME_PERSISTENCE = float(os.getenv("MIN_V3_VOLUME_PERSISTENCE", "1.15"))          # Кумулятивный приток объема за 3 свечи (15 мин) >= 1.15x
 ENABLE_MTF_15M_FILTER = os.getenv("ENABLE_MTF_15M_FILTER", "true").lower() == "true"       # 15m Multi-Timeframe Guard (защита от лонгов против падающего рынка)
-MAX_24H_CHANGE_CAP = float(os.getenv("MAX_24H_CHANGE_CAP", "100.0"))       # Позволяем честно торговать сильнейшими импульсными монетами (до +100% за сутки)
+MAX_24H_CHANGE_CAP = float(os.getenv("MAX_24H_CHANGE_CAP", "30.0"))       # Позволяем честно торговать сильнейшими импульсными монетами (до +100% за сутки)
 STRICT_WHITELIST_ONLY = os.getenv("STRICT_WHITELIST_ONLY", "false").lower() == "true"
 CHOP_MIN_VOLUME_SURGE = float(os.getenv("CHOP_MIN_VOLUME_SURGE", "1.50"))
 ML_MIN_FILTER_PROB = float(os.getenv("ML_MIN_FILTER_PROB", "0.42"))       # Валидированный порог отсева слабых сетапов по закрытой свече

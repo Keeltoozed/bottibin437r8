@@ -127,7 +127,10 @@ class MarketScanner:
                 min_req_impulse = max(config.MIN_5M_PRICE_IMPULSE_PCT, atr_pct * 100.0 * 0.90)
                 avg_5m_qvol = float(analysis.get("avg_5m_quote_vol", 0.0) or 0.0)
                 v3_surge = float(analysis.get("v3_surge", 1.0) or 1.0)
-                min_avg_vol = float(getattr(config, "MIN_AVG_5M_QUOTE_VOL", 2500.0))
+                min_avg_vol = float(getattr(config, "MIN_AVG_5M_QUOTE_VOL", 50000.0))
+                # [FIX v2] на фьючерсном fapi обороты 5m-свечей выше, чем на споте: порог масштабируем
+                if binance_client.active_mirror_name == "fapi":
+                    min_avg_vol *= float(getattr(config, "MIN_AVG_5M_QUOTE_VOL_FAPI_MULT", 3.0))
                 min_v3 = float(getattr(config, "MIN_V3_VOLUME_PERSISTENCE", 1.15))
                 is_mtf_long = analysis.get("is_mtf_long_ok", True) if getattr(config, "ENABLE_MTF_15M_FILTER", True) else True
                 is_mtf_short = analysis.get("is_mtf_short_ok", True) if getattr(config, "ENABLE_MTF_15M_FILTER", True) else True
@@ -367,7 +370,9 @@ class MarketScanner:
 
                 # ПРОФЕССИОНАЛЬНЫЙ ФИКСИРОВАННЫЙ ДОЛЛАРОВЫЙ РИСК (PROP-DESK SIZING):
                 # Риск 3.5% эквити (~$0.70 при $20 депозите) с эффективным плечом 15x
-                cur_equity = max(15.0, portfolio.get_portfolio_summary()["equity"])
+                # [FIX v2] РАНЬШЕ: max(15.0, equity) — при капитале $4 бот рисковал как при $15 (10% вместо 2.5% за сделку)
+                # и ускоренно сливал остаток. ТЕПЕРЬ риск считается от РЕАЛЬНОГО эквити.
+                cur_equity = max(0.0, portfolio.get_portfolio_summary()["equity"])
                 risk_usd = round(cur_equity * config.RISK_PER_TRADE_PCT, 3)
                 sl_dist_pct = abs(entry_p - exact_sl) / max(entry_p, 1e-9)
                 lev_to_use = getattr(portfolio, "current_leverage", config.LEVERAGE)
@@ -392,7 +397,7 @@ class MarketScanner:
                             print(f"⚠️ [CORRELATION GUARD] Вторая позиция LONG по {sym} отклонена: BTC ({btc_trend}, {btc_5m:+.2f}%) не в бычьем тренде!", flush=True)
                             continue
 
-                if len(portfolio.open_positions) < config.MAX_CONCURRENT_POSITIONS and actual_margin >= 1.50 and portfolio.cash >= actual_margin:
+                if len(portfolio.open_positions) < config.MAX_CONCURRENT_POSITIONS and actual_margin * lev_to_use >= config.MIN_NOTIONAL_USDT and portfolio.cash >= actual_margin:
                     opened = portfolio.open_position(
                         symbol=sym,
                         side=cand_side,

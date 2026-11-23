@@ -15,7 +15,7 @@ class ExitManager:
          остается 40% чистый Moonbag-ранер для ловли ракет +5%..+15%!
       4. Широкий Chandelier ATR-трейлинг (2.5 * ATR14, минимум 1.3%) активируется только от +2.2R,
          позволяя ракете пережить нормальные 5m откаты и собрать все трендовое движение!
-      5. Time-Stop (35 минут): если пробой оказался ложным и за 35 минут цена не ушла даже на +0.45R,
+      5. Time-Stop (60 минут, параметры в config): если пробой оказался ложным и цена не ушла даже на +0.30R,
          сделка закрывается без ожидания полного стоп-лосса, освобождая капитал.
     """
     def __init__(self):
@@ -46,7 +46,7 @@ class ExitManager:
 
     async def run_loop(self):
         self.is_running = True
-        print("🛡️ [ExitManager] Асимметричный трендовый движок выхода активен (30%/30%/40% ATR Runner + 35m Time-Stop).", flush=True)
+        print(f"🛡️ [ExitManager] Трендовый движок выхода активен (TP1/TP2 + ATR Runner + Time-Stop {config.TIME_STOP_MINUTES}м / <{config.TIME_STOP_MIN_R}R).", flush=True)
         while self.is_running:
             try:
                 now = time.time()
@@ -79,7 +79,8 @@ class ExitManager:
                 atr_mult = float(getattr(config, "RUNNER_ATR_MULT", 2.5))
                 act_r = float(getattr(config, "RUNNER_ACTIVATION_R", 2.2))
                 min_trail = float(getattr(config, "TRAILING_STOP_PCT", 0.013))
-                time_stop_sec = int(getattr(config, "TIME_STOP_MINUTES", 35)) * 60
+                time_stop_sec = int(getattr(config, "TIME_STOP_MINUTES", 60)) * 60
+                time_stop_r = float(getattr(config, "TIME_STOP_MIN_R", 0.30))
 
                 for sym in symbols:
                     if sym not in portfolio.open_positions:
@@ -153,7 +154,7 @@ class ExitManager:
                         # 5. TIME-STOP (35 мин без пробоя): выход из затухшей сделки
                         if not pos["tp1_hit"] and elapsed_sec >= time_stop_sec:
                             cur_r = (cur_price - entry) / risk_dist
-                            if cur_r < 0.45:
+                            if cur_r < time_stop_r:
                                 portfolio.close_position(
                                     sym, cur_price,
                                     reason=f"⏱️ Time-Stop ({int(elapsed_sec//60)}м без импульса)",
@@ -211,7 +212,7 @@ class ExitManager:
                         # 5. TIME-STOP (35 мин без пролива): выход из зависшего шорта
                         if not pos["tp1_hit"] and elapsed_sec >= time_stop_sec:
                             cur_r = (entry - cur_price) / risk_dist
-                            if cur_r < 0.45:
+                            if cur_r < time_stop_r:
                                 portfolio.close_position(
                                     sym, cur_price,
                                     reason=f"⏱️ Time-Stop ({int(elapsed_sec//60)}м без импульса)",
