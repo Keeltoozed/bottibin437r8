@@ -150,13 +150,13 @@ with st.sidebar:
     st.divider()
     st.markdown("### 🚀 Structural Rocket Hunter ($20)")
 
-    # Режим риск-профиля (3-Stage Super-Profitable Rocket Hunter)
+    # Режим риск-профиля (4-Tier Profit-Lock Shield + Normalized Margin Sizing)
     strategy_mode = st.radio(
         "Профиль риск-менеджмента:",
         [
-            "🚀 Охотник за Ракетами — Ultra 3-Stage (15x, риск 3.5% + A+ Boost)",
+            "🛡️ Охотник за Ракетами — Profit-Shield (15x, риск 3.5% + A+ Boost)",
             "🔥 Высокий Импульс (18x, риск 3.8% + A+ Boost)",
-            "🛡️ Стандарт Проп (12x, риск 2.5% = ~$0.50)"
+            "🚀 Стандарт Проп (12x, риск 2.5% = ~$0.50)"
         ],
         index=0
     )
@@ -164,19 +164,19 @@ with st.sidebar:
         default_lev = 12
         config.RISK_PER_TRADE_PCT = 0.025
         config.MIN_5M_VOLUME_SURGE_RATIO = 1.45
-        config.MIN_CLOSE_STRENGTH = 0.66
+        config.MIN_CLOSE_STRENGTH = 0.68
         config.DAILY_LOSS_LIMIT = 99
     elif "Высокий" in strategy_mode:
         default_lev = 18
         config.RISK_PER_TRADE_PCT = 0.038
-        config.MIN_5M_VOLUME_SURGE_RATIO = 1.50
-        config.MIN_CLOSE_STRENGTH = 0.66
+        config.MIN_5M_VOLUME_SURGE_RATIO = 1.45
+        config.MIN_CLOSE_STRENGTH = 0.68
         config.DAILY_LOSS_LIMIT = 99
     else:
         default_lev = 15
         config.RISK_PER_TRADE_PCT = 0.035
         config.MIN_5M_VOLUME_SURGE_RATIO = 1.45
-        config.MIN_CLOSE_STRENGTH = 0.66
+        config.MIN_CLOSE_STRENGTH = 0.68
         config.DAILY_LOSS_LIMIT = 99
 
     lev_options = [10, 12, 15, 18, 20, 25]
@@ -198,9 +198,9 @@ with st.sidebar:
 
     est_risk_usd = round(max(15.0, portfolio.get_portfolio_summary()["equity"]) * config.RISK_PER_TRADE_PCT, 2)
     st.text(f"Плечо входов: {portfolio.current_leverage}x | Риск 1R: ${est_risk_usd:.2f} ({config.RISK_PER_TRADE_PCT*100:.1f}%)")
-    st.text(f"Вход: 15m MTF Trend + Пробой 20 баров + RVOL ≥ {config.MIN_5M_VOLUME_SURGE_RATIO:.2f}x")
-    st.text(f"Выход: 25% (2.0R) / 25% (3.5R) / 50% (2.5×ATR Трейл)")
-    st.text(f"Выход из застоя: 18 мин скретч | 35 мин Time-Stop")
+    st.text(f"Вход: 15m MTF + Пробой 12 баров + RVOL ≥ {config.MIN_5M_VOLUME_SURGE_RATIO:.2f}x")
+    st.text(f"Щит: BE +0.70% | 35% TP1 (1.5R) / 30% TP2 (2.8R) / 35% Трейл")
+    st.text(f"Застой: 35м Time-Stop (освобождает слот)")
     st.text(f"Лимит стопов: Макс {config.DAILY_LOSS_LIMIT} в день ({portfolio.daily_losses_count}/{config.DAILY_LOSS_LIMIT})")
     st.text(f"Радар рынка: 🚀 {config.SCAN_TICKERS_LIMIT} пар Binance (MTF + Ликвидность)")
     st.text(f"Модель Groq: {config.GROQ_PRIMARY_MODEL}")
@@ -234,7 +234,7 @@ st.title("🚀 Binance Autonomous Groq Trader (Rocket Hunter Engine)")
 last_scan_info = getattr(portfolio, "last_scan_str", "Ожидание...")
 btc_regime_info = getattr(portfolio, "btc_regime_str", "🟡 Анализ Bitcoin...")
 st.caption(f"🌍 **Макро-щит (Защита от пролива/выноса BTC):** {btc_regime_info}")
-st.caption(f"Конвейер Structural Rocket Hunter: Радар {config.SCAN_TICKERS_LIMIT} пар Binance → 15m MTF Guard + Пробой 20 баров + RVOL ≥ {config.MIN_5M_VOLUME_SURGE_RATIO}x → ML + Groq AI → Выход 25%/25%/50% ATR Трейл + 18m Скретч | Режим: {'🧪 Paper Trading' if config.PAPER_TRADING else '⚡ Live Trading'} | Последний скан: {last_scan_info}")
+st.caption(f"Конвейер Profit-Shield Rocket Hunter: Радар {config.SCAN_TICKERS_LIMIT} пар Binance → 15m MTF + Пробой 12 баров + ATR ≥ 0.40% + RVOL ≥ {config.MIN_5M_VOLUME_SURGE_RATIO}x → ML + Groq AI → Early BE +0.60% / 35% TP1 / 30% TP2 / 35% ATR Трейл | Режим: {'🧪 Paper Trading' if config.PAPER_TRADING else '⚡ Live Trading'} | Последний скан: {last_scan_info}")
 
 # Оповещение и ручной сброс Circuit Breaker (если включен)
 if getattr(config, "ENABLE_CIRCUIT_BREAKER", False) and summary["circuit_breaker"]:
@@ -576,10 +576,10 @@ with tab_shadow:
 with tab_timemachine:
     st.subheader("🔬 Time Machine: Честный институциональный бэктест (Без заглядывания в будущее)")
     st.markdown("""
-    **Честная проверка реальной логики Structural Rocket Hunter против старого скальпера (`$20` старт):**
+    **Честная проверка реальной логики Profit-Shield Rocket Hunter против старого скальпера (`$20` старт):**
     * **Нулевой Lookahead Bias:** сигнал рассчитывается строго по закрытой свече `[t-1]`, вход по цене открытия следующей свечи `[t]`.
     * **Реальные издержки биржи:** `0.05%` комиссия тейкера + `0.01%` проскальзывание на каждую сторону (`0.12%` на круг) и строгий учет `1 позиция = 1 сделка`.
-    * **Асимметричный выход:** `25%` на `2.0R` + безубыток, `25%` на `3.5R`, `50%` ранер по `2.5×ATR` Chandelier-трейлингу + `35м` Time-Stop.
+    * **4-Tier Profit-Lock Shield:** `Early BE` на `+0.60%`, `35%` на `1.20R` (min `0.90%`), Ratchet `+0.75%` на `+1.35%`, `30%` на `2.40R`, `35%` ранер по `2.2×ATR` + `20м` срез застоя + Smart `35м` Time-Stop.
     """)
 
     if st.button("▶ Запустить честный аудит стратегий (Rocket Hunter vs Старый скальпер)", type="primary"):
@@ -589,11 +589,11 @@ with tab_timemachine:
             pre = precompute_indicators(cdata)
 
             configs = [
-                ("🚀 Rocket Hunter 3-Stage Ultra (15x, Риск 3.5%, ML≥55%)", dict(leverage=15, risk_pct=0.035, lookback=12, min_surge=1.45, min_impulse=0.40, ml_min_prob=0.55, tp1_r=1.8)),
-                ("🔥 Rocket Hunter High-Conviction (18x, Риск 3.8%, ML≥56%)", dict(leverage=18, risk_pct=0.038, lookback=12, min_surge=1.50, min_impulse=0.45, ml_min_prob=0.56, tp1_r=1.7)),
-                ("🛡️ Rocket Hunter Standard (12x, Риск 2.5%, ML≥54%)", dict(leverage=12, risk_pct=0.025, lookback=12, min_surge=1.45, min_impulse=0.40, ml_min_prob=0.54, tp1_r=1.8)),
-                ("⚡ Rocket Hunter Pure Price-Action (Без ML фильтра)", dict(leverage=15, risk_pct=0.035, lookback=15, min_surge=1.35, min_impulse=0.55, ml_min_prob=0.00, tp1_r=1.5, use_continuation=False, use_ema50_macro=False, use_conviction_sizing=False)),
-                ("❌ Старый скальпер (Фитиль≥12%, Трейл 0.7%, Обрез SL)", dict(leverage=10, legacy_churn_mode=True)),
+                ("🛡️ Rocket Hunter Profit-Shield (15x, Риск 3.5%, ML≥55%)", dict(leverage=15, risk_pct=0.035, lookback=12, min_surge=1.45, min_impulse=0.42, min_clv=0.68, ml_min_prob=0.55, tp1_r=1.50, tp2_r=2.80, use_profit_shield=True)),
+                ("🔥 Rocket Hunter High-Conviction (18x, Риск 3.8%, ML≥56%)", dict(leverage=18, risk_pct=0.038, lookback=12, min_surge=1.45, min_impulse=0.45, min_clv=0.68, ml_min_prob=0.56, tp1_r=1.50, tp2_r=2.80, use_profit_shield=True)),
+                ("🚀 Rocket Hunter Classic 3-Stage (12x, Риск 2.5%, ML≥54%)", dict(leverage=12, risk_pct=0.025, lookback=12, min_surge=1.45, min_impulse=0.42, min_clv=0.68, ml_min_prob=0.54, tp1_r=1.50, tp2_r=2.80, use_profit_shield=True)),
+                ("⚡ Rocket Hunter Pure Price-Action (Без ML фильтра)", dict(leverage=15, risk_pct=0.035, lookback=15, min_surge=1.35, min_impulse=0.55, ml_min_prob=0.00, tp1_r=1.5, use_continuation=False, use_ema50_macro=False, use_conviction_sizing=False, use_profit_shield=False)),
+                ("❌ Старый скальпер (Фитиль≥12%, Трейл 0.7%, Обрез SL)", dict(leverage=10, legacy_churn_mode=True, use_profit_shield=False)),
             ]
 
             rows = []

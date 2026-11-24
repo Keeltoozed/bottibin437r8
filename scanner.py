@@ -124,7 +124,8 @@ class MarketScanner:
                 dist_l_pct = analysis.get("dist_to_breakout_long_pct", 1.0)
                 dist_s_pct = analysis.get("dist_to_breakout_short_pct", 1.0)
 
-                min_req_impulse = max(config.MIN_5M_PRICE_IMPULSE_PCT, atr_pct * 100.0 * 0.85)
+                min_req_impulse = max(config.MIN_5M_PRICE_IMPULSE_PCT, atr_pct * 100.0 * 0.90)
+                min_atr_pct = float(getattr(config, "MIN_ATR_PCT", 0.0040))
                 avg_5m_qvol = float(analysis.get("avg_5m_quote_vol", 0.0) or 0.0)
                 v3_surge = float(analysis.get("v3_surge", 1.0) or 1.0)
                 min_avg_vol = float(getattr(config, "MIN_AVG_5M_QUOTE_VOL", 2500.0))
@@ -136,24 +137,25 @@ class MarketScanner:
                 is_live_ign = analysis.get("is_live_ignition", False)
                 brk_type = analysis.get("breakout_type", "STRUCT_12B")
 
-                # Подтверждение объема: либо мощный всплеск текущей свечи (RVOL >= 1.45x),
-                # либо устойчивый 15m приток (RVOL >= 1.25x и v3 >= 1.10x), либо живой внутрисвечной взрыв!
+                # Подтверждение объема: либо мощный всплеск текущей свечи (RVOL >= 1.60x),
+                # либо устойчивый 15m приток (RVOL >= 1.40x и v3 >= 1.25x), либо строгий живой взрыв (>= 2.10x)!
                 vol_confirmed = (
                     surge >= config.MIN_5M_VOLUME_SURGE_RATIO or
-                    (surge >= 1.25 and v3_surge >= min_v3) or
+                    (surge >= 1.40 and v3_surge >= 1.25) or
                     is_live_ign
                 )
 
                 # ==============================================================
-                # 4. ПРАВИЛА ВХОДА 3-STAGE ROCKET HUNTER (LONG & SHORT)
+                # 4. ПРАВИЛА ВХОДА 3-STAGE ROCKET HUNTER (ANTI-CHOP EDITION)
+                # - Минимальная волатильность ATR >= 0.40% (исключает мертвый боковик)
                 # - Фаза 1: Пробой 12-барного уровня Дончиана (или 8-барный Fast Ignition)
                 # - Фаза 2: Пробой 5-барного Bull/Bear Flag в активном 15m тренде (EMA9>EMA21>EMA50)
-                # - Фаза 3: Живой внутрисвечной перехват (Live Intra-Bar Ignition)
-                # - Подтвержденный приток объема, 15m MTF + EMA50 Macro Guard, CLV >= 0.66
-                # - Умный структурный стоп 0.50%..2.40% с сохранением точности цены
+                # - Фаза 3: Живой внутрисвечной перехват (>= 180с, RVOL >= 2.10x)
+                # - Нормализованный структурный стоп 0.80%..2.20%
                 # ==============================================================
                 tech_long = (
                     analysis.get("is_breakout_long", False) and
+                    atr_pct >= min_atr_pct and
                     vol_confirmed and
                     avg_5m_qvol >= min_avg_vol and
                     is_mtf_long and
@@ -173,6 +175,7 @@ class MarketScanner:
                 tech_short = (
                     config.ENABLE_SHORT and
                     analysis.get("is_breakout_short", False) and
+                    atr_pct >= min_atr_pct and
                     vol_confirmed and
                     avg_5m_qvol >= min_avg_vol and
                     is_mtf_short and
@@ -319,9 +322,8 @@ class MarketScanner:
                     flush=True
                 )
 
-        # 5. ОТБОР ЛУЧШИХ КАНДИДАТОВ ДЛЯ GROQ AI
-        free_slots = max(1, config.MAX_CONCURRENT_POSITIONS - len(portfolio.open_positions))
-        candidates_to_eval = all_scored[:free_slots]
+        # 5. ОТБОР ЛУЧШЕГО КАНДИДАТА ДЛЯ GROQ AI (СТРОГО 1 НОВЫЙ ВХОД ЗА ПРОХОД — ЗАЩИТА ОТ ПАРНЫХ СИНХРОННЫХ СТОПОВ!)
+        candidates_to_eval = all_scored[:1]
 
         # 6. GROQ SOFT GATE & RISK-BASED POSITION SIZING
         for ctx in candidates_to_eval:
@@ -371,8 +373,8 @@ class MarketScanner:
                     print(f"🛑 [CIRCUIT BREAKER] Дневной лимит {config.DAILY_LOSS_LIMIT} убытка исчерпан.", flush=True)
                     break
 
-                # ПРОФЕССИОНАЛЬНЫЙ ДОЛЛАРОВЫЙ РИСК С БУСТОМ НА A+ РАКЕТАХ (CONVICTION PROP SIZING):
-                # Базовый риск 3.5% эквити + 1.35x буст при высокой уверенности ML (>=58%) и RVOL (>=1.9x)
+                # НОРМАЛИЗОВАННЫЙ PROP-DESK САЙЗИНГ (БЕЗ РАЗДУТИЯ МАРЖИ ДО $7 НА УЗКОМ СТОПЕ И БЕЗ ГОЛОДАНИЯ НА РАКЕТАХ):
+                # Пол знаменателя SIZING_SL_FLOOR_PCT=1.15%, маржа ограничена [16%..21%] эквити (~$3.20-$4.20 при $20)
                 cur_equity = max(15.0, portfolio.get_portfolio_summary()["equity"])
                 conv_mult = 1.0
                 if float(ctx.get("ml_prob", 0.5)) >= 0.58 and float(ctx.get("volume_surge_ratio", 1.0)) >= 1.90:
@@ -381,17 +383,30 @@ class MarketScanner:
                 sl_dist_pct = abs(entry_p - exact_sl) / max(entry_p, 1e-9)
                 lev_to_use = getattr(portfolio, "current_leverage", config.LEVERAGE)
 
-                target_notional = risk_usd / (sl_dist_pct + 0.0012)
-                actual_margin = round(min(target_notional / lev_to_use, portfolio.cash * 0.50), 2)
+                eff_sl_dist = max(sl_dist_pct, float(getattr(config, "SIZING_SL_FLOOR_PCT", 0.0115)))
+                target_notional = risk_usd / (eff_sl_dist + 0.0012)
+                raw_margin = target_notional / lev_to_use
+                min_mg = cur_equity * float(getattr(config, "MIN_MARGIN_EQUITY_PCT", 0.16))
+                max_mg = cur_equity * float(getattr(config, "MAX_MARGIN_EQUITY_PCT", 0.21))
+                actual_margin = round(min(max(raw_margin, min_mg), max_mg, portfolio.cash * 0.48), 2)
 
-                # ЗАЩИТА ОТ КОРРЕЛЯЦИОННОГО РИСКА (CORRELATION GUARD):
-                # Если 1 позиция уже открыта, открывать ВТОРУЮ позицию в том же самом направлении
-                # разрешено ТОЛЬКО если BTC строго подтверждает тренд (не флэт/CHOP)!
-                # Это полностью предотвращает одновременный двойной стоп (как MARSCOIN + 1000CAT)!
-                if len(portfolio.open_positions) == 1:
-                    existing_pos = list(portfolio.open_positions.values())[0]
-                    existing_side = existing_pos.get("side", "")
-                    if cand_side == existing_side:
+                # УСИЛЕННАЯ ЗАЩИТА ОТ КОРРЕЛЯЦИОННОГО РИСКА (CORRELATION GUARD):
+                # Если 1 позиция уже открыта в ту же сторону, вторую в том же направлении открываем ТОЛЬКО если:
+                #   1) Первая позиция уже старше 5 минут И в плюсе / в безубытке
+                #   2) BTC строго подтверждает тренд в эту сторону!
+                if len(portfolio.open_positions) >= 1:
+                    same_side_positions = [p for p in portfolio.open_positions.values() if p.get("side") == cand_side]
+                    if same_side_positions:
+                        existing_pos = same_side_positions[0]
+                        age_sec = now - float(existing_pos.get("opened_at", now))
+                        in_profit_or_be = (float(existing_pos.get("unrealized_pnl", 0.0)) > 0.0) or bool(existing_pos.get("breakeven_set", False))
+                        if age_sec < 300.0 or not in_profit_or_be:
+                            print(
+                                f"⚠️ [CORRELATION GUARD] Вторая позиция {cand_side} по {sym} отклонена: "
+                                f"первая сделка еще не вышла в профит/безубыток (возраст {int(age_sec)}с, PnL ${existing_pos.get('unrealized_pnl', 0):+.2f}).",
+                                flush=True
+                            )
+                            continue
                         btc_trend = btc_regime.get("trend", "CHOP")
                         btc_5m = btc_regime.get("pct_5m", 0.0)
                         if cand_side == "SHORT" and (btc_trend != "BEARISH" or btc_5m > 0.0):

@@ -176,17 +176,18 @@ def simulate_strategy(
     risk_pct: float = 0.035,
     lookback: int = 12,
     min_surge: float = 1.45,
-    min_impulse: float = 0.40,
-    min_clv: float = 0.66,
+    min_impulse: float = 0.42,
+    min_clv: float = 0.68,
     max_wick_exh: float = 0.28,
     ml_min_prob: float = 0.55,
-    tp1_r: float = 1.8,
-    tp2_r: float = 3.0,
-    atr_trail_mult: float = 2.5,
+    tp1_r: float = 1.50,
+    tp2_r: float = 2.80,
+    atr_trail_mult: float = 2.4,
     time_stop_bars: int = 7,
     use_continuation: bool = True,
     use_ema50_macro: bool = True,
     use_conviction_sizing: bool = True,
+    use_profit_shield: bool = True,
     legacy_churn_mode: bool = False,
     initial_balance: float = 20.0,
     precomputed: Optional[Dict[str, Dict[str, Any]]] = None
@@ -243,8 +244,8 @@ def simulate_strategy(
             h, l, cl = c["high"], c["low"], c["close"]
             atr_pct = ind[sym]["atr"][idx - 1] / entry
 
-            tp1_share = 0.50 if legacy_churn_mode else 0.30
-            tp2_rem_share = 0.50 if legacy_churn_mode else (0.30 / 0.70)
+            tp1_share = 0.50 if legacy_churn_mode else (0.35 if use_profit_shield else 0.30)
+            tp2_rem_share = 0.50 if legacy_churn_mode else (round(0.30 / 0.65, 4) if use_profit_shield else (0.30 / 0.70))
 
             if side == "LONG":
                 if l <= pos["sl"]:
@@ -262,6 +263,12 @@ def simulate_strategy(
                     del open_pos[sym]
                     continue
 
+                pos["highest"] = max(pos["highest"], h)
+                mfe_dist = pos["highest"] - entry
+                if use_profit_shield and not legacy_churn_mode and not pos["tp1_hit"]:
+                    if mfe_dist >= max(0.85 * pos["risk_dist"], entry * 0.0070):
+                        pos["sl"] = max(pos["sl"], entry * 1.0018)
+
                 if not pos["tp1_hit"] and h >= pos["tp1"]:
                     pos["tp1_hit"] = True
                     cm = pos["init_margin"] * tp1_share
@@ -271,7 +278,7 @@ def simulate_strategy(
                     cash += cm + pnl
                     pos["realized"] += pnl
                     pos["margin"] -= cm
-                    pos["sl"] = max(pos["sl"], entry * 1.0020)
+                    pos["sl"] = max(pos["sl"], entry * (1.0025 if use_profit_shield else 1.0020))
 
                 if pos["tp1_hit"] and not pos["tp2_hit"] and h >= pos["tp2"]:
                     pos["tp2_hit"] = True
@@ -285,13 +292,13 @@ def simulate_strategy(
                     if not legacy_churn_mode:
                         pos["sl"] = max(pos["sl"], entry + 1.2 * pos["risk_dist"])
 
-                pos["highest"] = max(pos["highest"], h)
                 if legacy_churn_mode and pos["tp1_hit"]:
                     trail_p = pos["highest"] * (1.0 - 0.007)
                     if trail_p > pos["sl"]:
                         pos["sl"] = trail_p
-                elif pos["tp1_hit"] and (pos["tp2_hit"] or pos["highest"] >= entry + 2.2 * pos["risk_dist"]):
-                    trail_p = pos["highest"] * (1.0 - max(atr_pct * atr_trail_mult, 0.013))
+                elif pos["tp1_hit"] and (pos["tp2_hit"] or pos["highest"] >= entry + (2.1 if use_profit_shield else 2.2) * pos["risk_dist"]):
+                    trail_floor = 0.0115 if use_profit_shield else 0.013
+                    trail_p = pos["highest"] * (1.0 - max(atr_pct * atr_trail_mult, trail_floor))
                     if trail_p > pos["sl"]:
                         pos["sl"] = trail_p
 
@@ -328,6 +335,12 @@ def simulate_strategy(
                     del open_pos[sym]
                     continue
 
+                pos["lowest"] = min(pos["lowest"], l)
+                mfe_dist = entry - pos["lowest"]
+                if use_profit_shield and not legacy_churn_mode and not pos["tp1_hit"]:
+                    if mfe_dist >= max(0.85 * pos["risk_dist"], entry * 0.0070):
+                        pos["sl"] = min(pos["sl"], entry * 0.9982)
+
                 if not pos["tp1_hit"] and l <= pos["tp1"]:
                     pos["tp1_hit"] = True
                     cm = pos["init_margin"] * tp1_share
@@ -337,7 +350,7 @@ def simulate_strategy(
                     cash += cm + pnl
                     pos["realized"] += pnl
                     pos["margin"] -= cm
-                    pos["sl"] = min(pos["sl"], entry * 0.9980)
+                    pos["sl"] = min(pos["sl"], entry * (0.9975 if use_profit_shield else 0.9980))
 
                 if pos["tp1_hit"] and not pos["tp2_hit"] and l <= pos["tp2"]:
                     pos["tp2_hit"] = True
@@ -351,13 +364,13 @@ def simulate_strategy(
                     if not legacy_churn_mode:
                         pos["sl"] = min(pos["sl"], entry - 1.2 * pos["risk_dist"])
 
-                pos["lowest"] = min(pos["lowest"], l)
                 if legacy_churn_mode and pos["tp1_hit"]:
                     trail_p = pos["lowest"] * (1.0 + 0.007)
                     if trail_p < pos["sl"]:
                         pos["sl"] = trail_p
-                elif pos["tp1_hit"] and (pos["tp2_hit"] or pos["lowest"] <= entry - 2.2 * pos["risk_dist"]):
-                    trail_p = pos["lowest"] * (1.0 + max(atr_pct * atr_trail_mult, 0.013))
+                elif pos["tp1_hit"] and (pos["tp2_hit"] or pos["lowest"] <= entry - (2.1 if use_profit_shield else 2.2) * pos["risk_dist"]):
+                    trail_floor = 0.0115 if use_profit_shield else 0.013
+                    trail_p = pos["lowest"] * (1.0 + max(atr_pct * atr_trail_mult, trail_floor))
                     if trail_p < pos["sl"]:
                         pos["sl"] = trail_p
 
@@ -414,6 +427,9 @@ def simulate_strategy(
                         cands.append((abs(pct_5m) * surge, sym, "SHORT", ep, sl_s))
                     continue
 
+                if use_profit_shield and atr_pct < 0.0025:
+                    continue
+
                 avg_v = sum(x["quote_vol"] for x in cdls[idx - 21: idx - 1]) / 20.0
                 surge = sig["quote_vol"] / avg_v if avg_v > 0 else 1.0
                 if surge < min_surge:
@@ -432,8 +448,8 @@ def simulate_strategy(
                 sl12 = min(x["low"] for x in cdls[idx - 13: idx - 1])
                 pct_15m = (sig["close"] - cdls[idx - 4]["close"]) / cdls[idx - 4]["close"] * 100.0
 
-                brk_l = (sig["close"] > sh20) or (surge >= 2.8 and sig["close"] > sh12 and ema9 >= ema21)
-                brk_s = (sig["close"] < sl20) or (surge >= 2.8 and sig["close"] < sl12 and ema9 <= ema21)
+                brk_l = (sig["close"] > sh20) or (surge >= 2.4 and sig["close"] > sh12 and ema9 >= ema21)
+                brk_s = (sig["close"] < sl20) or (surge >= 2.4 and sig["close"] < sl12 and ema9 <= ema21)
 
                 if use_continuation and ml_min_prob > 0.0:
                     sh5 = max(x["high"] for x in cdls[idx - 6: idx - 1])
@@ -447,20 +463,21 @@ def simulate_strategy(
                     if sig["close"] > ema50 * 1.004:
                         brk_s = False
 
-                sl_dist_l = max((ep - min(prev["low"], sig["low"]) * 0.999) / ep, 1.2 * atr_pct, 0.005)
+                min_sl_req = 0.0055 if use_profit_shield else 0.0050
+                sl_dist_l = max((ep - min(prev["low"], sig["low"]) * 0.999) / ep, 1.2 * atr_pct, min_sl_req)
                 is_l = (
                     brk_l and pct_5m >= max(min_impulse, atr_pct * 90.0) and
                     clv_l >= min_clv and uw <= max_wick_exh and
                     sig["close"] > ema9 and ema9 >= ema21 * 0.998 and
-                    48.0 <= rsi <= 86.0 and 0.005 <= sl_dist_l <= 0.022 and not btc_dump
+                    48.0 <= rsi <= 86.0 and min_sl_req <= sl_dist_l <= 0.022 and not btc_dump
                 )
 
-                sl_dist_s = max((max(prev["high"], sig["high"]) * 1.001 - ep) / ep, 1.2 * atr_pct, 0.005)
+                sl_dist_s = max((max(prev["high"], sig["high"]) * 1.001 - ep) / ep, 1.2 * atr_pct, min_sl_req)
                 is_s = (
                     brk_s and pct_5m <= -max(min_impulse, atr_pct * 90.0) and
                     clv_s >= min_clv and lw <= max_wick_exh and
                     sig["close"] < ema9 and ema9 <= ema21 * 1.002 and
-                    14.0 <= rsi <= 52.0 and 0.005 <= sl_dist_s <= 0.022 and not btc_pump
+                    14.0 <= rsi <= 52.0 and min_sl_req <= sl_dist_s <= 0.022 and not btc_pump
                 )
 
                 if is_l:
@@ -487,7 +504,11 @@ def simulate_strategy(
                 else:
                     r_mult = 1.35 if (use_conviction_sizing and mlp >= 0.58 and surge >= 1.90) else 1.0
                     risk_usd = cur_eq * risk_pct * r_mult
-                    mg = min((risk_usd / (sl_dist + 2 * rt_cost_per_side)) / leverage, cash * 0.45)
+                    if use_profit_shield:
+                        eff_sl = max(sl_dist, 0.0090)
+                        mg = min((risk_usd / (eff_sl + 2 * rt_cost_per_side)) / leverage, cur_eq * 0.22, cash * 0.45)
+                    else:
+                        mg = min((risk_usd / (sl_dist + 2 * rt_cost_per_side)) / leverage, cash * 0.45)
 
                 if mg < 1.5 or cash < mg + 0.1:
                     continue
@@ -499,6 +520,9 @@ def simulate_strategy(
                 if legacy_churn_mode:
                     tp1_p = ep * (1.012 if side == "LONG" else 0.988)
                     tp2_p = ep * (1.024 if side == "LONG" else 0.976)
+                elif use_profit_shield:
+                    tp1_p = ep + max(tp1_r * rd, ep * 0.0095) if side == "LONG" else ep - max(tp1_r * rd, ep * 0.0095)
+                    tp2_p = ep + max(tp2_r * rd, ep * 0.0210) if side == "LONG" else ep - max(tp2_r * rd, ep * 0.0210)
                 else:
                     tp1_p = ep + max(tp1_r * rd, ep * 0.012) if side == "LONG" else ep - max(tp1_r * rd, ep * 0.012)
                     tp2_p = ep + max(tp2_r * rd, ep * 0.024) if side == "LONG" else ep - max(tp2_r * rd, ep * 0.024)
@@ -557,11 +581,11 @@ if __name__ == "__main__":
     print("-" * 122)
 
     configs = [
-        ("🚀 Rocket Hunter 3-Stage Ultra (15x, Риск 3.5%, ML>=55%)", dict(leverage=15, risk_pct=0.035, lookback=12, min_surge=1.45, min_impulse=0.40, ml_min_prob=0.55, tp1_r=1.8)),
-        ("🔥 Rocket Hunter High-Conviction (18x, Риск 3.8%, ML>=56%)", dict(leverage=18, risk_pct=0.038, lookback=12, min_surge=1.50, min_impulse=0.45, ml_min_prob=0.56, tp1_r=1.7)),
-        ("🛡️ Rocket Hunter Standard (12x, Риск 2.5%, ML>=54%)", dict(leverage=12, risk_pct=0.025, lookback=12, min_surge=1.45, min_impulse=0.40, ml_min_prob=0.54, tp1_r=1.8)),
-        ("⚡ Rocket Hunter Pure Price-Action (Без ML фильтра)", dict(leverage=15, risk_pct=0.035, lookback=15, min_surge=1.35, min_impulse=0.55, ml_min_prob=0.00, tp1_r=1.5, use_continuation=False, use_ema50_macro=False, use_conviction_sizing=False)),
-        ("❌ Старый скальпер (Фитиль>=12%, Трейл 0.7%, Обрез SL)", dict(leverage=10, legacy_churn_mode=True)),
+        ("🛡️ Rocket Hunter Profit-Shield (15x, Риск 3.5%, ML>=55%)", dict(leverage=15, risk_pct=0.035, lookback=12, min_surge=1.45, min_impulse=0.42, min_clv=0.68, ml_min_prob=0.55, tp1_r=1.50, tp2_r=2.80, use_profit_shield=True)),
+        ("🔥 Rocket Hunter High-Conviction (18x, Риск 3.8%, ML>=56%)", dict(leverage=18, risk_pct=0.038, lookback=12, min_surge=1.45, min_impulse=0.45, min_clv=0.68, ml_min_prob=0.56, tp1_r=1.50, tp2_r=2.80, use_profit_shield=True)),
+        ("🚀 Rocket Hunter Classic 3-Stage (12x, Риск 2.5%, ML>=54%)", dict(leverage=12, risk_pct=0.025, lookback=12, min_surge=1.45, min_impulse=0.42, min_clv=0.68, ml_min_prob=0.54, tp1_r=1.50, tp2_r=2.80, use_profit_shield=True)),
+        ("⚡ Rocket Hunter Pure Price-Action (Без ML фильтра)", dict(leverage=15, risk_pct=0.035, lookback=15, min_surge=1.35, min_impulse=0.55, ml_min_prob=0.00, tp1_r=1.5, use_continuation=False, use_ema50_macro=False, use_conviction_sizing=False, use_profit_shield=False)),
+        ("❌ Старый скальпер (Фитиль>=12%, Трейл 0.7%, Обрез SL)", dict(leverage=10, legacy_churn_mode=True, use_profit_shield=False)),
     ]
 
     for label, kw in configs:

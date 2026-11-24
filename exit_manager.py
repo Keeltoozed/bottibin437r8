@@ -74,11 +74,14 @@ class ExitManager:
                 if should_log:
                     self._last_log_time = now
 
-                tp1_part = float(getattr(config, "TP1_PARTIAL_PCT", 0.30))
-                tp2_part_rem = float(getattr(config, "TP2_PARTIAL_OF_REMAINING", 0.4286))
-                atr_mult = float(getattr(config, "RUNNER_ATR_MULT", 2.5))
-                act_r = float(getattr(config, "RUNNER_ACTIVATION_R", 2.2))
-                min_trail = float(getattr(config, "TRAILING_STOP_PCT", 0.013))
+                tp1_part = float(getattr(config, "TP1_PARTIAL_PCT", 0.35))
+                tp2_part_rem = float(getattr(config, "TP2_PARTIAL_OF_REMAINING", 0.4615))
+                atr_mult = float(getattr(config, "RUNNER_ATR_MULT", 2.4))
+                act_r = float(getattr(config, "RUNNER_ACTIVATION_R", 2.1))
+                min_trail = float(getattr(config, "TRAILING_STOP_PCT", 0.0115))
+                early_be_pct = float(getattr(config, "EARLY_BE_TRIGGER_PCT", 0.0070))
+                early_be_r = float(getattr(config, "EARLY_BE_TRIGGER_R", 0.85))
+                early_be_lock = float(getattr(config, "EARLY_BE_LOCK_PCT", 0.0018))
                 time_stop_sec = int(getattr(config, "TIME_STOP_MINUTES", 35)) * 60
 
                 for sym in symbols:
@@ -104,9 +107,16 @@ class ExitManager:
                         )
 
                     # ==========================================================
-                    # ЛОГИКА СОПРОВОЖДЕНИЯ ДЛЯ LONG
+                    # ЛОГИКА СОПРОВОЖДЕНИЯ ДЛЯ LONG (PROFIT-SHIELD ENGINE)
                     # ==========================================================
                     if side == "LONG":
+                        highest = max(pos.get("highest_price", cur_price), cur_price)
+                        mfe_dist = max(0.0, highest - entry)
+                        mfe_pct = mfe_dist / max(entry, 1e-9)
+                        mfe_r = mfe_dist / risk_dist
+                        cur_move_pct = (cur_price - entry) / max(entry, 1e-9)
+                        cur_r = (cur_price - entry) / risk_dist
+
                         # 1. СТОП-ЛОСС / БЕЗУБЫТОК / CHANDELIER ATR TRAIL
                         if cur_price <= wick_sl:
                             if pos.get("tp2_hit"):
@@ -118,22 +128,30 @@ class ExitManager:
                             portfolio.close_position(sym, cur_price, reason=reason_label, partial_pct=1.0)
                             continue
 
-                        # 2. TP1 (+1.8R): Фиксация 30% + Безубыток +0.20% на 70% ранера
+                        # Tier 1: Ранний щит безубытка (при +0.70% или +0.85R -> стоп в +0.18%, сделка больше не станет минусом!)
+                        if not pos["tp1_hit"] and (mfe_pct >= early_be_pct or mfe_r >= early_be_r):
+                            be_price = config.round_price(entry * (1.0 + early_be_lock))
+                            if be_price > pos["wick_sl"] or not pos.get("breakeven_set"):
+                                pos["wick_sl"] = max(pos["wick_sl"], be_price)
+                                pos["breakeven_set"] = True
+                                portfolio.save()
+
+                        # Tier 2: Доступный TP1 (1.50R / min 0.95%): Фиксация 35% в кэш + замок +0.25%
                         if not pos["tp1_hit"] and cur_price >= tp1:
                             pos["tp1_hit"] = True
-                            pos["wick_sl"] = config.round_price(max(pos["wick_sl"], entry * 1.0020))
+                            pos["wick_sl"] = config.round_price(max(pos["wick_sl"], entry * 1.0025))
                             pos["breakeven_set"] = True
                             portfolio.close_position(
                                 sym, cur_price,
-                                reason=f"🎯 TP1 {config.TARGET_1_R}R (+{pos['pnl_pct']:.1f}%): 30% в кэш",
+                                reason=f"🎯 TP1 {config.TARGET_1_R}R (+{pos['pnl_pct']:.1f}%): 35% в кэш",
                                 partial_pct=tp1_part
                             )
                             continue
 
-                        # 3. TP2 (+3.0R): Фиксация еще 30% от исходной позиции (остается 40% ранер!)
+                        # Tier 3: TP2 (2.80R / min 2.10%): Фиксация еще 30% (остается 35% Moonbag ранер!)
                         if pos["tp1_hit"] and not pos["tp2_hit"] and cur_price >= tp2:
                             pos["tp2_hit"] = True
-                            pos["wick_sl"] = config.round_price(max(pos["wick_sl"], entry + 1.2 * risk_dist))
+                            pos["wick_sl"] = config.round_price(max(pos["wick_sl"], entry + 1.20 * risk_dist))
                             portfolio.close_position(
                                 sym, cur_price,
                                 reason=f"🎯 TP2 {config.TARGET_2_R}R (+{pos['pnl_pct']:.1f}%): еще 30% в кэш",
@@ -141,18 +159,16 @@ class ExitManager:
                             )
                             continue
 
-                        # 4. CHANDELIER ATR TRAILING (включается после +2.2R или TP2, чтобы не душить ракету сразу после TP1)
-                        highest = pos.get("highest_price", cur_price)
-                        if pos["tp1_hit"] and (pos["tp2_hit"] or highest >= entry + act_r * risk_dist):
+                        # Chandelier ATR Trailing (включается от +2.1R или после TP2, не душит ракеты!)
+                        if pos["tp1_hit"] and (pos["tp2_hit"] or mfe_r >= act_r):
                             trail_dist = max(atr_pct * atr_mult, min_trail)
                             trailing_sl_price = config.round_price(highest * (1.0 - trail_dist))
                             if trailing_sl_price > pos["wick_sl"]:
                                 pos["wick_sl"] = trailing_sl_price
                                 portfolio.save()
 
-                        # 5. TIME-STOP (35 мин без пробоя): выход из затухшей сделки
+                        # Tier 4: Time-Stop (35 мин без пробоя к TP1): освобождает слот для новых ракет
                         if not pos["tp1_hit"] and elapsed_sec >= time_stop_sec:
-                            cur_r = (cur_price - entry) / risk_dist
                             if cur_r < 0.45:
                                 portfolio.close_position(
                                     sym, cur_price,
@@ -162,9 +178,15 @@ class ExitManager:
                                 continue
 
                     # ==========================================================
-                    # ЛОГИКА СОПРОВОЖДЕНИЯ ДЛЯ SHORT
+                    # ЛОГИКА СОПРОВОЖДЕНИЯ ДЛЯ SHORT (PROFIT-SHIELD ENGINE)
                     # ==========================================================
                     else:
+                        lowest = min(pos.get("lowest_price", cur_price), cur_price)
+                        mfe_dist = max(0.0, entry - lowest)
+                        mfe_pct = mfe_dist / max(entry, 1e-9)
+                        mfe_r = mfe_dist / risk_dist
+                        cur_r = (entry - cur_price) / risk_dist
+
                         # 1. СТОП-ЛОСС / БЕЗУБЫТОК / CHANDELIER ATR TRAIL
                         if cur_price >= wick_sl:
                             if pos.get("tp2_hit"):
@@ -176,22 +198,30 @@ class ExitManager:
                             portfolio.close_position(sym, cur_price, reason=reason_label, partial_pct=1.0)
                             continue
 
-                        # 2. TP1 (+1.8R): Фиксация 30% + Безубыток -0.20% на 70% ранера
+                        # Tier 1: Ранний щит безубытка (при +0.70% или +0.85R -> стоп в -0.18%)
+                        if not pos["tp1_hit"] and (mfe_pct >= early_be_pct or mfe_r >= early_be_r):
+                            be_price = config.round_price(entry * (1.0 - early_be_lock))
+                            if be_price < pos["wick_sl"] or not pos.get("breakeven_set"):
+                                pos["wick_sl"] = min(pos["wick_sl"], be_price)
+                                pos["breakeven_set"] = True
+                                portfolio.save()
+
+                        # Tier 2: Доступный TP1 (1.50R / min 0.95%): Фиксация 35% в кэш + замок -0.25%
                         if not pos["tp1_hit"] and cur_price <= tp1:
                             pos["tp1_hit"] = True
-                            pos["wick_sl"] = config.round_price(min(pos["wick_sl"], entry * 0.9980))
+                            pos["wick_sl"] = config.round_price(min(pos["wick_sl"], entry * 0.9975))
                             pos["breakeven_set"] = True
                             portfolio.close_position(
                                 sym, cur_price,
-                                reason=f"🎯 TP1 {config.TARGET_1_R}R (+{pos['pnl_pct']:.1f}%): 30% в кэш",
+                                reason=f"🎯 TP1 {config.TARGET_1_R}R (+{pos['pnl_pct']:.1f}%): 35% в кэш",
                                 partial_pct=tp1_part
                             )
                             continue
 
-                        # 3. TP2 (+3.0R): Фиксация еще 30% от исходной позиции (остается 40% ранер!)
+                        # Tier 3: TP2 (2.80R / min 2.10%): Фиксация еще 30% (остается 35% Moonbag ранер!)
                         if pos["tp1_hit"] and not pos["tp2_hit"] and cur_price <= tp2:
                             pos["tp2_hit"] = True
-                            pos["wick_sl"] = config.round_price(min(pos["wick_sl"], entry - 1.2 * risk_dist))
+                            pos["wick_sl"] = config.round_price(min(pos["wick_sl"], entry - 1.20 * risk_dist))
                             portfolio.close_position(
                                 sym, cur_price,
                                 reason=f"🎯 TP2 {config.TARGET_2_R}R (+{pos['pnl_pct']:.1f}%): еще 30% в кэш",
@@ -199,18 +229,16 @@ class ExitManager:
                             )
                             continue
 
-                        # 4. CHANDELIER ATR TRAILING ДЛЯ ШОРТА
-                        lowest = pos.get("lowest_price", cur_price)
-                        if pos["tp1_hit"] and (pos["tp2_hit"] or lowest <= entry - act_r * risk_dist):
+                        # Chandelier ATR Trailing для шорта
+                        if pos["tp1_hit"] and (pos["tp2_hit"] or mfe_r >= act_r):
                             trail_dist = max(atr_pct * atr_mult, min_trail)
                             trailing_sl_price = config.round_price(lowest * (1.0 + trail_dist))
                             if trailing_sl_price < pos["wick_sl"]:
                                 pos["wick_sl"] = trailing_sl_price
                                 portfolio.save()
 
-                        # 5. TIME-STOP (35 мин без пролива): выход из зависшего шорта
+                        # Tier 4: Time-Stop (35 мин без пролива к TP1): освобождает слот для новых ракет
                         if not pos["tp1_hit"] and elapsed_sec >= time_stop_sec:
-                            cur_r = (entry - cur_price) / risk_dist
                             if cur_r < 0.45:
                                 portfolio.close_position(
                                     sym, cur_price,

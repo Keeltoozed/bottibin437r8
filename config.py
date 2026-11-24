@@ -63,43 +63,51 @@ CONTINUATION_LOOKBACK_BARS = int(os.getenv("CONTINUATION_LOOKBACK_BARS", "5"))  
 ENABLE_FLAG_CONTINUATION = os.getenv("ENABLE_FLAG_CONTINUATION", "true").lower() == "true"
 ENABLE_LIVE_INTRABAR_IGNITION = os.getenv("ENABLE_LIVE_INTRABAR_IGNITION", "true").lower() == "true"
 
-MIN_5M_VOLUME_SURGE_RATIO = float(os.getenv("MIN_5M_VOLUME_SURGE_RATIO", "1.45"))  # Валидированный всплеск RVOL >= 1.45x к 20-свечной средней
+MIN_5M_VOLUME_SURGE_RATIO = float(os.getenv("MIN_5M_VOLUME_SURGE_RATIO", "1.45"))  # Валидированный RVOL >= 1.45x к 20-свечной средней
 MIN_VOLUME_SURGE = MIN_5M_VOLUME_SURGE_RATIO
-MIN_5M_PRICE_IMPULSE_PCT = float(os.getenv("MIN_5M_PRICE_IMPULSE_PCT", "0.40"))    # Импульс свечи от 0.40% (и >= 0.85 * ATR14)
+MIN_5M_PRICE_IMPULSE_PCT = float(os.getenv("MIN_5M_PRICE_IMPULSE_PCT", "0.42"))    # Импульс свечи от 0.42% (и >= 0.90 * ATR14)
 MIN_IMPULSE_PCT = MIN_5M_PRICE_IMPULSE_PCT
+MIN_ATR_PCT = float(os.getenv("MIN_ATR_PCT", "0.0025"))                           # Минимум 0.25% 5m ATR (отсев мертвого штиля)
 
 # Сила закрытия бара (Close Location Value — Marubozu дружелюбно!):
-# Для LONG закрытие в верхних 34% диапазона свечи (>= 0.66), для SHORT — в нижних 34%.
-MIN_CLOSE_STRENGTH = float(os.getenv("MIN_CLOSE_STRENGTH", "0.66"))
+# Для LONG закрытие в верхних 32% диапазона свечи (>= 0.68), для SHORT — в нижних 32%.
+MIN_CLOSE_STRENGTH = float(os.getenv("MIN_CLOSE_STRENGTH", "0.68"))
 WICK_REJECTION_MIN = float(os.getenv("WICK_REJECTION_MIN", "0.0"))
 WICK_EXHAUSTION_MAX = float(os.getenv("WICK_EXHAUSTION_MAX", "0.28"))              # Встречный фитиль истощения <= 28% (отсев Bull/Bear Trap)
 MAX_EMA21_EXTENSION_PCT = float(os.getenv("MAX_EMA21_EXTENSION_PCT", "0.035"))     # Защита от погони за улетевшей 5-й свечой (>3.5% от EMA21)
-MAX_LIVE_DRIFT_PCT = float(os.getenv("MAX_LIVE_DRIFT_PCT", "0.018"))               # Разрешаем вход при умеренном дрейфе цены, чтобы не пропускать быстрые ракеты
+MAX_LIVE_DRIFT_PCT = float(os.getenv("MAX_LIVE_DRIFT_PCT", "0.016"))
 
-# Честные структурные границы стоп-лосса (с умной ATR-привязкой на широких свечах):
-STOP_LOSS_MIN_PCT = float(os.getenv("STOP_LOSS_MIN_PCT", "0.005"))  # 0.50% минимальный структурный стоп
-STOP_LOSS_MAX_PCT = float(os.getenv("STOP_LOSS_MAX_PCT", "0.024"))  # 2.40% максимальный структурный стоп
+# Честные структурные границы стоп-лосса и нормализация маржи (анти-перекос на тихих монетах):
+STOP_LOSS_MIN_PCT = float(os.getenv("STOP_LOSS_MIN_PCT", "0.0060"))  # 0.60% минимальный структурный стоп
+STOP_LOSS_MAX_PCT = float(os.getenv("STOP_LOSS_MAX_PCT", "0.022"))   # 2.20% максимальный структурный стоп
 MAX_ALLOWED_SL_PCT = STOP_LOSS_MAX_PCT
+SIZING_SL_FLOOR_PCT = float(os.getenv("SIZING_SL_FLOOR_PCT", "0.0090"))  # Пол знаменателя сайзинга 0.90% (исключает маржу $5-$7.38 на тихом шуме)
+MIN_MARGIN_EQUITY_PCT = float(os.getenv("MIN_MARGIN_EQUITY_PCT", "0.16"))  # Минимум ~16% эквити ($3.20) на подтвержденную ракету
+MAX_MARGIN_EQUITY_PCT = float(os.getenv("MAX_MARGIN_EQUITY_PCT", "0.22"))  # Максимум ~22% эквити ($4.40) на 1 сделку
 WICK_BUFFER_PCT = float(os.getenv("WICK_BUFFER_PCT", "0.0010"))     # 0.10% буфер за экстремум фитиля
 MIN_PULLBACK_PCT = float(os.getenv("MIN_PULLBACK_PCT", "0.0005"))
 
 # ==============================================================================
-# 5. ASYMMETRIC TREND-FOLLOWING EXIT ENGINE (30% / 30% / 40% ATR RUNNER + TIME-STOP)
+# 5. PROFIT-SHIELD EXIT ENGINE (35% / 30% / 35% + EARLY BE + 35M TIME-STOP)
 # ==============================================================================
-TARGET_1_R = float(os.getenv("TARGET_1_R", "1.8"))           # TP1 на +1.8R: фиксация 30% + стоп в безубыток (+0.20%)
-TARGET_2_R = float(os.getenv("TARGET_2_R", "3.0"))           # TP2 на +3.0R: фиксация еще 30% + защита +1.2R
-TP1_PARTIAL_PCT = 0.30                                       # 30% от начальной позиции на TP1
-TP2_PARTIAL_OF_REMAINING = round(0.30 / 0.70, 4)             # 42.86% от остатка (30% от начальной), оставляя 40% ранера!
+EARLY_BE_TRIGGER_PCT = float(os.getenv("EARLY_BE_TRIGGER_PCT", "0.0070"))  # +0.70% хода цены (+10.5% ROI 15x) -> стоп в безубыток +0.18%
+EARLY_BE_TRIGGER_R = float(os.getenv("EARLY_BE_TRIGGER_R", "0.85"))
+EARLY_BE_LOCK_PCT = float(os.getenv("EARLY_BE_LOCK_PCT", "0.0018"))        # Безубыток +0.18% (покрывает комиссии 0.12% и дает +)
 
-TP1_PCT = float(os.getenv("TP1_PCT", "0.012"))               # Минимальный порог TP1 (1.2% хода цены)
-TP2_PCT = float(os.getenv("TP2_PCT", "0.024"))               # Минимальный порог TP2 (2.4% хода цены)
+TARGET_1_R = float(os.getenv("TARGET_1_R", "1.50"))          # Доступный TP1 на +1.50R (min +0.95% цены): фиксация 35% в кэш
+TARGET_2_R = float(os.getenv("TARGET_2_R", "2.80"))          # TP2 на +2.80R (min +2.10% цены): фиксация еще 30% + защита +1.20R
+TP1_PARTIAL_PCT = 0.35                                       # 35% от начальной позиции на TP1
+TP2_PARTIAL_OF_REMAINING = round(0.30 / 0.65, 4)             # 46.15% от остатка (30% от начальной), оставляя 35% Moonbag ранера!
 
-RUNNER_ATR_MULT = float(os.getenv("RUNNER_ATR_MULT", "2.5")) # Chandelier ATR трейлинг 2.5 * ATR14 для ловли ракет +5%..+15%
-RUNNER_ACTIVATION_R = float(os.getenv("RUNNER_ACTIVATION_R", "2.2"))  # Включение подтяжки трейла от +2.2R (не душит откат после TP1!)
-TRAILING_STOP_PCT = float(os.getenv("TRAILING_STOP_PCT", "0.013"))    # Минимальная дистанция трейла 1.3% против рыночного шума
-TIME_STOP_MINUTES = int(os.getenv("TIME_STOP_MINUTES", "35"))         # Time-Stop: выход через 35 мин, если импульс затух (< +0.45R без TP1)
-STAGNATION_EXIT_MINUTES = int(os.getenv("STAGNATION_EXIT_MINUTES", "18"))
-TAKER_FEE_PCT = float(os.getenv("TAKER_FEE_PCT", "0.0005"))           # 0.05% биржевой сбор тейкера
+TP1_PCT = float(os.getenv("TP1_PCT", "0.0095"))              # Минимальный порог TP1 (0.95% хода цены)
+TP2_PCT = float(os.getenv("TP2_PCT", "0.0210"))              # Минимальный порог TP2 (2.10% хода цены)
+
+RUNNER_ATR_MULT = float(os.getenv("RUNNER_ATR_MULT", "2.4"))               # Chandelier ATR трейлинг 2.4 * ATR14
+RUNNER_ACTIVATION_R = float(os.getenv("RUNNER_ACTIVATION_R", "2.1"))       # Включение трейла от +2.1R (не душит ракеты!)
+TRAILING_STOP_PCT = float(os.getenv("TRAILING_STOP_PCT", "0.0115"))        # Минимальная дистанция трейла 1.15%
+TIME_STOP_MINUTES = int(os.getenv("TIME_STOP_MINUTES", "35"))              # Time-Stop 35 мин (освобождает слоты от затухших сделок)
+STAGNATION_EXIT_MINUTES = int(os.getenv("STAGNATION_EXIT_MINUTES", "20"))
+TAKER_FEE_PCT = float(os.getenv("TAKER_FEE_PCT", "0.0005"))                # 0.05% биржевой сбор тейкера
 
 # ==============================================================================
 # 6. MARKET SCANNER & EXPANDED LIQUID BINANCE UNIVERSE (200+ ЧИСТЫХ КРИПТО-ПАР)
@@ -198,7 +206,7 @@ EXCLUDED_TICKERS = TRADFI_EXCLUSION_SET | {
 }
 MAX_SPREAD_PCT = float(os.getenv("MAX_SPREAD_PCT", "0.0022"))  # 0.22% max spread (учитывает тик-шаг на Spot/Vision зеркале)
 SCAN_INTERVAL_SECONDS = int(os.getenv("SCAN_INTERVAL_SECONDS", "12"))
-PAIR_COOLDOWN_MINUTES = int(os.getenv("PAIR_COOLDOWN_MINUTES", "3"))
+PAIR_COOLDOWN_MINUTES = int(os.getenv("PAIR_COOLDOWN_MINUTES", "25"))
 
 # ==============================================================================
 # 7. TELEGRAM NOTIFICATIONS (FAIL-SAFE OPTIONAL)
