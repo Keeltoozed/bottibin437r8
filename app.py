@@ -101,8 +101,36 @@ st.markdown("""
         padding: 4px 10px;
         border-radius: 6px;
     }
+    .fallback-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 13px;
+        background-color: #161b22;
+        color: #e6edf3;
+        border-radius: 8px;
+        overflow: hidden;
+    }
+    .fallback-table th {
+        background-color: #21262d;
+        color: #8b949e;
+        text-align: left;
+        padding: 8px 10px;
+        border-bottom: 1px solid #30363d;
+    }
+    .fallback-table td {
+        padding: 7px 10px;
+        border-bottom: 1px solid #21262d;
+    }
 </style>
 """, unsafe_allow_html=True)
+
+def render_table(df: pd.DataFrame):
+    """Отказоустойчивый рендер таблиц: если pyarrow/numpy в окружении конфликтуют, рисует чистую HTML-таблицу без падения UI."""
+    try:
+        st.dataframe(df, width="stretch")
+    except Exception:
+        html_tbl = df.to_html(index=False, classes="fallback-table", border=0)
+        st.markdown(f"<div style='overflow-x:auto;'>{html_tbl}</div>", unsafe_allow_html=True)
 
 # ==============================================================================
 # САЙДБАР (УПРАВЛЕНИЕ И НАСТРОЙКИ)
@@ -432,7 +460,7 @@ with tab_radar:
                 "RSI": f"{v_rsi:.1f}",
                 "Статус сканера": stat_str
             })
-        st.dataframe(pd.DataFrame(rows_ml), width="stretch")
+        render_table(pd.DataFrame(rows_ml))
     else:
         st.info("Квантовый ML сканер выполняет первый обход рынка (занимает ~4 секунды)...")
 
@@ -520,9 +548,8 @@ with tab_history:
         st.info("История сделок пока пуста.")
     else:
         df = pd.DataFrame(portfolio.trade_history)
-        st.dataframe(
-            df[["symbol", "side", "entry_price", "exit_price", "margin_usdt", "realized_pnl", "roi_pct", "reason", "closed_at"]],
-            width="stretch"
+        render_table(
+            df[["symbol", "side", "entry_price", "exit_price", "margin_usdt", "realized_pnl", "roi_pct", "reason", "closed_at"]]
         )
 
 # ------------------------------------------------------------------------------
@@ -568,7 +595,7 @@ with tab_shadow:
         available_cols = [col for col, name in desired_cols if col in sdf.columns]
         rename_map = {col: name for col, name in desired_cols if col in sdf.columns}
         display_df = sdf[available_cols].rename(columns=rename_map)
-        st.dataframe(display_df, width="stretch")
+        render_table(display_df)
 
 # ------------------------------------------------------------------------------
 # 6. TIME MACHINE (БЭКТЕСТ ЗА НЕДЕЛЮ ПО МЕТОДОЛОГИИ DAY-TRADER-SKILL)
@@ -611,7 +638,7 @@ with tab_timemachine:
                     "Комиссии": f"${res['total_commission']:.2f}"
                 })
 
-            st.dataframe(pd.DataFrame(rows), width="stretch")
+            render_table(pd.DataFrame(rows))
             st.success("✅ Аудит завершен: архитектура **Rocket Hunter** дает устойчивое положительное математическое ожидание с учетом реальных комиссий и проскальзывания!")
 
 # ------------------------------------------------------------------------------
