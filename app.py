@@ -150,12 +150,12 @@ with st.sidebar:
     st.divider()
     st.markdown("### 🚀 Structural Rocket Hunter ($20)")
 
-    # Режим риск-профиля (4-Tier Profit-Lock Shield + Normalized Margin Sizing)
+    # Режим риск-профиля (Profit-Shield + Compounding Equity Risk Sizing)
     strategy_mode = st.radio(
         "Профиль риск-менеджмента:",
         [
-            "🛡️ Охотник за Ракетами — Profit-Shield (15x, риск 3.5% + A+ Boost)",
-            "🔥 Высокий Импульс (18x, риск 3.8% + A+ Boost)",
+            "🛡️ Охотник за Ракетами — Profit-Shield (15x, риск 3.0% + Compounding)",
+            "🔥 Высокий Импульс (18x, риск 3.5% + A+ Boost)",
             "🚀 Стандарт Проп (12x, риск 2.5% = ~$0.50)"
         ],
         index=0
@@ -168,13 +168,13 @@ with st.sidebar:
         config.DAILY_LOSS_LIMIT = 99
     elif "Высокий" in strategy_mode:
         default_lev = 18
-        config.RISK_PER_TRADE_PCT = 0.038
+        config.RISK_PER_TRADE_PCT = 0.035
         config.MIN_5M_VOLUME_SURGE_RATIO = 1.45
         config.MIN_CLOSE_STRENGTH = 0.68
         config.DAILY_LOSS_LIMIT = 99
     else:
         default_lev = 15
-        config.RISK_PER_TRADE_PCT = 0.035
+        config.RISK_PER_TRADE_PCT = 0.030
         config.MIN_5M_VOLUME_SURGE_RATIO = 1.45
         config.MIN_CLOSE_STRENGTH = 0.68
         config.DAILY_LOSS_LIMIT = 99
@@ -187,7 +187,7 @@ with st.sidebar:
         portfolio.save()
 
     cur_lev = getattr(portfolio, "current_leverage", default_lev)
-    cur_idx = lev_options.index(cur_lev) if cur_lev in lev_options else 1
+    cur_idx = lev_options.index(cur_lev) if cur_lev in lev_options else 2
     chosen_leverage = st.selectbox("⚡ Кредитное плечо (для новых сделок):", lev_options, index=cur_idx)
 
     if chosen_leverage != getattr(portfolio, "current_leverage", None):
@@ -199,7 +199,7 @@ with st.sidebar:
     est_risk_usd = round(max(15.0, portfolio.get_portfolio_summary()["equity"]) * config.RISK_PER_TRADE_PCT, 2)
     st.text(f"Плечо входов: {portfolio.current_leverage}x | Риск 1R: ${est_risk_usd:.2f} ({config.RISK_PER_TRADE_PCT*100:.1f}%)")
     st.text(f"Вход: 15m MTF + Пробой 12 баров + RVOL ≥ {config.MIN_5M_VOLUME_SURGE_RATIO:.2f}x")
-    st.text(f"Щит: BE +0.70% | 35% TP1 (1.5R) / 30% TP2 (2.8R) / 35% Трейл")
+    st.text(f"Щит: BE +0.70% | 45% TP1 (1.4R) / 30% TP2 (2.7R) / 25% Moonbag Трейл")
     st.text(f"Застой: 35м Time-Stop (освобождает слот)")
     st.text(f"Лимит стопов: Макс {config.DAILY_LOSS_LIMIT} в день ({portfolio.daily_losses_count}/{config.DAILY_LOSS_LIMIT})")
     st.text(f"Радар рынка: 🚀 {config.SCAN_TICKERS_LIMIT} пар Binance (MTF + Ликвидность)")
@@ -234,7 +234,7 @@ st.title("🚀 Binance Autonomous Groq Trader (Rocket Hunter Engine)")
 last_scan_info = getattr(portfolio, "last_scan_str", "Ожидание...")
 btc_regime_info = getattr(portfolio, "btc_regime_str", "🟡 Анализ Bitcoin...")
 st.caption(f"🌍 **Макро-щит (Защита от пролива/выноса BTC):** {btc_regime_info}")
-st.caption(f"Конвейер Profit-Shield Rocket Hunter: Радар {config.SCAN_TICKERS_LIMIT} пар Binance → 15m MTF + Пробой 12 баров + ATR ≥ 0.40% + RVOL ≥ {config.MIN_5M_VOLUME_SURGE_RATIO}x → ML + Groq AI → Early BE +0.60% / 35% TP1 / 30% TP2 / 35% ATR Трейл | Режим: {'🧪 Paper Trading' if config.PAPER_TRADING else '⚡ Live Trading'} | Последний скан: {last_scan_info}")
+st.caption(f"Конвейер Profit-Shield Rocket Hunter: Радар {config.SCAN_TICKERS_LIMIT} пар Binance → 15m MTF + Пробой 12 баров + ATR ≥ 0.40% + RVOL ≥ {config.MIN_5M_VOLUME_SURGE_RATIO}x → ML + Groq AI → Early BE +0.70% / 45% TP1 / 30% TP2 / 25% ATR Трейл | Режим: {'🧪 Paper Trading' if config.PAPER_TRADING else '⚡ Live Trading'} | Последний скан: {last_scan_info}")
 
 # Оповещение и ручной сброс Circuit Breaker (если включен)
 if getattr(config, "ENABLE_CIRCUIT_BREAKER", False) and summary["circuit_breaker"]:

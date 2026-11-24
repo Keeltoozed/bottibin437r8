@@ -329,7 +329,7 @@ class PortfolioTracker:
             pos["notional_value"] = round(pos["margin_usdt"] * lev, 4)
             pos["coins_qty"] = round(pos["coins_qty"] * (1.0 - partial_pct), 6)
 
-            short_tag = "TP1(30%)" if "TP1" in reason else ("TP2(30%)" if "TP2" in reason else f"Part({int(partial_pct*100)}%)")
+            short_tag = f"TP1({int(round(partial_pct*100))}%)" if "TP1" in reason else ("TP2(30%)" if "TP2" in reason else f"Part({int(round(partial_pct*100))}%)")
             notes = pos.setdefault("partial_notes", [])
             notes.append(short_tag)
 

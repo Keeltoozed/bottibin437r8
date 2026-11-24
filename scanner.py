@@ -373,8 +373,10 @@ class MarketScanner:
                     print(f"🛑 [CIRCUIT BREAKER] Дневной лимит {config.DAILY_LOSS_LIMIT} убытка исчерпан.", flush=True)
                     break
 
-                # НОРМАЛИЗОВАННЫЙ PROP-DESK САЙЗИНГ (БЕЗ РАЗДУТИЯ МАРЖИ ДО $7 НА УЗКОМ СТОПЕ И БЕЗ ГОЛОДАНИЯ НА РАКЕТАХ):
-                # Пол знаменателя SIZING_SL_FLOOR_PCT=1.15%, маржа ограничена [16%..21%] эквити (~$3.20-$4.20 при $20)
+                # ДИНАМИЧЕСКИЙ ГЕОМЕТРИЧЕСКИЙ САЙЗИНГ (COMPOUNDING EQUITY RISK SIZING):
+                # Риск строго зафиксирован на уровне 3.0% от текущего эквити (~$0.60 на $20).
+                # При широком стопе маржа автоматически уменьшается (не превышая $0.60 риска!),
+                # а при росте эквити ($20->$30->$50->$100) маржа и прибыль масштабируются в геометрической прогрессии!
                 cur_equity = max(15.0, portfolio.get_portfolio_summary()["equity"])
                 conv_mult = 1.0
                 if float(ctx.get("ml_prob", 0.5)) >= 0.58 and float(ctx.get("volume_surge_ratio", 1.0)) >= 1.90:
@@ -383,12 +385,11 @@ class MarketScanner:
                 sl_dist_pct = abs(entry_p - exact_sl) / max(entry_p, 1e-9)
                 lev_to_use = getattr(portfolio, "current_leverage", config.LEVERAGE)
 
-                eff_sl_dist = max(sl_dist_pct, float(getattr(config, "SIZING_SL_FLOOR_PCT", 0.0115)))
+                eff_sl_dist = max(sl_dist_pct, float(getattr(config, "SIZING_SL_FLOOR_PCT", 0.0085)))
                 target_notional = risk_usd / (eff_sl_dist + 0.0012)
                 raw_margin = target_notional / lev_to_use
-                min_mg = cur_equity * float(getattr(config, "MIN_MARGIN_EQUITY_PCT", 0.16))
-                max_mg = cur_equity * float(getattr(config, "MAX_MARGIN_EQUITY_PCT", 0.21))
-                actual_margin = round(min(max(raw_margin, min_mg), max_mg, portfolio.cash * 0.48), 2)
+                max_mg = cur_equity * float(getattr(config, "MAX_MARGIN_EQUITY_PCT", 0.22))
+                actual_margin = round(min(raw_margin, max_mg, portfolio.cash * 0.48), 2)
 
                 # УСИЛЕННАЯ ЗАЩИТА ОТ КОРРЕЛЯЦИОННОГО РИСКА (CORRELATION GUARD):
                 # Если 1 позиция уже открыта в ту же сторону, вторую в том же направлении открываем ТОЛЬКО если:

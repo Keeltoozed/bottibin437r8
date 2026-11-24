@@ -9,11 +9,11 @@ class ExitManager:
     """
     Асимметричный трендовый менеджер выхода (Rocket Hunter Exit Engine — LONG & SHORT):
       1. Честный структурный стоп до TP1 — никаких ранних поджимов, выбивающих шумом.
-      2. TP1 (+1.5R): фиксация ТОЛЬКО 30% позиции (окупает комиссии и фиксирует базовый плюс),
-         перенос стопа оставшихся 70% в безубыток +0.20% (сделка становится безрисковой!).
-      3. TP2 (+3.0R): фиксация еще 30% от начального объема (42.86% от остатка), заморозка +1.2R профита,
-         остается 40% чистый Moonbag-ранер для ловли ракет +5%..+15%!
-      4. Широкий Chandelier ATR-трейлинг (2.5 * ATR14, минимум 1.3%) активируется только от +2.2R,
+      2. TP1 (+1.4R): фиксация 45% позиции (немедленно окупает комиссии и фиксирует чистый кэш на депозит),
+         перенос стопа оставшихся 55% в безубыток +0.25% (сделка гарантированно прибыльна!).
+      3. TP2 (+2.7R): фиксация еще 30% от начального объема (54.55% от остатка), заморозка +1.2R профита,
+         остается 25% чистый Moonbag-ранер для ловли ракет +5%..+15%!
+      4. Широкий Chandelier ATR-трейлинг (2.4 * ATR14, минимум 1.15%) активируется от +2.1R,
          позволяя ракете пережить нормальные 5m откаты и собрать все трендовое движение!
       5. Time-Stop (35 минут): если пробой оказался ложным и за 35 минут цена не ушла даже на +0.45R,
          сделка закрывается без ожидания полного стоп-лосса, освобождая капитал.
@@ -46,7 +46,7 @@ class ExitManager:
 
     async def run_loop(self):
         self.is_running = True
-        print("🛡️ [ExitManager] Асимметричный трендовый движок выхода активен (30%/30%/40% ATR Runner + 35m Time-Stop).", flush=True)
+        print("🛡️ [ExitManager] Асимметричный трендовый движок выхода активен (45%/30%/25% ATR Runner + 35m Time-Stop).", flush=True)
         while self.is_running:
             try:
                 now = time.time()
@@ -74,14 +74,14 @@ class ExitManager:
                 if should_log:
                     self._last_log_time = now
 
-                tp1_part = float(getattr(config, "TP1_PARTIAL_PCT", 0.35))
-                tp2_part_rem = float(getattr(config, "TP2_PARTIAL_OF_REMAINING", 0.4615))
+                tp1_part = float(getattr(config, "TP1_PARTIAL_PCT", 0.45))
+                tp2_part_rem = float(getattr(config, "TP2_PARTIAL_OF_REMAINING", 0.5455))
                 atr_mult = float(getattr(config, "RUNNER_ATR_MULT", 2.4))
                 act_r = float(getattr(config, "RUNNER_ACTIVATION_R", 2.1))
                 min_trail = float(getattr(config, "TRAILING_STOP_PCT", 0.0115))
                 early_be_pct = float(getattr(config, "EARLY_BE_TRIGGER_PCT", 0.0070))
                 early_be_r = float(getattr(config, "EARLY_BE_TRIGGER_R", 0.85))
-                early_be_lock = float(getattr(config, "EARLY_BE_LOCK_PCT", 0.0018))
+                early_be_lock = float(getattr(config, "EARLY_BE_LOCK_PCT", 0.0022))
                 time_stop_sec = int(getattr(config, "TIME_STOP_MINUTES", 35)) * 60
 
                 for sym in symbols:
@@ -136,19 +136,19 @@ class ExitManager:
                                 pos["breakeven_set"] = True
                                 portfolio.save()
 
-                        # Tier 2: Доступный TP1 (1.50R / min 0.95%): Фиксация 35% в кэш + замок +0.25%
+                        # Tier 2: Доступный TP1 (1.40R / min 0.95%): Фиксация 45% в кэш + замок +0.25%
                         if not pos["tp1_hit"] and cur_price >= tp1:
                             pos["tp1_hit"] = True
                             pos["wick_sl"] = config.round_price(max(pos["wick_sl"], entry * 1.0025))
                             pos["breakeven_set"] = True
                             portfolio.close_position(
                                 sym, cur_price,
-                                reason=f"🎯 TP1 {config.TARGET_1_R}R (+{pos['pnl_pct']:.1f}%): 35% в кэш",
+                                reason=f"🎯 TP1 {config.TARGET_1_R}R (+{pos['pnl_pct']:.1f}%): 45% в кэш",
                                 partial_pct=tp1_part
                             )
                             continue
 
-                        # Tier 3: TP2 (2.80R / min 2.10%): Фиксация еще 30% (остается 35% Moonbag ранер!)
+                        # Tier 3: TP2 (2.70R / min 2.00%): Фиксация еще 30% (остается 25% Moonbag ранер!)
                         if pos["tp1_hit"] and not pos["tp2_hit"] and cur_price >= tp2:
                             pos["tp2_hit"] = True
                             pos["wick_sl"] = config.round_price(max(pos["wick_sl"], entry + 1.20 * risk_dist))
@@ -206,19 +206,19 @@ class ExitManager:
                                 pos["breakeven_set"] = True
                                 portfolio.save()
 
-                        # Tier 2: Доступный TP1 (1.50R / min 0.95%): Фиксация 35% в кэш + замок -0.25%
+                        # Tier 2: Доступный TP1 (1.40R / min 0.95%): Фиксация 45% в кэш + замок -0.25%
                         if not pos["tp1_hit"] and cur_price <= tp1:
                             pos["tp1_hit"] = True
                             pos["wick_sl"] = config.round_price(min(pos["wick_sl"], entry * 0.9975))
                             pos["breakeven_set"] = True
                             portfolio.close_position(
                                 sym, cur_price,
-                                reason=f"🎯 TP1 {config.TARGET_1_R}R (+{pos['pnl_pct']:.1f}%): 35% в кэш",
+                                reason=f"🎯 TP1 {config.TARGET_1_R}R (+{pos['pnl_pct']:.1f}%): 45% в кэш",
                                 partial_pct=tp1_part
                             )
                             continue
 
-                        # Tier 3: TP2 (2.80R / min 2.10%): Фиксация еще 30% (остается 35% Moonbag ранер!)
+                        # Tier 3: TP2 (2.70R / min 2.00%): Фиксация еще 30% (остается 25% Moonbag ранер!)
                         if pos["tp1_hit"] and not pos["tp2_hit"] and cur_price <= tp2:
                             pos["tp2_hit"] = True
                             pos["wick_sl"] = config.round_price(min(pos["wick_sl"], entry - 1.20 * risk_dist))

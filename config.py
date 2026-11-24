@@ -37,10 +37,10 @@ PAPER_TRADING = os.getenv("PAPER_TRADING", "true").lower() == "true"
 INITIAL_BALANCE = float(os.getenv("INITIAL_BALANCE", "20.0"))
 
 # Фиксированный долларовый риск на сделку (Prop-Desk Risk Sizing):
-# 3.5% от эквити (~$0.70 на $20 депозита с плечом 15x) + 1.35x буст на A+ ракетах (ML >= 58%, RVOL >= 1.9x)!
-RISK_PER_TRADE_PCT = float(os.getenv("RISK_PER_TRADE_PCT", "0.035"))
+# 3.0% от эквити (~$0.60 на $20 депозита с плечом 15x) + 1.35x буст на A+ ракетах (ML >= 58%, RVOL >= 1.9x)!
+RISK_PER_TRADE_PCT = float(os.getenv("RISK_PER_TRADE_PCT", "0.030"))
 CONVICTION_RISK_MULT = float(os.getenv("CONVICTION_RISK_MULT", "1.35"))
-TRADE_AMOUNT_USDT = float(os.getenv("TRADE_AMOUNT_USDT", "4.5"))  # Базовый ориентир маржи (ограничен 45% свободного кэша)
+TRADE_AMOUNT_USDT = float(os.getenv("TRADE_AMOUNT_USDT", "4.0"))  # Базовый ориентир маржи (ограничен 45% свободного кэша)
 MAX_CONCURRENT_POSITIONS = min(int(os.getenv("MAX_POSITIONS", "2")), 3)   # До 2-3 позиций одновременно для $20 депозита
 LEVERAGE = int(os.getenv("LEVERAGE", "15"))                       # 15x оптимальное плечо под риск-сайзинг
 ENABLE_SHORT = os.getenv("ENABLE_SHORT", "true").lower() == "true"
@@ -78,29 +78,29 @@ MAX_EMA21_EXTENSION_PCT = float(os.getenv("MAX_EMA21_EXTENSION_PCT", "0.035"))  
 MAX_LIVE_DRIFT_PCT = float(os.getenv("MAX_LIVE_DRIFT_PCT", "0.016"))
 
 # Честные структурные границы стоп-лосса и нормализация маржи (анти-перекос на тихих монетах):
-STOP_LOSS_MIN_PCT = float(os.getenv("STOP_LOSS_MIN_PCT", "0.0060"))  # 0.60% минимальный структурный стоп
-STOP_LOSS_MAX_PCT = float(os.getenv("STOP_LOSS_MAX_PCT", "0.022"))   # 2.20% максимальный структурный стоп
+STOP_LOSS_MIN_PCT = float(os.getenv("STOP_LOSS_MIN_PCT", "0.0055"))  # 0.55% минимальный структурный стоп
+STOP_LOSS_MAX_PCT = float(os.getenv("STOP_LOSS_MAX_PCT", "0.0135"))  # 1.35% максимальный структурный стоп (защита от -27% просадок)
 MAX_ALLOWED_SL_PCT = STOP_LOSS_MAX_PCT
-SIZING_SL_FLOOR_PCT = float(os.getenv("SIZING_SL_FLOOR_PCT", "0.0090"))  # Пол знаменателя сайзинга 0.90% (исключает маржу $5-$7.38 на тихом шуме)
-MIN_MARGIN_EQUITY_PCT = float(os.getenv("MIN_MARGIN_EQUITY_PCT", "0.16"))  # Минимум ~16% эквити ($3.20) на подтвержденную ракету
+SIZING_SL_FLOOR_PCT = float(os.getenv("SIZING_SL_FLOOR_PCT", "0.0085"))  # Пол знаменателя сайзинга 0.85%
+MIN_MARGIN_EQUITY_PCT = float(os.getenv("MIN_MARGIN_EQUITY_PCT", "0.15"))  # Минимум ~15% эквити ($3.00) на ракету
 MAX_MARGIN_EQUITY_PCT = float(os.getenv("MAX_MARGIN_EQUITY_PCT", "0.22"))  # Максимум ~22% эквити ($4.40) на 1 сделку
 WICK_BUFFER_PCT = float(os.getenv("WICK_BUFFER_PCT", "0.0010"))     # 0.10% буфер за экстремум фитиля
 MIN_PULLBACK_PCT = float(os.getenv("MIN_PULLBACK_PCT", "0.0005"))
 
 # ==============================================================================
-# 5. PROFIT-SHIELD EXIT ENGINE (35% / 30% / 35% + EARLY BE + 35M TIME-STOP)
+# 5. PROFIT-SHIELD EXIT ENGINE (45% / 30% / 25% + EARLY BE + 35M TIME-STOP)
 # ==============================================================================
-EARLY_BE_TRIGGER_PCT = float(os.getenv("EARLY_BE_TRIGGER_PCT", "0.0070"))  # +0.70% хода цены (+10.5% ROI 15x) -> стоп в безубыток +0.18%
+EARLY_BE_TRIGGER_PCT = float(os.getenv("EARLY_BE_TRIGGER_PCT", "0.0070"))  # +0.70% хода цены (+10.5% ROI 15x) -> стоп в безубыток +0.22%
 EARLY_BE_TRIGGER_R = float(os.getenv("EARLY_BE_TRIGGER_R", "0.85"))
-EARLY_BE_LOCK_PCT = float(os.getenv("EARLY_BE_LOCK_PCT", "0.0018"))        # Безубыток +0.18% (покрывает комиссии 0.12% и дает +)
+EARLY_BE_LOCK_PCT = float(os.getenv("EARLY_BE_LOCK_PCT", "0.0022"))        # Безубыток +0.22% (покрывает комиссии 0.12% и дает твердый +)
 
-TARGET_1_R = float(os.getenv("TARGET_1_R", "1.50"))          # Доступный TP1 на +1.50R (min +0.95% цены): фиксация 35% в кэш
-TARGET_2_R = float(os.getenv("TARGET_2_R", "2.80"))          # TP2 на +2.80R (min +2.10% цены): фиксация еще 30% + защита +1.20R
-TP1_PARTIAL_PCT = 0.35                                       # 35% от начальной позиции на TP1
-TP2_PARTIAL_OF_REMAINING = round(0.30 / 0.65, 4)             # 46.15% от остатка (30% от начальной), оставляя 35% Moonbag ранера!
+TARGET_1_R = float(os.getenv("TARGET_1_R", "1.40"))          # Доступный TP1 на +1.40R (min +0.95% цены): фиксация 45% в кэш
+TARGET_2_R = float(os.getenv("TARGET_2_R", "2.70"))          # TP2 на +2.70R (min +2.00% цены): фиксация еще 30% + защита +1.20R
+TP1_PARTIAL_PCT = 0.45                                       # 45% от начальной позиции на TP1 (немедленный кэш в карман!)
+TP2_PARTIAL_OF_REMAINING = round(0.30 / 0.55, 4)             # 54.55% от остатка (30% от начальной), оставляя 25% Moonbag ранера!
 
 TP1_PCT = float(os.getenv("TP1_PCT", "0.0095"))              # Минимальный порог TP1 (0.95% хода цены)
-TP2_PCT = float(os.getenv("TP2_PCT", "0.0210"))              # Минимальный порог TP2 (2.10% хода цены)
+TP2_PCT = float(os.getenv("TP2_PCT", "0.0200"))              # Минимальный порог TP2 (2.00% хода цены)
 
 RUNNER_ATR_MULT = float(os.getenv("RUNNER_ATR_MULT", "2.4"))               # Chandelier ATR трейлинг 2.4 * ATR14
 RUNNER_ACTIVATION_R = float(os.getenv("RUNNER_ACTIVATION_R", "2.1"))       # Включение трейла от +2.1R (не душит ракеты!)
@@ -112,18 +112,18 @@ TAKER_FEE_PCT = float(os.getenv("TAKER_FEE_PCT", "0.0005"))                # 0.0
 # ==============================================================================
 # 6. MARKET SCANNER & EXPANDED LIQUID BINANCE UNIVERSE (200+ ЧИСТЫХ КРИПТО-ПАР)
 # ==============================================================================
-MIN_24H_VOLUME_USDT = max(float(os.getenv("MIN_24H_VOLUME_USDT", "4000000")), 3500000.0)  # $3.5M-$4M на fapi Perpetual
-SPOT_MIRROR_MIN_VOL_USDT = float(os.getenv("SPOT_MIRROR_MIN_VOL_USDT", "350000"))         # $350K Spot USDT на vision
-SCAN_TICKERS_LIMIT = min(int(os.getenv("SCAN_TICKERS_LIMIT", "220")), 250)                # Охват до 220-250 чистых крипто-пар Binance
-MIN_24H_TRADES_COUNT = int(os.getenv("MIN_24H_TRADES_COUNT", "2500"))                      # Минимум 2500 сделок в сутки (защита от монет-призраков)
-MIN_AVG_5M_QUOTE_VOL = float(os.getenv("MIN_AVG_5M_QUOTE_VOL", "2500.0"))                 # Минимум $2500 средний объем 5m свечи
+MIN_24H_VOLUME_USDT = max(float(os.getenv("MIN_24H_VOLUME_USDT", "20000000")), 15000000.0)  # $15M-$20M глубина ликвидности на fapi
+SPOT_MIRROR_MIN_VOL_USDT = float(os.getenv("SPOT_MIRROR_MIN_VOL_USDT", "1500000"))         # $1.5M Spot USDT на vision
+SCAN_TICKERS_LIMIT = min(int(os.getenv("SCAN_TICKERS_LIMIT", "200")), 250)                # Охват до 200 ликвидных крипто-пар Binance
+MIN_24H_TRADES_COUNT = int(os.getenv("MIN_24H_TRADES_COUNT", "3500"))                      # Минимум 3500 сделок в сутки (защита от монет-призраков)
+MIN_AVG_5M_QUOTE_VOL = float(os.getenv("MIN_AVG_5M_QUOTE_VOL", "25000.0"))                 # Минимум $25,000 средний объем 5m свечи
 MIN_V3_VOLUME_PERSISTENCE = float(os.getenv("MIN_V3_VOLUME_PERSISTENCE", "1.10"))          # Кумулятивный приток объема за 3 свечи
 ENABLE_MTF_15M_FILTER = os.getenv("ENABLE_MTF_15M_FILTER", "true").lower() == "true"       # 15m Multi-Timeframe Guard
 MAX_24H_CHANGE_CAP = float(os.getenv("MAX_24H_CHANGE_CAP", "100.0"))       # Позволяем честно торговать сильнейшими импульсными ракетами (до +100% за сутки)
-STRICT_WHITELIST_ONLY = os.getenv("STRICT_WHITELIST_ONLY", "false").lower() == "true"
+STRICT_WHITELIST_ONLY = os.getenv("STRICT_WHITELIST_ONLY", "true").lower() == "true"
 CHOP_MIN_VOLUME_SURGE = float(os.getenv("CHOP_MIN_VOLUME_SURGE", "1.45"))
-ML_MIN_FILTER_PROB = float(os.getenv("ML_MIN_FILTER_PROB", "0.54"))       # Валидированный институциональный порог ML (>= 54%, PF 1.97)
-ML_CONFIDENCE_THRESHOLD = float(os.getenv("ML_CONFIDENCE_THRESHOLD", "0.54"))
+ML_MIN_FILTER_PROB = float(os.getenv("ML_MIN_FILTER_PROB", "0.55"))       # Валидированный институциональный порог ML (>= 55%, PF 1.96)
+ML_CONFIDENCE_THRESHOLD = float(os.getenv("ML_CONFIDENCE_THRESHOLD", "0.55"))
 
 def round_price(val: float) -> float:
     """Форматирует цену с сохранением 8 значащих цифр (защита мемов и дешевых монет от обрезки round(x, 6))."""
@@ -145,7 +145,8 @@ TOP_CRYPTO_UNIVERSE = [
     "PENDLEUSDT", "UNIUSDT", "AAVEUSDT", "DOTUSDT", "LTCUSDT",
     "BCHUSDT", "FILUSDT", "TONUSDT", "TAOUSDT", "PYTHUSDT",
     "JTOUSDT", "RAYUSDT", "ORDIUSDT", "BEAMXUSDT", "POWRUSDT",
-    "GTCUSDT", "WLDUSDT", "ONDOUSDT", "PEPEUSDT", "SHIBUSDT", "BONKUSDT", "FLOKIUSDT"
+    "GTCUSDT", "WLDUSDT", "ONDOUSDT", "PEPEUSDT", "SHIBUSDT", "BONKUSDT", "FLOKIUSDT",
+    "STXUSDT", "CRVUSDT", "DYDXUSDT", "FTMUSDT", "ENSUSDT", "GALAUSDT", "KASUSDT"
 ]
 
 # Полный список 255 не-криптовалютных контрактов TradFi (акции США/Гонконга/Кореи/Китая, ETF, сырье, индексы):

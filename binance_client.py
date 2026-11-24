@@ -1,7 +1,7 @@
 import aiohttp
 import asyncio
 import time
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, Set
 import config
 
 class BinanceClient:
@@ -15,14 +15,16 @@ class BinanceClient:
     """
     def __init__(self):
         self.mirrors = [
-            {"name": "fapi", "base": "https://fapi.binance.com", "ticker24": "/fapi/v1/ticker/24hr", "klines": "/fapi/v1/klines", "book": "/fapi/v1/ticker/bookTicker", "price": "/fapi/v1/ticker/price"},
-            {"name": "vision", "base": "https://data-api.binance.vision", "ticker24": "/api/v3/ticker/24hr", "klines": "/api/v3/klines", "book": "/api/v3/ticker/bookTicker", "price": "/api/v3/ticker/price"},
-            {"name": "spot", "base": "https://api.binance.com", "ticker24": "/api/v3/ticker/24hr", "klines": "/api/v3/klines", "book": "/api/v3/ticker/bookTicker", "price": "/api/v3/ticker/price"}
+            {"name": "fapi", "base": "https://fapi.binance.com", "ticker24": "/fapi/v1/ticker/24hr", "klines": "/fapi/v1/klines", "book": "/fapi/v1/ticker/bookTicker", "price": "/fapi/v1/ticker/price", "info": "/fapi/v1/exchangeInfo"},
+            {"name": "vision", "base": "https://data-api.binance.vision", "ticker24": "/api/v3/ticker/24hr", "klines": "/api/v3/klines", "book": "/api/v3/ticker/bookTicker", "price": "/api/v3/ticker/price", "info": "/api/v3/exchangeInfo"},
+            {"name": "spot", "base": "https://api.binance.com", "ticker24": "/api/v3/ticker/24hr", "klines": "/api/v3/klines", "book": "/api/v3/ticker/bookTicker", "price": "/api/v3/ticker/price", "info": "/api/v3/exchangeInfo"}
         ]
         self.active_mirror_idx = 0
         self._session: Optional[aiohttp.ClientSession] = None
         self._book_tickers_cache: Dict[str, Tuple[float, float]] = {}
         self._book_tickers_cache_time: float = 0.0
+        self._valid_crypto_perps: Set[str] = set()
+        self._valid_crypto_perps_time: float = 0.0
 
     @property
     def active_mirror_name(self) -> str:
@@ -59,6 +61,10 @@ class BinanceClient:
                             print(f"🌐 [Binance API] Успешное подключение через зеркало {mirror['name']} ({mirror['base']})", flush=True)
                             self.active_mirror_idx = idx
                         return await resp.json()
+                    elif resp.status == 400:
+                        # HTTP 400 означает, что конкретный тикер отсутствует на данном зеркале (например PEPEUSDT vs 1000PEPEUSDT).
+                        # НЕ переключаем глобальное зеркало, чтобы не сбивать работу с fapi на vision!
+                        return None
                     elif resp.status in [451, 403]:
                         if self.active_mirror_idx == idx:
                             print(f"⚠️ [Binance API] {mirror['name']} вернул HTTP {resp.status} (гео-ограничение сервера). Пробуем резервное зеркало...", flush=True)
@@ -67,6 +73,34 @@ class BinanceClient:
             except Exception:
                 pass
         return None
+
+    async def fetch_valid_crypto_perps(self) -> Set[str]:
+        """Возвращает официальный список чистых крипто-фьючерсов (PERPETUAL + COIN), исключая все 255 TradFi акций/сырья."""
+        now = time.time()
+        if self._valid_crypto_perps and (now - self._valid_crypto_perps_time) < 3600.0:
+            return self._valid_crypto_perps
+        if self.active_mirror_name != "fapi":
+            return set()
+        try:
+            session = await self.get_session()
+            url = f"{self.mirrors[0]['base']}/fapi/v1/exchangeInfo"
+            async with session.get(url) as resp:
+                if resp.status == 200:
+                    info = await resp.json()
+                    perps = {
+                        s["symbol"] for s in info.get("symbols", [])
+                        if s.get("status") == "TRADING"
+                        and s.get("contractType") == "PERPETUAL"
+                        and s.get("underlyingType") == "COIN"
+                        and s.get("quoteAsset") == "USDT"
+                    }
+                    if len(perps) >= 100:
+                        self._valid_crypto_perps = perps
+                        self._valid_crypto_perps_time = now
+                        return perps
+        except Exception:
+            pass
+        return self._valid_crypto_perps
 
     async def fetch_price(self, symbol: str) -> Optional[float]:
         """Быстрое получение текущей рыночной цены монеты."""
@@ -99,15 +133,16 @@ class BinanceClient:
         else:
             effective_min_vol = min_vol_usdt
 
+        valid_crypto_perps = await self.fetch_valid_crypto_perps() if not is_spot_mirror else set()
         excluded = getattr(config, "EXCLUDED_TICKERS", set())
         stock_roots = getattr(config, "STOCK_TICKER_ROOTS", set())
         strict = getattr(config, "STRICT_WHITELIST_ONLY", False)
         whitelist = set(getattr(config, "TOP_CRYPTO_UNIVERSE", []))
-        max_24h_cap = float(getattr(config, "MAX_24H_CHANGE_CAP", 38.0))
+        max_24h_cap = float(getattr(config, "MAX_24H_CHANGE_CAP", 100.0))
         min_trades = int(getattr(config, "MIN_24H_TRADES_COUNT", 2500))
         lev_tokens = ("UPUSDT", "DOWNUSDT", "BEARUSDT", "BULLUSDT")
-        fiat_commodities = {"XAU", "XAUT", "PAXG", "XAG", "EUR", "EURI", "AEUR", "GBP", "AUD", "BRL", "TRY", "JPY"}
-        real_crypto_b = {"BNB", "ARB", "SHIB", "1000SHIB", "TRB", "BB", "CKB", "YB", "PHB", "AMB"}
+        fiat_commodities = {"XAU", "XAUT", "PAXG", "XAG", "XPT", "XPD", "CL", "BZ", "COPPER", "NATGAS", "EUR", "EURI", "AEUR", "GBP", "AUD", "BRL", "TRY", "JPY"}
+        real_crypto_b = {"BNB", "ARB", "SHIB", "1000SHIB", "TRB", "BB", "CKB", "YB", "PHB", "AMB", "BLUR", "BOME", "BONK", "1000BONK"}
         now_ms = int(time.time() * 1000)
 
         fresh_books: Dict[str, Tuple[float, float]] = {}
@@ -118,6 +153,8 @@ class BinanceClient:
             sym = item.get("symbol", "")
             if not sym.endswith("USDT") or sym in excluded:
                 continue
+            if valid_crypto_perps and sym not in valid_crypto_perps:
+                continue
             if any(sym.endswith(lt) for lt in lev_tokens):
                 continue
             if not all(ord(c) < 128 and (c.isalnum() or c == '_') for c in sym):
@@ -126,8 +163,8 @@ class BinanceClient:
             base = sym[:-4]
             if base in fiat_commodities:
                 continue
-            # Все токенизированные акции на Binance имеют суффикс <TICKER>B + USDT (NVDABUSDT, TQQQBUSDT, MSTRBUSDT и т.д.)
-            if base in stock_roots or (base.endswith("B") and base not in real_crypto_b):
+            # Все токенизированные акции и TradFi отсекаются как по exchangeInfo, так и по корням:
+            if base in stock_roots or (is_spot_mirror and base.endswith("B") and base not in real_crypto_b and base[:-1] in stock_roots):
                 continue
             if strict and sym not in whitelist:
                 continue
@@ -165,6 +202,8 @@ class BinanceClient:
 
                 dist_to_high = (high_p - last_p) / max(high_p, 1e-9)
                 dist_to_low = (last_p - low_p) / max(last_p, 1e-9)
+                # Индекс ракетной активности: сочетает силу суточного тренда и близость к пробою экстремума
+                rocket_heat = abs(pct) / max(min(dist_to_high, dist_to_low) * 100.0 + 0.5, 0.5)
 
                 valid_tickers.append({
                     "symbol": sym,
@@ -174,7 +213,8 @@ class BinanceClient:
                     "high_24h": high_p,
                     "low_24h": low_p,
                     "dist_to_high_24h": round(dist_to_high, 4),
-                    "dist_to_low_24h": round(dist_to_low, 4)
+                    "dist_to_low_24h": round(dist_to_low, 4),
+                    "rocket_heat": round(rocket_heat, 3)
                 })
             except (ValueError, TypeError):
                 continue
@@ -186,48 +226,50 @@ class BinanceClient:
         if not valid_tickers:
             return []
 
-        # 1. Кандидаты на пробой вверх (торгуются у самых суточных максимумов, но еще не перегреты раздачей >38%)
+        # 1. Горячие LONG ракеты (активный рост + поджатие к хаям)
         breakout_long_pool = [
             x for x in valid_tickers
-            if 0.5 <= x["price_change_24h_pct"] <= max_24h_cap and x["dist_to_high_24h"] <= 0.055
+            if 0.8 <= x["price_change_24h_pct"] <= max_24h_cap and x["dist_to_high_24h"] <= 0.065
         ]
-        breakout_long_pool.sort(key=lambda x: (x["dist_to_high_24h"], -x["volume_24h"]))
+        breakout_long_pool.sort(key=lambda x: (-x["rocket_heat"], x["dist_to_high_24h"], -x["volume_24h"]))
 
-        # 2. Кандидаты на пробой вниз (торгуются у самых суточных минимумов)
+        # 2. Горячие SHORT пробои (активный слив + поджатие к лоям)
         breakdown_short_pool = [
             x for x in valid_tickers
-            if -max_24h_cap <= x["price_change_24h_pct"] <= -0.5 and x["dist_to_low_24h"] <= 0.055
+            if -max_24h_cap <= x["price_change_24h_pct"] <= -0.8 and x["dist_to_low_24h"] <= 0.065
         ]
-        breakdown_short_pool.sort(key=lambda x: (x["dist_to_low_24h"], -x["volume_24h"]))
+        breakdown_short_pool.sort(key=lambda x: (-x["rocket_heat"], x["dist_to_low_24h"], -x["volume_24h"]))
 
-        # 3. Топ ликвидности и приоритетный список ракет
+        # 3. Топ волатильных лидеров дня (все монеты с сильным движением за 24ч независимо от локального отката)
+        top_movers = sorted(valid_tickers, key=lambda x: abs(x["price_change_24h_pct"]), reverse=True)
+
+        # 4. Топ ликвидности и элитный юниверс
         by_volume = sorted(valid_tickers, key=lambda x: (1 if x["symbol"] in whitelist else 0, x["volume_24h"]), reverse=True)
 
         combined_dict: Dict[str, Dict[str, Any]] = {}
 
-        # 35% квоты: поджатие к суточному хаю (свежие LONG ракеты)
-        q_long = max(20, int(limit * 0.35))
+        # 30% квоты: горячие LONG ракеты у хаев
+        q_long = max(25, int(limit * 0.30))
         for item in breakout_long_pool[:q_long]:
             combined_dict[item["symbol"]] = item
 
-        # 40% квоты: лидеры ликвидности и элитный юниверс
-        q_vol = max(30, int(limit * 0.40))
-        for item in by_volume[:q_vol]:
-            if abs(item["price_change_24h_pct"]) <= max_24h_cap * 1.15:
-                combined_dict[item["symbol"]] = item
-
-        # 25% квоты: поджатие к суточному лою (свежие SHORT пробои)
-        q_short = max(15, int(limit * 0.25))
+        # 25% квоты: горячие SHORT пробои у лоев
+        q_short = max(20, int(limit * 0.25))
         for item in breakdown_short_pool[:q_short]:
             combined_dict[item["symbol"]] = item
 
-        # Добираем остаток ликвидными активами по объему
-        if len(combined_dict) < limit:
-            for item in sorted(valid_tickers, key=lambda x: x["volume_24h"], reverse=True):
-                if item["symbol"] not in combined_dict and abs(item["price_change_24h_pct"]) <= max_24h_cap * 1.15:
-                    combined_dict[item["symbol"]] = item
-                    if len(combined_dict) >= limit:
-                        break
+        # 20% квоты: главные ракеты дня (включая фазы булл-флага / отката к EMA9 перед второй волной)
+        q_movers = max(20, int(limit * 0.20))
+        for item in top_movers[:q_movers]:
+            if abs(item["price_change_24h_pct"]) <= max_24h_cap:
+                combined_dict[item["symbol"]] = item
+
+        # 25% квоты + добор: лидеры ликвидности и элитный юниверс
+        for item in by_volume:
+            if len(combined_dict) >= limit:
+                break
+            if item["symbol"] not in combined_dict and abs(item["price_change_24h_pct"]) <= max_24h_cap * 1.15:
+                combined_dict[item["symbol"]] = item
 
         return list(combined_dict.values())[:limit]
 
@@ -323,15 +365,14 @@ class BinanceClient:
                 ema_val = v * k + ema_val * (1.0 - k)
             return ema_val
 
-        ema9 = round(calc_ema(closed_closes, 9), 6)
-        ema21 = round(calc_ema(closed_closes, 21) if len(closed_closes) >= 21 else calc_ema(closed_closes, len(closed_closes)), 6)
-        ema50 = round(calc_ema(closed_closes, 50) if len(closed_closes) >= 50 else calc_ema(closed_closes, len(closed_closes)), 6)
+        ema9 = config.round_price(calc_ema(closed_closes, 9))
+        ema21 = config.round_price(calc_ema(closed_closes, 21) if len(closed_closes) >= 21 else calc_ema(closed_closes, len(closed_closes)))
+        ema50 = config.round_price(calc_ema(closed_closes, 50) if len(closed_closes) >= 50 else calc_ema(closed_closes, len(closed_closes)))
         ema21_ext_pct = round(abs(closed_signal_c["close"] - ema21) / max(ema21, 1e-9), 4)
 
         # Макро-фильтр старшей скользящей (EMA-50 на 5m = тренд 4+ часов):
-        # Не покупаем актив, падающий глубоко под 4h средней, и не шортим актив, взлетающий высоко над ней!
-        is_macro_trend_long = (closed_signal_c["close"] >= ema50 * 0.995)
-        is_macro_trend_short = (closed_signal_c["close"] <= ema50 * 1.005)
+        is_macro_trend_long = (closed_signal_c["close"] >= ema50 * 0.996)
+        is_macro_trend_short = (closed_signal_c["close"] <= ema50 * 1.004)
 
         gains, losses = [], []
         for i in range(1, len(closed_closes)):
@@ -354,8 +395,8 @@ class BinanceClient:
         # 15m Multi-Timeframe (MTF) Trend Analysis (строго по закрытым 5m барам)
         c15_closes = [closed_candles[i]["close"] for i in range(2, len(closed_candles), 3)]
         if len(c15_closes) >= 7:
-            ema9_15m = round(calc_ema(c15_closes, 9), 6)
-            ema21_15m = round(calc_ema(c15_closes, 21) if len(c15_closes) >= 21 else calc_ema(c15_closes, len(c15_closes)), 6)
+            ema9_15m = config.round_price(calc_ema(c15_closes, 9))
+            ema21_15m = config.round_price(calc_ema(c15_closes, 21) if len(c15_closes) >= 21 else calc_ema(c15_closes, len(c15_closes)))
             cur_15m = c15_closes[-1]
             if cur_15m >= ema21_15m * 0.998 and ema9_15m >= ema21_15m * 0.998:
                 trend_15m = "BULL"
@@ -375,50 +416,146 @@ class BinanceClient:
         prior_3_vols = [c["quote_vol"] for c in closed_candles[-3:]]
         v3_surge = round((sum(prior_3_vols) / 3.0) / max(avg_vol, 1.0), 2)
 
-        # Структурные уровни пробоя Дончиана (предшествующие закрытые бары БЕЗ сигнальной свечи)
-        lookback = int(getattr(config, "BREAKOUT_LOOKBACK_BARS", 20))
-        fast_lb = int(getattr(config, "FAST_IGNITION_LOOKBACK_BARS", 12))
-        fast_surge = float(getattr(config, "FAST_IGNITION_SURGE", 2.80))
+        # ======================================================================
+        # 3-ФАЗНЫЙ ПЕРЕХВАТ РАКЕТ (3-STAGE ROCKET CATCHER):
+        # 1) Структурный пробой базы Дончиана (12 баров / 1 час или 8-барный Fast Ignition)
+        # 2) Продолжение тренда (5-барный Bull/Bear Flag после импульса 15m >= 0.80% в тренде EMA9>EMA21>EMA50)
+        # 3) Живой внутрисвечной перехват (Live Intra-Bar Ignition при взрыве текущей 5m свечи в реальном времени!)
+        # ======================================================================
+        lookback = int(getattr(config, "BREAKOUT_LOOKBACK_BARS", 12))
+        fast_lb = int(getattr(config, "FAST_IGNITION_LOOKBACK_BARS", 8))
+        fast_surge = float(getattr(config, "FAST_IGNITION_SURGE", 2.40))
+        cont_lb = int(getattr(config, "CONTINUATION_LOOKBACK_BARS", 5))
 
         struct_slice = closed_candles[-(lookback + 1):-1] if len(closed_candles) > lookback else closed_candles[:-1]
         fast_slice = closed_candles[-(fast_lb + 1):-1] if len(closed_candles) > fast_lb else closed_candles[:-1]
+        cont_slice = closed_candles[-(cont_lb + 1):-1] if len(closed_candles) > cont_lb else closed_candles[:-1]
 
         donchian_high = max(c["high"] for c in struct_slice)
         donchian_low = min(c["low"] for c in struct_slice)
-        fast_high_12 = max(c["high"] for c in fast_slice)
-        fast_low_12 = min(c["low"] for c in fast_slice)
+        fast_high = max(c["high"] for c in fast_slice)
+        fast_low = min(c["low"] for c in fast_slice)
+        flag_high_5 = max(c["high"] for c in cont_slice)
+        flag_low_5 = min(c["low"] for c in cont_slice)
 
-        dist_to_breakout_long_pct = round(max(0.0, (donchian_high - closed_signal_c["close"]) / max(closed_signal_c["close"], 1e-9) * 100.0), 2)
-        dist_to_breakout_short_pct = round(max(0.0, (closed_signal_c["close"] - donchian_low) / max(closed_signal_c["close"], 1e-9) * 100.0), 2)
-
-        is_breakout_long = (
+        # Фаза 1: Структурный пробой базы
+        is_struct_long = (
             (closed_signal_c["close"] > donchian_high) or
-            (surge_ratio >= fast_surge and closed_signal_c["close"] > fast_high_12 and ema9 >= ema21)
+            (surge_ratio >= fast_surge and closed_signal_c["close"] > fast_high and ema9 >= ema21)
         )
-        is_breakout_short = (
+        is_struct_short = (
             (closed_signal_c["close"] < donchian_low) or
-            (surge_ratio >= fast_surge and closed_signal_c["close"] < fast_low_12 and ema9 <= ema21)
+            (surge_ratio >= fast_surge and closed_signal_c["close"] < fast_low and ema9 <= ema21)
         )
 
-        # ЧЕСТНЫЙ СТРУКТУРНЫЙ СТОП-ЛОСС (БЕЗ ИСКУССТВЕННОГО ЗАЖИМА min(..., 0.012) ВНУТРИ СВЕЧИ!):
-        # Если реальный структурный стоп шире лимита (2.2%), сканер честно пропустит сделку, а не поставит стоп в воздух!
-        recent_wick_low = min(prev_closed_c["low"], closed_signal_c["low"])
-        raw_wick_sl = round(recent_wick_low * (1.0 - config.WICK_BUFFER_PCT), 6)
+        # Фаза 2: Пробой флага продолжения ракеты (Bull/Bear Flag Continuation)
+        enable_flag = getattr(config, "ENABLE_FLAG_CONTINUATION", True)
+        is_flag_long = enable_flag and (
+            closed_signal_c["close"] > flag_high_5 and
+            ema9 > ema21 > ema50 and
+            pct_15m >= 0.85 and
+            surge_ratio >= 1.75
+        )
+        is_flag_short = enable_flag and (
+            closed_signal_c["close"] < flag_low_5 and
+            ema9 < ema21 < ema50 and
+            pct_15m <= -0.85 and
+            surge_ratio >= 1.75
+        )
+
+        # Фаза 3: Живой внутрисвечной перехват ракеты (Live Intra-Bar Ignition — только во 2-й половине свечи >= 180с против ложных фитилей!)
+        enable_live = getattr(config, "ENABLE_LIVE_INTRABAR_IGNITION", True)
+        live_elapsed_sec = max(1.0, (int(time.time() * 1000) - current_live_c["time"]) / 1000.0)
+        live_rvol = round(current_live_c["quote_vol"] / avg_vol, 2) if avg_vol > 0 else 0.0
+        live_rng = max(current_live_c["high"] - current_live_c["low"], 1e-9)
+        live_uw = round((current_live_c["high"] - max(current_live_c["open"], current_price)) / live_rng, 3)
+        live_lw = round((min(current_live_c["open"], current_price) - current_live_c["low"]) / live_rng, 3)
+        live_clv_l = round((current_price - current_live_c["low"]) / live_rng, 3)
+        live_clv_s = round((current_live_c["high"] - current_price) / live_rng, 3)
+        live_pct_5m = round((current_price - closed_signal_c["close"]) / max(closed_signal_c["close"], 1e-9) * 100.0, 2)
+        live_high_12 = max(c["high"] for c in closed_candles[-lookback:])
+        live_low_12 = min(c["low"] for c in closed_candles[-lookback:])
+
+        is_live_long = (
+            enable_live and not is_struct_long and not is_flag_long and
+            live_elapsed_sec >= 180.0 and
+            current_price > live_high_12 and
+            live_rvol >= 2.10 and
+            live_pct_5m >= max(0.75, atr14_pct * 100.0 * 1.0) and
+            live_clv_l >= 0.78 and live_uw <= 0.18 and
+            current_price > ema9 >= ema21 * 0.998 and
+            current_price >= ema50 * 0.996
+        )
+        is_live_short = (
+            enable_live and not is_struct_short and not is_flag_short and
+            live_elapsed_sec >= 180.0 and
+            current_price < live_low_12 and
+            live_rvol >= 2.10 and
+            live_pct_5m <= -max(0.75, atr14_pct * 100.0 * 1.0) and
+            live_clv_s >= 0.78 and live_lw <= 0.18 and
+            current_price < ema9 <= ema21 * 1.002 and
+            current_price <= ema50 * 1.004
+        )
+
+        # Если сработал живой внутрисвечной взрыв (Фаза 3), подставляем метрики активного импульсного бара!
+        if is_live_long or is_live_short:
+            surge_ratio = max(surge_ratio, live_rvol)
+            pct_5m = live_pct_5m
+            close_strength_long = live_clv_l
+            close_strength_short = live_clv_s
+            upper_wick_pct = live_uw
+            lower_wick_pct = live_lw
+            live_drift_long_pct = round(max(0.0, (current_price - live_high_12) / max(live_high_12, 1e-9)), 4)
+            live_drift_short_pct = round(max(0.0, (live_low_12 - current_price) / max(live_low_12, 1e-9)), 4)
+            ema21_ext_pct = round(abs(current_price - ema21) / max(ema21, 1e-9), 4)
+
+        is_breakout_long = is_struct_long or is_flag_long or is_live_long
+        is_breakout_short = is_struct_short or is_flag_short or is_live_short
+
+        if is_live_long or is_live_short:
+            breakout_type = "LIVE_IGNITION"
+        elif is_flag_long or is_flag_short:
+            breakout_type = "FLAG_CONT"
+        elif is_struct_long or is_struct_short:
+            breakout_type = "STRUCT_12B"
+        else:
+            breakout_type = "WATCH"
+
+        target_high_ref = flag_high_5 if (enable_flag and ema9 > ema21 > ema50 and pct_15m >= 0.60) else donchian_high
+        target_low_ref = flag_low_5 if (enable_flag and ema9 < ema21 < ema50 and pct_15m <= -0.60) else donchian_low
+        ref_price_for_dist = current_price if (is_live_long or is_live_short) else closed_signal_c["close"]
+        dist_to_breakout_long_pct = round(max(0.0, (target_high_ref - ref_price_for_dist) / max(ref_price_for_dist, 1e-9) * 100.0), 2)
+        dist_to_breakout_short_pct = round(max(0.0, (ref_price_for_dist - target_low_ref) / max(ref_price_for_dist, 1e-9) * 100.0), 2)
+
+        # УМНЫЙ СТРУКТУРНЫЙ СТОП-ЛОСС (БЕЗ ПОТЕРИ ТОЧНОСТИ НА МЕМАХ И ШИРОКИХ ХВОСТАХ ПРЕДЫДУЩЕГО БАРА):
+        active_sig_c = current_live_c if (is_live_long or is_live_short) else closed_signal_c
+        recent_wick_low = min(prev_closed_c["low"], active_sig_c["low"])
+        raw_wick_sl = config.round_price(recent_wick_low * (1.0 - config.WICK_BUFFER_PCT))
         raw_sl_pct = (current_price - raw_wick_sl) / max(current_price, 1e-9)
+        max_allowed_sl = float(getattr(config, "STOP_LOSS_MAX_PCT", 0.0135))
+        min_allowed_sl = float(getattr(config, "STOP_LOSS_MIN_PCT", 0.0055))
 
-        true_long_sl_pct = round(max(raw_sl_pct, 1.2 * atr14_pct, config.STOP_LOSS_MIN_PCT), 4)
-        wick_stop_loss = round(current_price * (1.0 - true_long_sl_pct), 6)
+        if raw_sl_pct > max_allowed_sl:
+            sig_low_sl_pct = (current_price - active_sig_c["low"] * (1.0 - config.WICK_BUFFER_PCT)) / max(current_price, 1e-9)
+            raw_sl_pct = min(raw_sl_pct, max(sig_low_sl_pct, 1.25 * atr14_pct))
 
-        recent_wick_high = max(prev_closed_c["high"], closed_signal_c["high"])
-        raw_short_sl = round(recent_wick_high * (1.0 + config.WICK_BUFFER_PCT), 6)
+        true_long_sl_pct = round(min(max(raw_sl_pct, 1.2 * atr14_pct, min_allowed_sl), max_allowed_sl), 4)
+        wick_stop_loss = config.round_price(current_price * (1.0 - true_long_sl_pct))
+
+        recent_wick_high = max(prev_closed_c["high"], active_sig_c["high"])
+        raw_short_sl = config.round_price(recent_wick_high * (1.0 + config.WICK_BUFFER_PCT))
         raw_short_sl_pct = (raw_short_sl - current_price) / max(current_price, 1e-9)
+        if raw_short_sl_pct > max_allowed_sl:
+            sig_high_sl_pct = (active_sig_c["high"] * (1.0 + config.WICK_BUFFER_PCT) - current_price) / max(current_price, 1e-9)
+            raw_short_sl_pct = min(raw_short_sl_pct, max(sig_high_sl_pct, 1.25 * atr14_pct))
 
-        true_short_sl_pct = round(max(raw_short_sl_pct, 1.2 * atr14_pct, config.STOP_LOSS_MIN_PCT), 4)
-        short_wick_stop_loss = round(current_price * (1.0 + true_short_sl_pct), 6)
+        true_short_sl_pct = round(min(max(raw_short_sl_pct, 1.2 * atr14_pct, min_allowed_sl), max_allowed_sl), 4)
+        short_wick_stop_loss = config.round_price(current_price * (1.0 + true_short_sl_pct))
 
-        if closed_signal_c["close"] >= ema9 >= ema21:
+        ref_close_trend = current_price if (is_live_long or is_live_short) else closed_signal_c["close"]
+        if ref_close_trend >= ema9 >= ema21:
             trend = "BULLISH"
-        elif closed_signal_c["close"] <= ema9 <= ema21:
+        elif ref_close_trend <= ema9 <= ema21:
             trend = "BEARISH"
         else:
             trend = "CHOP"
@@ -426,21 +563,23 @@ class BinanceClient:
         return {
             "symbol": symbol,
             "current_price": current_price,
-            "signal_close": closed_signal_c["close"],
-            "signal_open": closed_signal_c["open"],
+            "signal_close": active_sig_c["close"],
+            "signal_open": active_sig_c["open"],
             "recent_high": donchian_high,
             "recent_low": donchian_low,
             "dist_to_breakout_long_pct": dist_to_breakout_long_pct,
             "dist_to_breakout_short_pct": dist_to_breakout_short_pct,
             "is_breakout_long": is_breakout_long,
             "is_breakout_short": is_breakout_short,
+            "breakout_type": breakout_type,
+            "is_live_ignition": bool(is_live_long or is_live_short),
             "close_strength_long": close_strength_long,
             "close_strength_short": close_strength_short,
             "ema21_ext_pct": ema21_ext_pct,
             "live_drift_long_pct": live_drift_long_pct,
             "live_drift_short_pct": live_drift_short_pct,
-            "breakout_failed_long": current_price < closed_signal_c["close"] * 0.995,
-            "breakout_failed_short": current_price > closed_signal_c["close"] * 1.005,
+            "breakout_failed_long": current_price < min(closed_signal_c["close"] * 0.991, ema9 * 0.999),
+            "breakout_failed_short": current_price > max(closed_signal_c["close"] * 1.009, ema9 * 1.001),
             "pullback_from_high_pct": pullback_from_high_pct,
             "bounce_from_low_pct": bounce_from_low_pct,
             "volume_surge_ratio": surge_ratio,
@@ -463,7 +602,7 @@ class BinanceClient:
             "is_macro_trend_short": is_macro_trend_short,
             "v3_surge": v3_surge,
             "avg_5m_quote_vol": round(avg_vol, 1),
-            "last_quote_volume": closed_signal_c["quote_vol"],
+            "last_quote_volume": active_sig_c["quote_vol"],
             "rsi": rsi,
             "ema9": ema9,
             "ema21": ema21,
@@ -494,8 +633,8 @@ class BinanceClient:
         trend = analysis.get("trend", "CHOP")
         rsi = analysis.get("rsi", 50.0)
 
-        is_dumping = (p15 <= -0.30) or (p5 <= -0.22) or (trend == "BEARISH" and (p5 < -0.15 or rsi < 38.0))
-        is_pumping = (p15 >= +0.30) or (p5 >= +0.22) or (trend == "BULLISH" and (p5 > +0.15 or rsi > 62.0))
+        is_dumping = (p15 <= -0.45) or (p5 <= -0.35 and p15 <= -0.10)
+        is_pumping = (p15 >= +0.45) or (p5 >= +0.35 and p15 >= +0.10)
 
         if is_dumping:
             status_str = f"🔴 Медвежий импульс BTC ({p15:+.2f}%, {trend}) — ЛОНГИ ЗАБЛОКИРОВАНЫ | Приоритет: SHORT"

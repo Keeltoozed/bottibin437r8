@@ -62,8 +62,8 @@ async def run_suite():
     assert sol_analysis is not None and "is_breakout_long" in sol_analysis and "close_strength_long" in sol_analysis
     print(f"  ✓ Радар отобрал {len(tickers)} ликвидных пар; структурный разбор SOLUSDT корректен (CLV={sol_analysis['close_strength_long']})")
 
-    # 3. ТЕСТ АСИММЕТРИЧНОГО ВЫХОДА (30% / 30% / 40% RUNNER) И ЧЕСТНОГО УЧЕТА 1 ПОЗИЦИЯ = 1 СДЕЛКА
-    print("\n[ТЕСТ 3/6] Проверка выхода 30%/30%/40% и консолидации 1 позиции в 1 сделку...")
+    # 3. ТЕСТ АСИММЕТРИЧНОГО ВЫХОДА (45% / 30% / 25% RUNNER) И ЧЕСТНОГО УЧЕТА 1 ПОЗИЦИЯ = 1 СДЕЛКА
+    print("\n[ТЕСТ 3/6] Проверка выхода 45%/30%/25% и консолидации 1 позиции в 1 сделку...")
     portfolio.open_positions.clear()
     portfolio.trade_history.clear()
     portfolio.symbol_lockouts.clear()
@@ -143,7 +143,8 @@ async def run_suite():
     portfolio.open_positions.clear()
     binance_client.active_mirror_idx = 1  # Принудительно vision (как на сервере Render в США при HTTP 451)
     vision_tickers = await binance_client.fetch_top_tickers(min_vol_usdt=config.MIN_24H_VOLUME_USDT, limit=config.SCAN_TICKERS_LIMIT)
-    assert len(vision_tickers) >= 100, f"На зеркале vision должно быть >= 100 живых пар, получено {len(vision_tickers)}"
+    min_req_pairs = 25 if getattr(config, "STRICT_WHITELIST_ONLY", False) else 100
+    assert len(vision_tickers) >= min_req_pairs, f"На зеркале vision должно быть >= {min_req_pairs} живых пар, получено {len(vision_tickers)}"
     bad_syms = [t["symbol"] for t in vision_tickers if t["symbol"] in ("USD1USDT", "RLUSDUSDT", "TQQQBUSDT", "NVDABUSDT", "COCOSUSDT", "XAUTUSDT")]
     assert not bad_syms, f"В радар попали мусорные пары/акции/стейблы: {bad_syms}"
     print(f"  ✓ Зеркало vision отобрало {len(vision_tickers)} чистых крипто-пар (акции *BUSDT, стейблкоины и делисты отсечены)!")
