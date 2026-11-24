@@ -18,13 +18,12 @@ class TradeLogger:
     """
     def __init__(self, db_path="trade_journal.db"):
         self.db_path = db_path
+        self._init_db()
         self.use_supabase = bool(getattr(config, 'SUPABASE_URL', None) and getattr(config, 'SUPABASE_KEY', None))
         
         if self.use_supabase:
             self.supabase: Client = create_client(config.SUPABASE_URL, config.SUPABASE_KEY)
             print("☁️ [TradeLogger] Подключен к Supabase PostgreSQL")
-        else:
-            self._init_db()
 
     def _init_db(self):
         """Создает таблицы, если их нет."""
@@ -62,7 +61,15 @@ class TradeLogger:
                         "features": json.dumps(features),
                         "confidence": confidence,
                         "status": "OPEN",
-                        "entry_time": datetime.utcnow().isoformat()
+                        "entry_time": datetime.utcnow().isoformat(),
+                        "pnl": None,
+                        "exit_reason": None,
+                        "exit_time": None,
+                        "post_exit_ath": 0.0,
+                        "missed_pnl": 0.0,
+                        "check_1h_done": 0,
+                        "check_4h_done": 0,
+                        "check_24h_done": 0,
                     }
                     self.supabase.table(table_name).upsert(data).execute()
                 except Exception as sb_err:
@@ -76,7 +83,7 @@ class TradeLogger:
             try:
                 with sqlite3.connect(self.db_path) as conn:
                     conn.execute(
-                        f"INSERT OR REPLACE INTO {table_name} (mint, features, confidence) VALUES (?, ?, ?)",
+                        f"INSERT OR REPLACE INTO {table_name} (mint, features, confidence, status, pnl, exit_reason, exit_time) VALUES (?, ?, ?, 'OPEN', NULL, NULL, NULL)",
                         (mint, json.dumps(features), confidence)
                     )
             except Exception as sql_e:
@@ -237,20 +244,21 @@ class TradeLogger:
                                 
                             new_ath = max(update["post_exit_ath"], current_price)
                             
-                            # Извлекаем цену входа из features, чтобы посчитать упущенную прибыль
+                            # Извлекаем цену входа из features, чтобы посчитать упущенную прибыль в %
                             missed_pnl = 0.0
                             try:
-                                features = json.loads(update["features"])
-                                # Если у нас нет entry_price_usd, мы не сможем точно посчитать, но если есть (как в Swing):
-                                # Ладно, для простоты считаем упущенный профит от цены входа, но нам нужна цена входа.
-                                # В features она не всегда есть. Будем использовать просто max цену (new_ath).
-                                # Или просто запишем new_ath, а PnL вычислим потом.
-                            except:
+                                raw_feats = update.get("features")
+                                feats = json.loads(raw_feats) if isinstance(raw_feats, str) else (raw_feats or {})
+                                entry_p = float(feats.get("entry_price_usd", 0) or feats.get("entry_price", 0) or 0.0)
+                                if entry_p > 0:
+                                    missed_pnl = round(((new_ath - entry_p) / entry_p) * 100.0, 2)
+                            except Exception:
                                 pass
                                 
                             if self.use_supabase:
                                 data = {
                                     "post_exit_ath": new_ath,
+                                    "missed_pnl": missed_pnl,
                                     "check_1h_done": update["check_1h"],
                                     "check_4h_done": update["check_4h"],
                                     "check_24h_done": update["check_24h"]
@@ -266,10 +274,10 @@ class TradeLogger:
                                 with sqlite3.connect(self.db_path) as conn:
                                     conn.execute(f'''
                                         UPDATE {table} SET 
-                                            post_exit_ath = ?, check_1h_done = ?, check_4h_done = ?, check_24h_done = ?
+                                            post_exit_ath = ?, missed_pnl = ?, check_1h_done = ?, check_4h_done = ?, check_24h_done = ?
                                         WHERE mint = ?
                                     ''', (
-                                        new_ath, update["check_1h"], update["check_4h"], update["check_24h"], mint
+                                        new_ath, missed_pnl, update["check_1h"], update["check_4h"], update["check_24h"], mint
                                     ))
                             except Exception:
                                 pass

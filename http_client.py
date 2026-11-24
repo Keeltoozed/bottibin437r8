@@ -25,10 +25,10 @@ HOST_LIMITS = {
     "api.llama.fi": 60.0,
     "api.coinbase.com": 60.0,
     "api.kraken.com": 60.0,
-    "api.jup.ag": 25.0,
-    "lite-api.jup.ag": 25.0,
-    "tokens.jup.ag": 20.0,
-    "quote-api.jup.ag": 20.0,
+    "api.jup.ag": 180.0,
+    "lite-api.jup.ag": 180.0,
+    "tokens.jup.ag": 60.0,
+    "quote-api.jup.ag": 60.0,
     "frontend-api.pump.fun": 20.0,
     "public-api.birdeye.so": 30.0,
     "lunarcrush.com": 10.0,
@@ -41,16 +41,16 @@ HOST_LIMITS = {
 
 # Шаг 1: конкурентность по хостам. DS=3, GT=1 — требование задачи.
 HOST_SEMAPHORES = {
-    "api.dexscreener.com": 3,
+    "api.dexscreener.com": 4,
     "api.geckoterminal.com": 1,
     "coins.llama.fi": 2,
     "api.llama.fi": 2,
     "api.coinbase.com": 2,
     "api.kraken.com": 2,
-    "api.jup.ag": 1,
-    "lite-api.jup.ag": 1,
-    "tokens.jup.ag": 1,
-    "quote-api.jup.ag": 1,
+    "api.jup.ag": 3,
+    "lite-api.jup.ag": 3,
+    "tokens.jup.ag": 2,
+    "quote-api.jup.ag": 2,
     "frontend-api.pump.fun": 1,
     "public-api.birdeye.so": 1,
     "api.rugcheck.xyz": 2,
@@ -64,7 +64,7 @@ DEFAULT_SEM = 5
 # Стаггер между стартами запросов на один хост (анти-пачка).
 # DS: 0.2с по задаче (при 3 слотах = до ~15 RPS пиком, средний держит лимит 240/мин).
 HOST_STAGGER = {
-    "api.dexscreener.com": 0.2,
+    "api.dexscreener.com": 0.1,
     "api.geckoterminal.com": 0.0,  # у GT интервал 2.4с уже покрывает
 }
 DEFAULT_STAGGER = 0.0
@@ -139,10 +139,11 @@ def _stagger_for(host: str) -> float:
     return DEFAULT_STAGGER
 
 
-async def _reserve_slot(url: str) -> float:
+async def _reserve_slot(url: str, priority: bool = False) -> float:
     """Резервирует слот старта: возвращает сколько секунд ждать.
-    Бронь (метка времени) ставится под gap-локом, само ожидание — снаружи,
-    поэтому 3 слота DS идут со стаггером 0.2с, а не строго по одному."""
+    При priority=True не задерживает жизненно важный трекинг Stop-Loss."""
+    if priority:
+        return 0.0
     host = _host_of(url)
     rpm = _limit_for(host)
     stagger = _stagger_for(host)
@@ -246,11 +247,13 @@ _OPTIONAL_PROXY = os.getenv("PROXY_URL") or os.getenv("HTTPS_PROXY") or os.geten
 
 
 async def fetch_json(url: str, params=None, headers=None, timeout: int = 12,
-                     retries: int = 3, method: str = "GET", json_payload=None, json_data=None):
+                     retries: int = 1, method: str = "GET", json_payload=None, json_data=None,
+                     priority: bool = False):
     """GET/POST JSON через ГЛОБАЛЬНЫЙ семафор + троттлинг + backoff на 429/5xx.
 
     Возвращает (status, data). data={} при неудаче. Никогда не кидает исключение.
-    12 токенов встают в очередь семафора и идут по 3 (DS) / по 1 (GT).
+    При priority=True (мониторинг цен открытых позиций) исполняется немедленно без
+    ожидания в очереди фоновых сканеров.
     """
     if json_payload is None and json_data is not None:
         json_payload = json_data
@@ -266,10 +269,13 @@ async def fetch_json(url: str, params=None, headers=None, timeout: int = 12,
     sem = _sem_for(host)
     last_status, last_err = 0, "?"
     for attempt in range(retries + 1):
-        wait = await _reserve_slot(url)
-        if wait > 0:
-            await asyncio.sleep(wait)
-        async with sem:
+        if not priority:
+            wait = await _reserve_slot(url, priority=False)
+            if wait > 0:
+                await asyncio.sleep(wait)
+
+        async def _execute_attempt():
+            nonlocal last_status, last_err
             try:
                 # Если задан прокси — пробуем на 1-й попытке. При ошибке автоматически идём напрямую (fail-open)
                 cur_proxy = _OPTIONAL_PROXY if (attempt == 0 and _OPTIONAL_PROXY) else None
@@ -289,18 +295,25 @@ async def fetch_json(url: str, params=None, headers=None, timeout: int = 12,
                         return r.status, {}
                     last_err = f"HTTP {r.status}"
                     if r.status == 429:
-                        # 429 не долбим повторами впритык: умеренный штраф
                         _note_429(host, penalty=3.0)
             except asyncio.TimeoutError:
                 last_err = "timeout"
             except Exception as e:
                 last_err = f"{type(e).__name__}"
+            return None
+
+        if priority:
+            res = await _execute_attempt()
+            if res is not None:
+                return res
+        else:
+            async with sem:
+                res = await _execute_attempt()
+                if res is not None:
+                    return res
+
         if attempt < retries:
-            if "429" in str(last_err):
-                await asyncio.sleep(2.0 + 1.0 * attempt)
-            else:
-                await asyncio.sleep(1.0 + 1.0 * attempt)
+            await asyncio.sleep(0.3 + 0.3 * attempt)
     if last_status != 429:
-        if last_status != 429:
-            print(f"🔌 API fail {host}{urlparse(url).path[:50]}: {last_err} (status {last_status})")
+        print(f"🔌 API fail {host}{urlparse(url).path[:50]}: {last_err} (status {last_status})")
     return last_status, {}

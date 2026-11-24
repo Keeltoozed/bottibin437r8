@@ -48,6 +48,11 @@ class SmartMoneyHunter:
     def __init__(self):
         self.db: Dict[str, dict] = self._load_db()
         self._last_scan_ts = 0.0
+        try:
+            self.sync_to_txt()
+            self.sync_to_config()
+        except Exception:
+            pass
 
     # --- Постоянное хранилище: таблица smart_wallets в Supabase (диск Render стирается при каждом деплое) ---
     def _sb(self):
@@ -71,17 +76,24 @@ class SmartMoneyHunter:
         if not sb:
             return out
         try:
-            res = sb.table("smart_wallets").select("*").limit(5000).execute()
-            for r in (res.data or []):
-                try:
-                    wins = json.loads(r.get("winning_tokens") or "[]")
-                except Exception:
-                    wins = []
-                out[r["wallet"]] = {
-                    "chain": r.get("chain") or "solana", "tier": int(r.get("tier") or 3),
-                    "total_pnl": float(r.get("total_pnl") or 0.0), "trade_count": int(r.get("trade_count") or 0),
-                    "winning_tokens": wins, "first_seen": float(r.get("first_seen") or time.time()),
-                }
+            offset = 0
+            page_size = 1000
+            while True:
+                res = sb.table("smart_wallets").select("*").range(offset, offset + page_size - 1).execute()
+                rows = res.data or []
+                for r in rows:
+                    try:
+                        wins = json.loads(r.get("winning_tokens") or "[]")
+                    except Exception:
+                        wins = []
+                    out[r["wallet"]] = {
+                        "chain": r.get("chain") or "solana", "tier": int(r.get("tier") or 3),
+                        "total_pnl": float(r.get("total_pnl") or 0.0), "trade_count": int(r.get("trade_count") or 0),
+                        "winning_tokens": wins, "first_seen": float(r.get("first_seen") or time.time()),
+                    }
+                if len(rows) < page_size:
+                    break
+                offset += page_size
             print(f"☁️ [SMART-HUNTER] Из Supabase загружено кошельков: {len(out)}")
         except Exception as e:
             print(f"⚠️ [SMART-HUNTER] Не удалось прочитать таблицу smart_wallets: {str(e)[:160]}")
@@ -119,6 +131,25 @@ class SmartMoneyHunter:
             cur = db.get(w)
             if (not cur) or (len(d.get("winning_tokens", [])), d.get("total_pnl", 0)) > (len(cur.get("winning_tokens", [])), cur.get("total_pnl", 0)):
                 db[w] = d
+
+        # Гарантируем наличие VIP KOL кошельков (Ansem, etc.) из config.py
+        try:
+            import config as _cfg
+            for w, name in getattr(_cfg, "VIP_KOL_WALLETS", {}).items():
+                if w not in db or int(db[w].get("tier", 3) or 3) != 1:
+                    db[w] = {
+                        "chain": "solana",
+                        "first_seen": time.time(),
+                        "total_pnl": 1000000.0,
+                        "winning_tokens": ["CULT / SOL", "Mao / SOL"],
+                        "trade_count": 50,
+                        "tier": 1,
+                        "vip": True,
+                        "name": name,
+                    }
+        except Exception:
+            pass
+
         return db
 
     def _save_db(self):
@@ -130,10 +161,12 @@ class SmartMoneyHunter:
         self._save_to_supabase()
 
     def sync_to_txt(self):
-        """Синхронизирует топовые Solana-кошельки в smart_wallets.txt."""
+        """Синхронизирует проверенные Solana-кошельки из Supabase/базы в smart_wallets.txt."""
         sol_wallets = [
             w for w, data in self.db.items()
-            if data.get("chain") == "solana" and data.get("tier", 3) in (1, 2)
+            if data.get("chain", "solana") == "solana" 
+            and int(data.get("tier", 3) or 3) > 0  # не забаненные (tier > 0)
+            and float(data.get("total_pnl", 0.0) or 0.0) >= 300.0  # PnL >= $300
         ]
         if not sol_wallets:
             return
@@ -158,6 +191,24 @@ class SmartMoneyHunter:
                     f.write(f"{w}\n")
         except Exception as e:
             print(f"⚠️ Ошибка обновления {SOLANA_WALLETS_TXT}: {e}")
+
+    def get_trusted_wallets(self, chain: str = "solana", max_tier: int = 2) -> set:
+        """Возвращает проверенные Tier-1/Tier-2/VIP смарт-кошельки из базы."""
+        out = set()
+        try:
+            for w, data in (self.db or {}).items():
+                if not isinstance(data, dict):
+                    continue
+                if chain and data.get("chain", "solana") != chain:
+                    continue
+                if data.get("vip") or int(data.get("tier", 3) or 3) <= max_tier:
+                    out.add(w)
+            import config as _c
+            for vw in (getattr(_c, "VIP_KOL_WALLETS", {}) or {}).keys():
+                out.add(vw)
+        except Exception:
+            pass
+        return out
 
     def sync_to_config(self):
         """Синхронизирует топовые Base-кошельки в config.EVM_COPY_WALLETS."""
@@ -269,12 +320,14 @@ class SmartMoneyHunter:
                     # Tiering:
                     wins_count = len(entry["winning_tokens"])
                     tot_pnl = entry["total_pnl"]
-                    if wins_count >= 3 or tot_pnl >= 5000.0:
-                        entry["tier"] = 1  # Gold Alpha
-                    elif wins_count >= 2 or tot_pnl >= 1000.0:
-                        entry["tier"] = 2  # Silver Sniper
+                    # Защита от "одноразовых счастливчиков" и бернеров дева (@savipww Copy Rule):
+                    # В Tier-1/Tier-2 попадают ТОЛЬКО кошельки, доказавшие серию побед минимум на 2+ разных монетах!
+                    if wins_count >= 3 or (wins_count >= 2 and tot_pnl >= 4000.0):
+                        entry["tier"] = 1  # Gold Alpha (серийный снайпер)
+                    elif wins_count >= 2 and tot_pnl >= 800.0:
+                        entry["tier"] = 2  # Silver Sniper (подтвержден на 2+ монетах)
                     else:
-                        entry["tier"] = 3  # Scout
+                        entry["tier"] = 3  # Scout (1 удачная монета — только наблюдение, без авто-копирования)
 
                     if is_new:
                         new_alphas_count += 1

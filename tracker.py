@@ -1,586 +1,1133 @@
-import os
 import json
+import os
+import re
 import time
-import threading
-import requests
-from typing import Dict, List, Any, Optional
+from typing import Dict, Tuple
+from pydantic import BaseModel, ConfigDict
 import config
-from obsidian_vault import obsidian_vault
 
-PORTFOLIO_FILE = "portfolio.json"
+class VirtualPosition(BaseModel):
+    # extra='allow' — страховка от "опять нет цен": любое новое поле
+    # трекинга (price_stale_n, tp1_done...) не должно ронять весь цикл
+    # с ошибкой "object has no field".
+    model_config = ConfigDict(extra="allow")
 
-class PortfolioTracker:
-    """
-    Управление состоянием портфеля, открытыми позициями и статистикой воронки (Rocket Hunter Edition).
-    Ключевые улучшения учета:
-      - Корректный расчет Equity = Свободный Cash + Залоговая маржа в сделках + Нереализованный PnL.
-      - Честный институциональный учет сделок: частичные тейки (TP1 30%, TP2 30%) сразу зачисляют деньги в Cash,
-        но агрегируются в ОДНУ итоговую сделку в истории при полном закрытии позиции (без раздувания винрейта 3 к 1!).
-      - Умный карантин: легкий выход по Time-Stop в околонулевой брейкивен не блокирует торговлю Circuit Breaker'ом.
-    """
+    symbol: str
+    mint: str
+    entry_price_usd: float
+    amount_usd: float
+    original_amount_usd: float = 0.0  # изначальный сайз (не меняется partials) — база для pnl%
+    entry_time: float
+    status: str = "open"  # "open" or "closed"
+    exit_price_usd: float = 0.0
+    pnl_usd: float = 0.0
+    max_price_usd: float = 0.0  # Отслеживаем максимальную цену для трейлинга
+    peak_time: float = 0.0      # Время, когда была достигнута максимальная цена (ракета)
+    current_price_usd: float = 0.0 # Для отображения в интерфейсе
+    current_pnl_usd: float = 0.0 # Для отображения в интерфейсе
+    exit_reason: str = "" # Причина выхода
+    ml_features: dict = {} # Фичи, по которым ИИ принял решение
+    ml_confidence: float = 0.0 # Уверенность ИИ (0-100)
+    is_mature: bool = False # Флаг для разделения логики (Swing vs Scalp)
+    is_moonbag: bool = False # Флаг, что мы уже зафиксировали 50% прибыли
+    source: str = "" # Кто открыл: SCANNER VIP RAY-XGB 98%, FOMO, COPY_xxx, ROBINHOOD rule 72%...
+    chain: str = "solana" # solana | robinhood
+    price_updated_at: float = 0.0 # Время свежего обновления цены
+    price_checked_at: float = 0.0 # Для Crash Guard
+    wss_price: float = 0.0 # Лайв цена из WebSocket (pump.fun)
+    wss_price_ts: float = 0.0 # Время тика из WebSocket (pump.fun)
+    exit_time: float = 0.0 # Для дневного kill-switch
+    # --- поля трекинга (раньше их не было в модели → трек падал с
+    # '"VirtualPosition" object has no field "price_stale_n"' и цены вставали) ---
+    price_stale_n: int = 0 # счётчик циклов без живой цены (EVM)
+    tp1_done: bool = False # Tier-1 уже зафиксирован
+    tp2_done: bool = False # Tier-2 уже зафиксирован
+    tp3_done: bool = False
+    tp4_done: bool = False
+    tp5_done: bool = False
+    is_lp_locked_80: bool = False
+    is_unlocked_pool: bool = False
+    is_rug_hunter: bool = False  # Стратегия «Охотник на раги» (отдельный выход, риск-бюджет и статистика)
+    stagnant_graces: int = 0 # грейсы живого флета
+    first_zero_ts: float = 0.0 # когда цена впервые стала 0 (Solana Stale Price)
+    # --- трекинг просадки раннеров (чтобы видеть, какой dip они пережили) ---
+    min_price_usd: float = 0.0 # минимальная цена с момента входа
+    max_dd_pct: float = 0.0 # максимальная просадка от входа (0..-1, напр. -0.15)
+    pair_address: str = "" # Адрес пула DexScreener для мгновенного балка без 429
+    initial_liquidity_usd: float = 0.0 # Ликвидность на входе
+    peak_liquidity_usd: float = 0.0 # Пиковая ликвидность пула
+    pair_data: dict = {} # Живой снимок данных пула
+    # --- GROK BOT x JEV RISK ENGINE ("The stop lives under the wick") ---
+    stop_under_wick: float = 0.0 # Динамический стоп-уровень под фитиль отката
+    wick_stop_loss_pct: float = 0.0 # % стопа от входа (-0.05..-0.08)
+
+class PaperTracker:
     def __init__(self):
-        self.persist_enabled: bool = True
-        self.initial_balance = config.INITIAL_BALANCE
-        self.cash = self.initial_balance
-        self.open_positions: Dict[str, Dict[str, Any]] = {}
-        self.trade_history: List[Dict[str, Any]] = []
-        self.funnel_stats: Dict[str, int] = {
-            "universe": 0,
-            "gate_failed": 0,
-            "cooldown_blocked": 0,
-            "btc_blocked": 0,
-            "hard_gates": 0,
-            "groq_evaluated": 0,
-            "groq_skip": 0,
-            "low_conf": 0,
-            "passed": 0,
-            "filled": 0
-        }
-        self.recent_evaluations: List[Dict[str, Any]] = []
-        self.shadow_trades: List[Dict[str, Any]] = []
-        self.live_ml_ranking: List[Dict[str, Any]] = []
-        self.symbol_lockouts: Dict[str, float] = {}
-        self.consecutive_losses: int = 0
-        self.daily_losses_count: int = 0
-        self.daily_loss_day: str = time.strftime('%Y-%m-%d', time.gmtime())
-        self.pause_until: float = 0.0
-        self.is_paused = False
-        self.current_leverage = getattr(config, "LEVERAGE", 12)
-        self.last_universe_count: int = 0
-        self.btc_regime_str = "🟡 Анализ рынка BTC..."
-        self.last_scan_str = "Ожидание..."
-        self.load()
+        self.filename = config.PAPER_PORTFOLIO_FILE
+        self.positions: Dict[str, VirtualPosition] = {}
+        self._sb = None  # ленивый Supabase-клиент
+        self.load_portfolio()
 
-    def save(self):
-        """Сохраняет текущее состояние на диск в portfolio.json (если включена персистентность)."""
-        if not getattr(self, "persist_enabled", True):
-            return
-        state = {
-            "cash": round(self.cash, 4),
-            "initial_balance": self.initial_balance,
-            "current_leverage": self.current_leverage,
-            "open_positions": self.open_positions,
-            "trade_history": self.trade_history[-100:],
-            "funnel_stats": self.funnel_stats,
-            "recent_evaluations": self.recent_evaluations[-30:],
-            "shadow_trades": self.shadow_trades[-50:],
-            "symbol_lockouts": self.symbol_lockouts,
-            "consecutive_losses": self.consecutive_losses,
-            "daily_losses_count": self.daily_losses_count,
-            "daily_loss_day": self.daily_loss_day,
-            "pause_until": self.pause_until,
-            "is_paused": self.is_paused,
-            "last_updated": time.time()
-        }
+    @staticmethod
+    def _fees_for(chain: str):
+        """Комиссии сети: (small, big, emergency, cap_frac).
+        Ethereum L1 в разы дороже L2/Solana — считать его по $0.075 значит врать в плюс."""
         try:
-            with open(PORTFOLIO_FILE, "w", encoding="utf-8") as f:
-                json.dump(state, f, indent=2, ensure_ascii=False)
-        except Exception as e:
-            print(f"⚠️ Ошибка сохранения portfolio.json: {e}", flush=True)
+            fees = getattr(config, "EVM_CHAIN_FEES", {})
+            if isinstance(fees, dict) and chain in fees:
+                return tuple(fees[chain])
+        except Exception:
+            pass
+        return (0.02, 0.04, 0.08, 0.01)
 
-    def load(self):
-        """Загружает сохраненное состояние из portfolio.json."""
-        if not os.path.exists(PORTFOLIO_FILE):
-            return
+    def _supabase(self):
+        """Возвращает Supabase-клиент или None, если нет настроек."""
+        if self._sb is not None:
+            return self._sb
+        url = getattr(config, 'SUPABASE_URL', None)
+        key = getattr(config, 'SUPABASE_KEY', None)
+        if not url or not key:
+            return None
         try:
-            with open(PORTFOLIO_FILE, "r", encoding="utf-8") as f:
-                state = json.load(f)
-                self.cash = float(state.get("cash", self.initial_balance))
-                self.open_positions = state.get("open_positions", {})
-                self.trade_history = state.get("trade_history", [])
-                self.funnel_stats = state.get("funnel_stats", self.funnel_stats)
-                self.recent_evaluations = state.get("recent_evaluations", [])
-                self.shadow_trades = state.get("shadow_trades", [])
-                self.symbol_lockouts = state.get("symbol_lockouts", {})
-                self.consecutive_losses = state.get("consecutive_losses", 0)
-                self.daily_losses_count = state.get("daily_losses_count", 0)
-                self.daily_loss_day = state.get("daily_loss_day", time.strftime('%Y-%m-%d', time.gmtime()))
-                self.pause_until = state.get("pause_until", 0.0)
-                self.is_paused = state.get("is_paused", False)
-                if not getattr(config, "ENABLE_CIRCUIT_BREAKER", False):
-                    self.pause_until = 0.0
-                    self.is_paused = False
-                raw_lev = int(state.get("current_leverage", getattr(config, "LEVERAGE", 15)))
-                self.current_leverage = raw_lev if 5 <= raw_lev <= 25 else getattr(config, "LEVERAGE", 15)
-                print(f"✅ Портфель загружен: кэш ${self.cash:.2f}, открытых позиций: {len(self.open_positions)}, плечо: {self.current_leverage}x", flush=True)
+            from supabase import create_client
+            self._sb = create_client(url, key)
+            return self._sb
         except Exception as e:
-            print(f"⚠️ Ошибка чтения portfolio.json: {e}", flush=True)
+            print(f"⚠️ Не удалось создать Supabase-клиент: {e}")
+            return None
 
-    def is_daily_limit_reached(self) -> bool:
-        """Проверяет дневной лимит убыточных сделок (Circuit Breaker)."""
-        if not getattr(config, "ENABLE_CIRCUIT_BREAKER", False):
-            return False
-        if getattr(self, "circuit_breaker_override", False):
-            return False
-        today_utc = time.strftime('%Y-%m-%d', time.gmtime())
-        if self.daily_loss_day != today_utc:
-            self.daily_loss_day = today_utc
-            self.daily_losses_count = 0
-            self.save()
-        limit = getattr(config, "DAILY_LOSS_LIMIT", 999)
-        return self.daily_losses_count >= limit
+    def _parse_portfolio_data(self, data):
+        for k, v in data.items():
+            if isinstance(v, dict):
+                if "max_price_usd" not in v:
+                    v["max_price_usd"] = v.get("entry_price_usd", 0)
+                if "is_mature" not in v:
+                    v["is_mature"] = False
+                if "is_moonbag" not in v:
+                    v["is_moonbag"] = False
+                # Санация отравленного пика (кейс RAY: max +1624120% с битого тика).
+                # Больше x500 от входа за всю жизнь сделки не бывает даже у SHCAT
+                # (x12) — это фантом, он валит трейлинги. Сбрасываем на текущую.
+                try:
+                    _e = float(v.get("entry_price_usd", 0) or 0)
+                    _mx = float(v.get("max_price_usd", 0) or 0)
+                    if _e > 0 and _mx / _e > 500:
+                        print(f"🧹 Санация пика {k[:12]}: x{_mx / _e:.0f} → сброс на текущую.")
+                        v["max_price_usd"] = float(v.get("current_price_usd", 0) or _e)
+                except Exception:
+                    pass
+                # Миграция старых сделок: восстанавливаем original_amount_usd с учётом актуальных долей TP1/TP2.
+                if not v.get("original_amount_usd"):
+                    _rem = float(v.get("amount_usd", 0) or 0)
+                    _tp1 = bool(v.get("tp1_done", False))
+                    _tp2 = bool(v.get("tp2_done", False))
+                    _moon = bool(v.get("is_moonbag", False))
+                    _f1 = 1.0 - float(getattr(config, "TP1_SELL_FRAC", 0.45))
+                    _f2 = 1.0 - float(getattr(config, "TP2_SELL_FRAC", 0.50))
+                    if bool(v.get("is_unlocked_pool", False)):
+                        _f1 = 1.0 - float(getattr(config, "UNLOCKED_TP1_SELL_FRAC", 0.60))
+                        _f2 = 1.0 - float(getattr(config, "UNLOCKED_TP2_SELL_FRAC", 0.65))
+                    _frac = 1.0
+                    if _tp1:
+                        _frac *= _f1
+                    if _tp2 or (_moon and not _tp1):
+                        _frac *= _f2
+                    v["original_amount_usd"] = (_rem / _frac) if (_rem and _frac > 0) else _rem
+                try:
+                    self.positions[k] = VirtualPosition(**v)
+                except Exception as e:
+                    print(f"⚠️ Битый слот {k[:12]} пропущен: {e}")
+                    continue
 
-    def add_evaluation(self, eval_data: Dict[str, Any]):
-        """Добавляет свежую оценку Groq в ленту радара."""
-        self.recent_evaluations.insert(0, eval_data)
-        if len(self.recent_evaluations) > 50:
-            self.recent_evaluations = self.recent_evaluations[:50]
-        self.save()
-
-    def update_live_ml_ranking(self, ranked_items: List[Dict[str, Any]]):
-        """Обновляет живой рейтинг структурных кандидатов по оценке квантовой модели ML."""
-        self.live_ml_ranking = ranked_items[:25]
-
-    def open_position(
-        self,
-        symbol: str,
-        side: str,
-        entry_price: float,
-        size_usdt: float,
-        wick_sl: float,
-        tp1: float,
-        tp2: float,
-        groq_reason: str,
-        leverage: int = config.LEVERAGE,
-        atr_pct: float = 0.006,
-        risk_usd: float = 0.50
-    ) -> bool:
-        """Открывает новую позицию с параметрами структурного стопа и ATR для Chandelier-трейлинга."""
-        if symbol in self.open_positions:
-            return False
-        if len(self.open_positions) >= config.MAX_CONCURRENT_POSITIONS:
-            return False
-        if self.cash < size_usdt or size_usdt <= 0:
-            return False
-
-        margin_usdt = round(size_usdt, 4)
-        notional_value = round(margin_usdt * leverage, 4)
-        coins_qty = round(notional_value / max(entry_price, 1e-9), 6)
-        risk_dist = max(abs(entry_price - wick_sl), entry_price * config.STOP_LOSS_MIN_PCT)
-
-        self.cash -= margin_usdt
-
-        pos = {
-            "id": f"{symbol}_{int(time.time())}",
-            "symbol": symbol,
-            "side": side,
-            "entry_price": entry_price,
-            "current_price": entry_price,
-            "margin_usdt": margin_usdt,
-            "initial_margin_usdt": margin_usdt,
-            "notional_value": notional_value,
-            "coins_qty": coins_qty,
-            "leverage": leverage,
-            "wick_sl": wick_sl,
-            "original_sl": wick_sl,
-            "risk_dist": risk_dist,
-            "risk_usd": risk_usd,
-            "atr_pct": atr_pct,
-            "tp1": tp1,
-            "tp2": tp2,
-            "tp1_hit": False,
-            "tp2_hit": False,
-            "breakeven_set": False,
-            "highest_price": entry_price,
-            "lowest_price": entry_price,
-            "unrealized_pnl": 0.0,
-            "pnl_pct": 0.0,
-            "realized_pnl_accum": 0.0,
-            "gross_pnl_accum": 0.0,
-            "fees_accum": 0.0,
-            "weighted_exit_num": 0.0,
-            "weighted_exit_den": 0.0,
-            "partial_notes": [],
-            "groq_reason": groq_reason,
-            "opened_at": time.time(),
-            "opened_at_str": time.strftime("%Y-%m-%d %H:%M:%S")
-        }
-
-        self.open_positions[symbol] = pos
-        self.funnel_stats["filled"] += 1
-        self.save()
-
-        try:
-            obsidian_vault.log_trade_entry({
-                "symbol": symbol,
-                "side": side,
-                "entry_price": entry_price,
-                "stop_loss": wick_sl,
-                "tp1": tp1,
-                "tp2": tp2,
-                "margin": margin_usdt,
-                "leverage": leverage,
-                "reason": groq_reason
-            })
-        except Exception as e:
-            print(f"⚠️ [Obsidian Log Error] {e}", flush=True)
-
-        self._send_telegram_async(
-            f"🚀 *ROCKET OPEN: {side} {symbol}* ({leverage}x)\n"
-            f"• Вход: `${entry_price}` | Маржа: `${margin_usdt:.2f}` (Риск 1R: `${risk_usd:.2f}`)\n"
-            f"• SL: `${wick_sl}` | TP1: `${tp1}` | TP2: `${tp2}`\n"
-            f"• Тезис: _{groq_reason}_"
-        )
-        return True
-
-    def _send_telegram_async(self, text: str):
-        """Неблокирующая отправка уведомлений в Telegram (если настроены токен и chat_id)."""
-        if not getattr(self, "persist_enabled", True) or not getattr(config, "ENABLE_TELEGRAM", False):
-            return
-        token = getattr(config, "TELEGRAM_BOT_TOKEN", "")
-        chat_id = getattr(config, "TELEGRAM_CHAT_ID", "")
-        if not token or not chat_id:
-            return
-
-        def _worker():
+    def load_portfolio(self):
+        # Грузим ОБА слепка (облако + файл) и сливаем через merge_states:
+        # апсерты в Supabase идут каждые ~2с и могут лагать — stale-облако
+        # без свежих открытых позиций больше не затирает локальную правду.
+        cloud, local = {}, {}
+        sb = self._supabase()
+        if sb is not None:
             try:
-                requests.post(
-                    f"https://api.telegram.org/bot{token}/sendMessage",
-                    json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"},
-                    timeout=5
+                _snap_key = getattr(config, "PORTFOLIO_SNAPSHOT_MINT", "PORTFOLIO_STATE_V3")
+                res = sb.table("trades_pump").select("features").eq("mint", _snap_key).execute()
+                if res.data and res.data[0].get("features"):
+                    cloud = json.loads(res.data[0]["features"]) or {}
+            except Exception as e:
+                print(f"⚠️ Не удалось загрузить портфель из Supabase: {e}.")
+        try:
+            with open(self.filename, 'r') as f:
+                local = json.load(f) or {}
+        except (FileNotFoundError, json.JSONDecodeError):
+            pass
+        except Exception as e:
+            print(f"⚠️ Не удалось прочитать локальный портфель: {e}")
+
+        data = self.merge_states(cloud, local)
+        if data:
+            _src = "облако+файл" if (cloud and local) else ("Supabase" if cloud else "локальный файл")
+            print(f"✅ Портфель загружен ({_src}): {len(data)} слотов.")
+            self._parse_portfolio_data(data)
+            # Синхронизируем merged-версию в файл для дашборда
+            try:
+                with open(self.filename, 'w') as f:
+                    json.dump(data, f, indent=4)
+            except Exception:
+                pass
+            return
+
+        # Данных нигде нет — стартуем пустыми, но НИЧЕГО НЕ ПИШЕМ,
+        # чтобы случайно не затереть облачный слепок пустым словарём.
+        print("🧹 Локальных и облачных данных нет — начинаем с чистого листа (в памяти, без записи).")
+
+    def save_portfolio(self, force_cloud: bool = False):
+        data = {k: getattr(v, "model_dump", v.dict)() for k, v in self.positions.items()}
+        
+        # 1. Сохраняем локально (для Streamlit) — мгновенно и без задержек
+        try:
+            with open(self.filename, 'w') as f:
+                json.dump(data, f, indent=4)
+        except Exception:
+            pass
+            
+        # 2. Сохраняем в Supabase (Render-proof).
+        # Троттлинг: не спамим Supabase синхронными HTTP-запросами каждую секунду.
+        # В облако пишем немедленно при открытии/закрытии (force_cloud=True) или каждые 3.0 секунды для живых цен дашборда.
+        if not data:
+            return
+        now = time.time()
+        last_sb = getattr(self, "_last_sb_save", 0.0)
+        if not force_cloud and (now - last_sb) < 3.0:
+            return
+        self._last_sb_save = now
+        sb = self._supabase()
+        if sb is None:
+            return
+        _snap_key = getattr(config, "PORTFOLIO_SNAPSHOT_MINT", "PORTFOLIO_STATE_V3")
+        payload = {
+            "mint": _snap_key,
+            "features": json.dumps(data),
+            "confidence": 0,
+            "status": "SYSTEM"
+        }
+        # Выполняем запись в Supabase строго в фоновом потоке, чтобы сетевые задержки и таймауты Supabase никогда не блокировали event loop
+        def _bg_sb_save(sb_inst, p_load):
+            try:
+                sb_inst.table("trades_pump").upsert(p_load).execute()
+            except Exception as e:
+                err_str = str(e)
+                if "exceed_egress_quota" in err_str or "402" in err_str:
+                    if not getattr(self, "_quota_warned", False):
+                        print("🚨 [SUPABASE QUOTA] Проект Supabase заблокирован (402 exceed_egress_quota). Портфель сохранён локально в portfolio.json.")
+                        self._quota_warned = True
+                else:
+                    print(f"⚠️ Ошибка сохранения портфеля в Supabase: {e}")
+
+        import threading as _th
+        _th.Thread(target=_bg_sb_save, args=(sb, payload), daemon=True).start()
+
+    def get_open_positions(self) -> Dict[str, VirtualPosition]:
+        return {k: v for k, v in self.positions.items() if v.status == "open"}
+
+    def last_loss_pct(self, mint: str):
+        """Худший % закрытых сделок по монете (включая архивные *_old_*).
+        None — не торговали. Считается по ценам входа/выхода."""
+        worst = None
+        for k, pos in self.positions.items():
+            if k != mint and not k.startswith(mint + "_old_"):
+                continue
+            if pos.status != "closed" or not pos.entry_price_usd:
+                continue
+            pct = (pos.exit_price_usd - pos.entry_price_usd) / pos.entry_price_usd
+            if worst is None or pct < worst:
+                worst = pct
+        return worst
+
+    def is_loss_cooldown_active(self, mint: str, cooldown_sec: float = 14400.0) -> bool:
+        """Вернуть True при жестком раге (<= -15% бессрочно) или любой убыточной сделке за последние cooldown_sec (4ч)."""
+        worst = self.last_loss_pct(mint)
+        if worst is not None and worst <= float(getattr(config, "RUG_REBUY_MAX_LOSS", -0.15)):
+            return True
+        now_t = time.time()
+        for k, pos in self.positions.items():
+            if k != mint and not k.startswith(mint + "_old_"):
+                continue
+            if pos.status != "closed":
+                continue
+            pct = ((pos.exit_price_usd - pos.entry_price_usd) / pos.entry_price_usd) if pos.entry_price_usd else 0.0
+            if pct < 0.0 or float(getattr(pos, "pnl_usd", 0.0) or 0.0) < 0.0:
+                exit_t = float(getattr(pos, "exit_time", 0.0) or 0.0)
+                if exit_t and (now_t - exit_t) < cooldown_sec:
+                    return True
+        return False
+
+    @staticmethod
+    def _norm_symbol(s) -> str:
+        """Тикер к каноническому виду для символьного кулдауна."""
+        try:
+            return (str(s) or "").strip().upper()
+        except Exception:
+            return ""
+
+    @staticmethod
+    def merge_states(cloud: dict, local: dict) -> dict:
+        """Слияние облачного и локального слепков портфеля (анти-«пропадание» сделок).
+        Проблема: сейвы идут каждые ~2с, апсерты в Supabase могут лагать/падать —
+        тогда дашборд (или бот после рестарта) видел stale-облако без свежих
+        открытых позиций. Правила: ключ из любого источника сохраняется;
+        open+closed → closed побеждает (терминальное событие); open+open →
+        свежее по price_updated_at; closed+closed → позднее по exit_time."""
+        cloud = cloud if isinstance(cloud, dict) else {}
+        local = local if isinstance(local, dict) else {}
+        if not cloud:
+            return dict(local)
+        if not local:
+            return dict(cloud)
+        out = dict(local)
+        for k, cv in cloud.items():
+            if k not in out:
+                out[k] = cv
+                continue
+            lv = out[k]
+            if not isinstance(cv, dict) or not isinstance(lv, dict):
+                continue
+            cs, ls = cv.get("status"), lv.get("status")
+            if cs != ls:
+                # Терминальное состояние (closed/quarantined) важнее висящего open
+                if cs != "open" and ls == "open":
+                    out[k] = cv
+                # иначе оставляем local (свежие правки трекинга идут в файл первым)
+                continue
+            if cs == "open":
+                try:
+                    cv_t = max(float(cv.get("price_checked_at", 0) or 0), float(cv.get("price_updated_at", 0) or 0))
+                    lv_t = max(float(lv.get("price_checked_at", 0) or 0), float(lv.get("price_updated_at", 0) or 0))
+                    if cv_t > lv_t:
+                        out[k] = cv
+                except Exception:
+                    pass
+            else:
+                try:
+                    if float(cv.get("exit_time", 0) or 0) > float(lv.get("exit_time", 0) or 0):
+                        out[k] = cv
+                except Exception:
+                    pass
+        return out
+
+    @staticmethod
+    def _is_suspicious_pnl(pos) -> bool:
+        """Фантомный PnL (как NUTFLEX +$1.6M при +14%): stored pnl не бьётся
+        с ценовым. Такие сделки исключаем из капитала/тотала, чиним ремонтом."""
+        try:
+            entry = float(pos.entry_price_usd or 0)
+            exitp = float(pos.exit_price_usd or 0)
+            amt = float(getattr(pos, "original_amount_usd", 0) or pos.amount_usd or 0)
+            pnl = float(pos.pnl_usd or 0)
+            if not entry or not amt:
+                return abs(pnl) > 100
+            if amt <= 0 or amt > 1000:
+                return True
+            # ожидаемый порядок: |pnl| <= amt * (|exit/entry-1| + 0.05 комиссий) + $2
+            # + запас x3 на partials/округления. Превышение в разы = битые единицы цены.
+            price_move = abs(exitp / entry - 1) if entry > 0 and exitp >= 0 else 1.0
+            expected_max = amt * (price_move + 0.05) + 2.0
+            if expected_max <= 0:
+                return abs(pnl) > 50
+            return abs(pnl) > expected_max * 3 and abs(pnl) > 50
+        except Exception:
+            return False
+
+    def get_total_capital(self) -> float:
+        # Считаем изначальный капитал + сумма PnL всех закрытых позиций.
+        # Битые фантомы (pnl не бьётся с ценами) из капитала исключаем,
+        # иначе один +$1.6M ломает весь сайзинг.
+        total_pnl = 0.0
+        for pos in self.positions.values():
+            if pos.status != "closed":
+                continue
+            if self._is_suspicious_pnl(pos):
+                print(f"⚠️ Suspicious PnL исключён из капитала: {pos.symbol} ${pos.pnl_usd:.2f} "
+                      f"(entry {pos.entry_price_usd}, exit {pos.exit_price_usd})")
+                continue
+            total_pnl += pos.pnl_usd
+        real_capital = config.INITIAL_BALANCE_USD + total_pnl
+        
+        if real_capital < 2.0:
+            print(f"🛑 [KILL SWITCH] Капитал критически низкий: ${real_capital:.2f}. Торговля невозможна!")
+            return 0.0  # Вернуть 0 → position_size будет 0 → сделка не откроется
+        
+        return real_capital
+
+    def calculate_dynamic_position_size(self, pair_data: dict = None, chain: str = "base") -> float:
+        """
+        Умный ступенчатый реинвест прибыли с защитой от сдвига цены (Price Impact Guard):
+        Для депозита $20 базовый вход $2.0 (10% от депо).
+        По мере роста капитала сайз плавно растёт через компаундинг до $5-$25.
+        """
+        base_size = float(getattr(config, "BASE_TRADE_AMOUNT_USD", 2.0) or 2.0)
+        hard_cap = float(getattr(config, "MAX_COMPOUNDING_SIZE_USD", getattr(config, "MAX_POSITION_SIZE_USD", 25.0)) or 25.0)
+        min_liq = float(getattr(config, "REINVEST_MIN_POOL_LIQ_USD", 5000.0) or 5000.0)
+
+        # 0. Проверка защиты от серии минусов
+        is_cooling, reason = self.is_streak_cooldown_active()
+        if is_cooling:
+            print(reason)
+            return 0.0
+
+        capital = self.get_total_capital()
+        if capital < 2.0:
+            return 0.0
+
+        open_positions = self.get_open_positions()
+        open_cost = sum(p.amount_usd for p in open_positions.values())
+        free_cash = max(0.0, capital - open_cost)
+
+        if free_cash < base_size:
+            print(f"⚠️ [REINVEST] Недостаточно свободного кэша: ${free_cash:.1f} < базового входа ${base_size:.1f}")
+            return 0.0
+
+        initial_balance = float(getattr(config, "INITIAL_BALANCE_USD", 20.0) or 20.0)
+        net_profit = capital - initial_balance
+
+        # Стратегия экспоненциального разгона:
+        # 10% от текущего капитала в одну сделку (фиксированная доля капитала).
+        if getattr(config, "COMPOUNDING_ENABLED", True):
+            comp_pct = float(getattr(config, "COMPOUNDING_PCT", 0.10) or 0.10)
+            target = max(base_size, capital * comp_pct)
+        else:
+            if net_profit < 10.0:
+                target = base_size
+            elif net_profit < 25.0:
+                target = base_size * 1.5
+            elif net_profit < 50.0:
+                target = base_size * 2.0
+            else:
+                target = min(hard_cap, base_size * 2.5)
+
+        liq_usd = 0.0
+        if isinstance(pair_data, dict):
+            liq_usd = float((pair_data.get("liquidity") or {}).get("usd", 0.0) or 0.0)
+
+        _max_pool_frac = float(getattr(config, "MAX_POOL_LIQ_FRAC", 0.02) or 0.02)
+        if liq_usd > 0 and liq_usd < min_liq:
+            if target > base_size:
+                print(f"💧 [REINVEST] Пул ${liq_usd:,.0f} < ${min_liq:,.0f}: сброс сайза с ${target:.0f} на базовые ${base_size:.0f} (защита цены)")
+            target = min(base_size, max(base_size * 0.5, liq_usd * _max_pool_frac))
+        elif liq_usd > 0:
+            # Не более MAX_POOL_LIQ_FRAC (2%) от пула, чтобы собственный выход не двигал стакан
+            max_by_pool = max(base_size, liq_usd * _max_pool_frac)
+            if target > max_by_pool:
+                target = max_by_pool
+
+        target = min(target, hard_cap)
+
+        # Троттлинг по просадке: чем глубже откат от пика реализованного PnL, тем меньше билет.
+        # >= START$ просадки -> половина размера, >= 2*START$ -> базовый (скаутский) билет.
+        if getattr(config, "DD_THROTTLE_ENABLED", True):
+            _dd = self.get_realized_drawdown()
+            _dd0 = float(getattr(config, "DD_THROTTLE_START_USD", 15.0))
+            if _dd >= 2 * _dd0:
+                target = base_size
+            elif _dd >= _dd0:
+                target = max(base_size, target * 0.5)
+            if _dd >= _dd0:
+                print(f"📉 [DD THROTTLE] просадка ${_dd:.1f} от пика -> сайз ${target:.0f}")
+
+        if target > free_cash:
+            target = free_cash
+
+        final_size = float(int(round(target)))
+        if final_size < base_size:
+            final_size = base_size if free_cash >= base_size else 0.0
+
+        if chain == "robinhood":
+            rob_cap = float(getattr(config, "ROB_MAX_SIZE_USD", hard_cap) or hard_cap)
+            final_size = min(final_size, rob_cap)
+        elif chain == "bsc":
+            bsc_cap = float(getattr(config, "BSC_MAX_SIZE_USD", hard_cap) or hard_cap)
+            final_size = min(final_size, bsc_cap)
+
+        print(f"💰 [COMPOUNDING] Вход: ${final_size:.0f} (Капитал: ${capital:.1f}, Свободно: ${free_cash:.1f}, Профит: {net_profit:+.1f}, Пул: ${liq_usd:,.0f})")
+        return final_size
+
+    def add_position(self, symbol, mint, entry_price, amount_usd=5.0, ml_features=None, ml_confidence=0.0, is_mature=False, source="", chain="solana", pair_address="", stop_under_wick=0.0, wick_stop_loss_pct=0.0, initial_liquidity_usd=0.0, pair_data=None):
+        # Master Firewall: ТОЛЬКО SOLANA
+        if getattr(config, "SOLANA_ONLY", True):
+            if chain != "solana" or str(mint or "").startswith("0x"):
+                print(f"🚫 [SOLANA-ONLY-FIREWALL] Отказ входа: {symbol} ({str(mint)[:10]}) не Solana (chain={chain}).")
+                return False
+
+        # Валидация адреса минта Solana: валидный Base58 адрес должен быть длиной от 32 до 44 символов
+        if chain == "solana":
+            mint_str = str(mint or "").strip()
+            if len(mint_str) < 32 or len(mint_str) > 44 or not re.match(r'^[1-9A-HJ-NP-Za-km-z]+$', mint_str):
+                print(f"🚫 Отказ: невалидный адрес Solana mint '{mint_str}' (длина {len(mint_str)}, ожидается 32-44 Base58).")
+                return False
+
+            # =========================================================================
+            # 🛑 CANONICAL LAUNCHPAD FIREWALL (100% ЗАЩИТА ОТ РАГОВ REMOVE LP)
+            # =========================================================================
+            # ФАКТ: 100% катастрофических рагпуллов (-99.99%) в истории бота (FRONK, SWJ, SIRIUS,
+            # HI, FLY, CRO, SI, 42, NEX AI, BREAD) произошли на КАСТОМНЫХ токенах без суффикса 'pump'.
+            # Настоящие токены Pump.fun ВСЕГДА заканчиваются на 'pump'. При миграции на DEX
+            # протокол pump.fun НАВСЕГДА сжигает LP в мёртвом адресе — дев физически не может
+            # сделать Remove LP!
+            # Кастомные токены (особенно на Meteora DYN2 / фейковом PumpSwap) создаются девами-скамерами,
+            # которые выдергивают ликвидность одной транзакцией.
+            # ВСЕ прибыльные ракеты бота (WILL +62%, UP +23%, WISHMAS +86%, TEDDY, BUFFAPE, SYRUP)
+            # заканчиваются строго на 'pump'!
+            _pd_liq = float(((pair_data or {}).get("liquidity") or {}).get("usd", 0) or 0) if isinstance(pair_data, dict) else 0.0
+            _pd_dex = str((pair_data or {}).get("dexId", "") or "").lower() if isinstance(pair_data, dict) else ""
+            _lp_preverified = bool(isinstance(pair_data, dict) and pair_data.get("_lp_verified"))
+            _eff_init_liq = max(float(initial_liquidity_usd or 0.0), _pd_liq)
+            _is_vip_or_copy = ("VIP" in str(source or "")) or str(source or "").startswith("COPY")
+            _allow_unl_tr = bool(getattr(config, "ALLOW_UNLOCKED_LP_POOLS", True))
+
+            # Master Curve & Liquidity Firewall: единый заслон для ВСЕХ модулей (SCANNER, GROK-JEV, JUP, SNIPER, TG).
+            # 1) Если ALLOW_UNGRADUATED_PUMPFUN=False — ни одна сырая кривая не откроется.
+            # 2) Если сырая кривая разрешена — не допускает вход с ликвидностью < CURVE_MIN_LIQ_USD.
+            # 3) Для мигрировавших DEX-пулов — не допускает микро-пулы с ликвидностью < MIN_GRADUATED_LIQ_USD.
+            _curve_min_liq_fw = float(getattr(config, "CURVE_MIN_LIQ_USD", 0.0) or 0.0)
+            _grad_min_liq_fw = float(getattr(config, "MIN_GRADUATED_LIQ_USD", 0.0) or 0.0)
+            _mf_dex_fw = str((ml_features or {}).get("dex") or "").lower() if isinstance(ml_features, dict) else ""
+            _is_curve_fw = (
+                config.is_unmigrated_curve_token(mint_str, pair_data)
+                or _pd_dex in ("pump", "pumpfun", "meteoradbc")
+                or _mf_dex_fw in ("pump", "pumpfun", "meteoradbc")
+            )
+            if _is_curve_fw and not _is_vip_or_copy:
+                if not getattr(config, "ALLOW_UNGRADUATED_PUMPFUN", False):
+                    print(
+                        f"🛑 [FIREWALL-UNGRADUATED-CURVE] {symbol} ({mint_str[:8]}): отказ входа ({source}) — "
+                        f"сырые кривые отключены (ALLOW_UNGRADUATED_PUMPFUN=False), торгуем только мигрировавшие DEX-пулы!"
+                    )
+                    return False
+                if _curve_min_liq_fw > 0.0:
+                    _fdv_fw = float(
+                        (pair_data or {}).get("fdv", 0)
+                        or (pair_data or {}).get("marketCap", 0)
+                        or ((ml_features or {}).get("fdv", 0) if isinstance(ml_features, dict) else 0)
+                        or 0.0
+                    )
+                    if _fdv_fw <= 0.0 and float(entry_price or 0) > 0 and mint_str.lower().endswith("pump"):
+                        _fdv_fw = float(entry_price) * 1_000_000_000.0
+                    _curve_liq_fw = _eff_init_liq if _eff_init_liq > 0.0 else (0.40 * _fdv_fw)
+                    if _curve_liq_fw < _curve_min_liq_fw:
+                        print(
+                            f"🛑 [FIREWALL-CURVE-THIN-LIQ] {symbol} ({mint_str[:8]}): отказ входа ({source}) — "
+                            f"сырая кривая с ликвидностью ${_curve_liq_fw:,.0f} < ${_curve_min_liq_fw:,.0f} (FDV ${_fdv_fw:,.0f})!"
+                        )
+                        return False
+            elif not _is_curve_fw and not _is_vip_or_copy and _grad_min_liq_fw > 0.0 and 0.0 < _eff_init_liq < _grad_min_liq_fw:
+                print(
+                    f"🛑 [FIREWALL-LOW-GRAD-LIQ] {symbol} ({mint_str[:8]}): отказ входа ({source}) — "
+                    f"ликвидность пула ${_eff_init_liq:,.0f} < ${_grad_min_liq_fw:,.0f}!"
+                )
+                return False
+            _is_rh_tr = False
+            _rh_mode_tr = ""
+            try:
+                import rug_hunter as _rh_fw
+                _rh_mode_tr = str((pair_data.get("_rug_hunter_mode") if isinstance(pair_data, dict) else "") or "").upper().strip()
+                _is_rh_tr = bool(_rh_mode_tr) or _rh_fw.is_rug_hunter_source(source)
+                if _is_rh_tr and not _rh_fw.has_rug_hunter_slot(self):
+                    print(f"⏳ [FIREWALL-RH-SLOTS] {symbol} ({mint_str[:8]}): заняты все слоты Rug-Hunter ({_rh_fw.count_open_rug_hunter_positions(self)}/{getattr(config, 'RUG_HUNTER_MAX_SLOTS', 2)}) — оставляем слоты под чистые ракеты.")
+                    return False
+            except Exception:
+                _is_rh_tr = False
+            if isinstance(pair_data, dict):
+                _rh_seeded_allowed_tr = bool(
+                    _is_rh_tr
+                    and _rh_mode_tr in ("UNLOCKED-LP", "SEEDED-LP")
+                    and getattr(config, "RUG_HUNTER_ENABLED", False)
+                    and getattr(config, "RUG_HUNTER_UNLOCKED_LP_ENABLED", False)
+                    and getattr(config, "RUG_HUNTER_SEEDED_LP_ENABLED", True)
+                )
+                _fdv_tr_chk = float(pair_data.get("fdv", 0) or pair_data.get("marketCap", 0) or 0)
+                _extreme_liq_fdv_tr = bool(_fdv_tr_chk > 0 and _eff_init_liq > (_fdv_tr_chk * 2.25))
+                if config.is_pumpswap_liq_fdv_trap(pair_data) and (not _rh_seeded_allowed_tr or _extreme_liq_fdv_tr or (mint_str.lower().endswith("pump") and pair_data.get("_pumpswap_canonical") is False)):
+                    print(f"🛑 [FIREWALL-RUG-BLOCK] {symbol} ({mint_str[:8]}): PumpSwap CreatePool liq/fdv 0-social trap!")
+                    return False
+                _ps_rpc_unv = bool(pair_data.get("_pumpswap_rpc_unverified")) and config.is_launchpad_mint(mint_str)
+                _unl_runner_pre = bool(pair_data.get("_unlocked_runner_ok")) or (_is_rh_tr and _rh_mode_tr in ("UNLOCKED-LP", "SEEDED-LP"))
+                if not _allow_unl_tr and pair_data.get("_pumpswap_checked") and not _lp_preverified and not _ps_rpc_unv and not _unl_runner_pre:
+                    print(f"🛑 [FIREWALL-RUG-BLOCK] {symbol} ({mint_str[:8]}): PumpSwap pool failed on-chain CreatePool check!")
+                    return False
+                if not _allow_unl_tr and _pd_dex == "pumpswap" and mint_str.lower().endswith("pump") and pair_data.get("_pumpswap_canonical") is False and not _lp_preverified and not _ps_rpc_unv:
+                    print(f"🛑 [FIREWALL-RUG-BLOCK] {symbol} ({mint_str[:8]}): custom non-canonical .pump PumpSwap pool without verified burned LP!")
+                    return False
+            # Строгий LP-Firewall:
+            # 1) Нативный Pump.fun токен (оканчивается на 'pump') на pumpfun / каноническом pumpswap защищён протоколом.
+            # 2) Любой кастомный не-'pump' токен (.bonk, .bags, или кастомный DEX-пул) ИЛИ .pump на стороннем DEX / non-canonical CreatePool
+            #    ДОЛЖЕН иметь подтверждённый _lp_verified (если не включен ALLOW_UNLOCKED_LP_POOLS или не квалифицирован RUG-HUNTER:UNLOCKED-LP/SEEDED-LP).
+            _ps_canon_flag = bool(isinstance(pair_data, dict) and pair_data.get("_pumpswap_canonical"))
+            _ps_rpc_unv_flag = bool(isinstance(pair_data, dict) and pair_data.get("_pumpswap_rpc_unverified")) and config.is_launchpad_mint(mint_str) and not config.is_pumpswap_liq_fdv_trap(pair_data)
+            _is_native_pump_dex = (
+                (_pd_dex == "pumpswap" and _ps_canon_flag)
+                or (
+                    mint_str.lower().endswith("pump") and (
+                        _pd_dex in ("", "pumpfun", "pump")
+                        or (_pd_dex == "pumpswap" and (not isinstance(pair_data, dict) or not pair_data.get("_pumpswap_checked") or _ps_canon_flag or _ps_rpc_unv_flag))
+                    )
+                )
+            )
+            _rh_unlocked_allowed_tr = bool(_is_rh_tr and _rh_mode_tr in ("UNLOCKED-LP", "SEEDED-LP") and getattr(config, "RUG_HUNTER_ENABLED", False) and getattr(config, "RUG_HUNTER_UNLOCKED_LP_ENABLED", False))
+            if not _is_native_pump_dex and not _lp_preverified and not _is_vip_or_copy and not _rh_unlocked_allowed_tr:
+                _ca_tr = float((pair_data or {}).get("pairCreatedAt") or 0)
+                _age_tr = ((time.time() * 1000.0 - _ca_tr) / 60000.0) if _ca_tr > 0 else 0.2
+                _v5_tr = float(((pair_data or {}).get("volume") or {}).get("m5", 0) or 0)
+                _tx_tr = ((pair_data or {}).get("txns") or {}).get("m5") or {}
+                _b5_tr = int(_tx_tr.get("buys", 0) or 0)
+                _s5_tr = int(_tx_tr.get("sells", 0) or 0)
+                _fdv_tr = float((pair_data or {}).get("fdv", 0) or (pair_data or {}).get("marketCap", 0) or 0)
+                _m5_tr = ((pair_data or {}).get("priceChange") or {}).get("m5")
+                _info_tr = (pair_data or {}).get("info") or {}
+                _has_soc_tr = bool((_info_tr.get("socials") or []) or (_info_tr.get("websites") or []))
+                _unl_tr_ok = config.is_safe_unlocked_custom_runner(
+                    liq_usd=_eff_init_liq,
+                    age_min=_age_tr,
+                    vol5_usd=_v5_tr,
+                    buys5=_b5_tr,
+                    sells5=_s5_tr,
+                    has_socials=_has_soc_tr,
+                    is_trap=config.is_pumpswap_liq_fdv_trap(pair_data or {}),
+                    fdv_usd=_fdv_tr,
+                    m5_pct=(float(_m5_tr) if _m5_tr is not None else None),
+                    pair_data=pair_data,
+                )
+                if _unl_tr_ok:
+                    if isinstance(pair_data, dict):
+                        pair_data["_unlocked_runner_ok"] = True
+                else:
+                    print(f"🛑 [FIREWALL-RUG-BLOCK] {symbol} ({mint_str[:8]}): отказ входа — незалоченный пул не прошёл аудит безопасности (dex={_pd_dex}, age {_age_tr:.1f}м, liq ${_eff_init_liq:,.0f}, fdv ${_fdv_tr:,.0f}, vol5 ${_v5_tr:,.0f}, soc={_has_soc_tr})!")
+                    return False
+                if not _allow_unl_tr and float(ml_confidence or 0.0) <= 0.0 and _eff_init_liq < 5000.0:
+                    print(f"🛑 [FIREWALL-RUG-BLOCK] {symbol} ({mint_str[:8]}): отказ входа — неаудированный кастомный не-launchpad токен (liq ${_eff_init_liq:,.0f}, ML {float(ml_confidence or 0):.1f}%)!")
+                    return False
+
+        # Валидация входа: мусорный entry ~0 давал фантомы +586М% и $1.6M.
+        try:
+            entry_price = float(entry_price or 0)
+            amount_usd = float(amount_usd or 0)
+        except Exception:
+            print(f"🚫 Отказ: битая цена/сайз {symbol} {mint[:8]}.")
+            return False
+        if not (entry_price > 0) or entry_price > 1e6:
+            print(f"🚫 Отказ: entry_price ${entry_price} вне диапазона для {symbol}.")
+            return False
+        if not (0.5 <= amount_usd <= 50000.0):
+            print(f"🚫 Отказ: сайз ${amount_usd:.2f} вне [0.5, 50000] для {symbol}.")
+            return False
+        # Защита от серии минусов (Streak Circuit Breaker)
+        is_cooling, reason = self.is_streak_cooldown_active()
+        if is_cooling:
+            print(f"🚫 Отказ входа {symbol}: {reason}")
+            return False
+
+        # ЗАЩИТА ML FIREWALL: Ни одна сделка с низким скором Rocket XGBoost не может быть открыта!
+        # ИСКЛЮЧЕНИЕ: VIP KOL сделки (Ansem, Chairman и др.) идут с 100% обходом ML-фильтров по прямому требованию!
+        _is_copy_src = str(source or "").startswith("COPY")
+        _is_vip = "VIP" in str(source or "")
+        _is_unlocked_tr = config.is_position_unlocked_lp(mint, pair_data, bool((pair_data or {}).get("_lp_verified")))
+        _pd_dex_tr = str((pair_data or {}).get("dexId", "") or "").lower() if isinstance(pair_data, dict) else ""
+        _is_raw_curve_tr = _pd_dex_tr in ("pump", "pumpfun")
+        min_conf = 20.0 if _is_raw_curve_tr else float(getattr(config, "ROCKET_XGB_FINAL_THRESHOLD", 14.0))
+        _stage1_conf = 20.0 if _is_raw_curve_tr else float(getattr(config, "ROCKET_XGB_STAGE1_THRESHOLD", 14.0))
+        _mom_rocket_ok = False
+        if not _is_unlocked_tr and isinstance(pair_data, dict):
+            _tx_t = (pair_data.get("txns") or {}).get("m5") or {}
+            _b5_t = int(_tx_t.get("buys", 0) or 0)
+            _s5_t = int(_tx_t.get("sells", 0) or 0)
+            _v5_t = float((pair_data.get("volume") or {}).get("m5", 0) or 0)
+            _m5_t = float((pair_data.get("priceChange") or {}).get("m5", 0) or 0)
+            _mom_rocket_ok = (_m5_t >= 5.0 and _v5_t >= 4000.0 and _b5_t >= int(_s5_t * 1.15))
+        _eff_min_conf = _stage1_conf if (_is_copy_src or _mom_rocket_ok) else min_conf
+        if getattr(config, "ROCKET_XGB_ENABLED", True) and not _is_vip:
+            if _is_unlocked_tr:
+                _unl_min = float(getattr(config, "ROCKET_XGB_UNLOCKED_CUSTOM_MIN", 35.0))
+                if (ml_confidence + 0.05) < _unl_min:
+                    print(f"🚫 [FIREWALL] Отказ входа {symbol} ({mint[:8]}): незалоченный пул Rocket XGB скор {ml_confidence:.1f}% < {_unl_min:.0f}% (блокировка LP-rug)")
+                    return False
+            elif ml_confidence > 0 and (ml_confidence + 0.05) < _eff_min_conf:
+                print(f"🚫 [FIREWALL] Отказ входа {symbol} ({mint[:8]}): Rocket XGB скор {ml_confidence:.1f}% < {_eff_min_conf:.0f}% (блокировка убыточного дампа)")
+                return False
+            if (source == "GROK-JEV" or _is_copy_src) and ml_confidence <= 0.0:
+                print(f"🚫 [FIREWALL] Отказ входа {symbol} ({mint[:8]}): {source} попытка входа без ML скоринга!")
+                return False
+        # СИМВОЛЬНЫЙ КУЛДАУН (кейс VRAX: +5% → перезаход в клона → -32%).
+        # Все старые гарды keyed by mint (адрес), а клоны выходят под тем же
+        # тикером с другим адресом. Баним тикер целиком: открыт такой же —
+        # отказ (не удваиваемся в тот же памп); закрыт недавно — отказ
+        # (не покупаем вершину, с которой только вышли, и не ловим нож).
+        # История закрытых живёт в positions (включая архив *_old_*), поэтому
+        # переживает рестарты через файл/Supabase.
+        _sym = self._norm_symbol(symbol)
+        if _sym and not _is_vip:
+            _cd = float(getattr(config, "SYMBOL_REBUY_COOLDOWN_SEC", 4 * 3600) or 0)
+            _now = time.time()
+            for _k, _p in self.positions.items():
+                if _k == mint:
+                    continue  # свой же адрес ведёт mint-ветка ниже
+                try:
+                    if self._norm_symbol(_p.symbol) != _sym:
+                        continue
+                except Exception:
+                    continue
+                if _p.status == "open":
+                    print(f"🚫 Отказ: {symbol} уже в рынке (другой контракт, {_k[:10]}). Не удваиваемся в тот же тикер.")
+                    return False
+                if _p.status == "closed" and _cd > 0:
+                    _xt = float(getattr(_p, "exit_time", 0) or 0)
+                    _pnl = float(getattr(_p, "pnl_usd", 0.0) or 0.0)
+                    _orig_a = float(getattr(_p, "original_amount_usd", 0.0) or getattr(_p, "amount_usd", 4.0) or 4.0)
+                    _pnl_ratio = (_pnl / _orig_a) if _orig_a > 0 else 0.0
+                    _er_up = str(getattr(_p, "exit_reason", "")).upper()
+                    _was_profitable = (
+                        _pnl_ratio >= 0.08
+                        and not any(k in _er_up for k in ("CRASH", "RUG", "HONEYPOT", "EMERGENCY", "BREAKEVEN", "REVERSAL", "STALL", "STAGNANT", "STOP"))
+                    )
+                    _eff_cd = (45 * 60) if _was_profitable else _cd
+                    if _xt and (_now - _xt) < _eff_cd:
+                        _left = (_eff_cd - (_now - _xt)) / 60 if _was_profitable else (_eff_cd - (_now - _xt)) / 3600
+                        _unit = "м" if _was_profitable else "ч"
+                        print(f"⏳ Символьный кулдаун: {symbol} закрыт {_p.pnl_usd:+.2f}$ недавно ({getattr(_p, 'exit_reason', '')}). "
+                              f"Повтор через {_left:.1f}{_unit} — не покупаем свой же выход.")
+                        return False
+        # БЛОКИРОВКА ПОВТОРНОГО ВХОДА С УМНЫМ КУЛДАУНОМ
+        if mint in self.positions:
+            pos = self.positions[mint]
+            if pos.status == "open":
+                print(f"⚠️ Позиция {symbol} уже открыта. Отмена повторного входа.")
+                return False
+                
+            # Умный кулдаун:
+            # 1. Только уверенный профит (>= +8% по Trailing / Profit Floor, БЕЗ Breakeven-сливов вроде IPHONEDUO -37.7%!)
+            #    получает 15-минутный кулдаун на 2-ю волну.
+            # 2. Все минусы, флеты и возвраты в безубыток получают 4 часа карантина.
+            _pnl = float(getattr(pos, "pnl_usd", 0.0) or 0.0)
+            _orig_p = float(getattr(pos, "original_amount_usd", 0.0) or getattr(pos, "amount_usd", 4.0) or 4.0)
+            _pnl_ratio_m = (_pnl / _orig_p) if _orig_p > 0 else 0.0
+            _er_m_up = str(getattr(pos, "exit_reason", "")).upper()
+            _exit_time = float(getattr(pos, "exit_time", 0.0) or pos.entry_time)
+            time_since_exit = time.time() - _exit_time
+            _was_profitable = (
+                _pnl_ratio_m >= 0.08
+                and not any(k in _er_m_up for k in ("CRASH", "RUG", "HONEYPOT", "EMERGENCY", "BREAKEVEN", "REVERSAL", "STALL", "STAGNANT", "STOP"))
+            )
+            
+            _loss_cd_cfg = float(getattr(config, "MINT_LOSS_COOLDOWN_SEC", 1800) or 1800)
+            _req_cd = (45 * 60) if _was_profitable else _loss_cd_cfg
+            if not _is_vip and time_since_exit < _req_cd:
+                if _was_profitable:
+                    print(f"⏳ Кулдаун профитной монеты: {symbol} закрыт в +${_pnl:.2f}. Ждем еще {int(_req_cd - time_since_exit)}с перед возможным перезаходом во 2-ю волну.")
+                else:
+                    print(f"⏳ Кулдаун: {symbol} закрыт с минусом. Ждем еще {int(_req_cd - time_since_exit)}с перед входом.")
+                return False
+                
+            # Если кулдаун прошел, архивируем старую сделку, чтобы не потерять ее из истории PnL
+            archive_key = f"{mint}_old_{int(time.time())}"
+            self.positions[archive_key] = pos
+            print(f"🔄 Кулдаун прошел! Разрешен повторный вход в {symbol} ({'Вторая волна профитного токена' if _was_profitable else 'CTO'}).")
+
+        print(f"✅ Открыта PAPER сделка: {symbol} по цене ${entry_price} [{chain}|{source}]")
+        
+        ml_features_dict = ml_features if ml_features is not None else {}
+        
+        _pd_open = pair_data if isinstance(pair_data, dict) else {}
+        _pos_lp_locked = bool(_pd_open.get("_lp_verified"))
+        _pos_unlocked = config.is_position_unlocked_lp(mint_str, _pd_open, _pos_lp_locked)
+        _pos_rh = bool(_pd_open.get("_rug_hunter_mode")) or ("RUG-HUNTER" in str(source or "").upper())
+
+        self.positions[mint] = VirtualPosition(
+            symbol=symbol,
+            mint=mint,
+            entry_price_usd=entry_price,
+            amount_usd=amount_usd,
+            original_amount_usd=amount_usd,
+            entry_time=time.time(),
+            peak_time=time.time(),
+            max_price_usd=entry_price,
+            min_price_usd=entry_price,
+            current_price_usd=entry_price,
+            ml_features=ml_features_dict,
+            ml_confidence=ml_confidence,
+            is_mature=is_mature,
+            is_lp_locked_80=_pos_lp_locked,
+            is_unlocked_pool=_pos_unlocked,
+            is_rug_hunter=_pos_rh,
+            source=source,
+            chain=chain,
+            pair_address=pair_address,
+            stop_under_wick=float(stop_under_wick or 0.0),
+            wick_stop_loss_pct=float(wick_stop_loss_pct or 0.0),
+            last_security_check_ts=time.time(),
+            unsellable_strikes=0,
+            initial_liquidity_usd=float(initial_liquidity_usd or (pair_data.get("liquidity", {}).get("usd", 0) if isinstance(pair_data, dict) else 0.0) or 0.0),
+            peak_liquidity_usd=float(initial_liquidity_usd or (pair_data.get("liquidity", {}).get("usd", 0) if isinstance(pair_data, dict) else 0.0) or 0.0),
+            pair_data=(pair_data if isinstance(pair_data, dict) else {})
+        )
+        self.save_portfolio(force_cloud=True)
+        print(f"📝 PAPER BUY: {symbol} ({mint}) | Amount: ${amount_usd} | Price: ${entry_price} | Src: {source} | Chain: {chain}")
+        
+        # === СОХРАНЕНИЕ В SUPABASE (ENTRY) ===
+        # Сохраняем опыт в базу с полными метаданными токена
+        try:
+            from trade_logger import TradeLogger
+            import asyncio
+            logger = TradeLogger()
+            entry_features = {
+                "symbol": symbol,
+                "entry_price_usd": entry_price,
+                "amount_usd": amount_usd,
+                "source": source,
+                "chain": chain,
+                "pair_address": pair_address,
+                **(ml_features_dict if isinstance(ml_features_dict, dict) else {})
+            }
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(logger.log_entry(mint, entry_features, ml_confidence, is_mature))
+            except RuntimeError:
+                import threading
+                threading.Thread(target=lambda: asyncio.run(logger.log_entry(mint, entry_features, ml_confidence, is_mature)), daemon=True).start()
+
+            # Также регистрируем покупку в единой таблице all_scanned_tokens
+            try:
+                from shadow_tracker import shadow_tracker
+                shadow_tracker.log_scanned_token(
+                    mint=mint,
+                    symbol=symbol,
+                    chain=chain,
+                    decision="BUY",
+                    reason=f"BUY_ORDER (conf={ml_confidence:.1f}%)",
+                    score=float(ml_confidence or 0.0),
+                    price=float(entry_price or 0.0),
+                    liquidity=float(_eff_init_liq or 0.0),
+                    source=source or "BUY",
+                    features=entry_features
                 )
             except Exception:
                 pass
-
-        threading.Thread(target=_worker, daemon=True).start()
-
-    def update_leverage(self, new_leverage: int):
-        """Обновляет плечо для открытых позиций."""
-        for symbol, pos in self.open_positions.items():
-            pos["leverage"] = new_leverage
-            pos["notional_value"] = round(pos["margin_usdt"] * new_leverage, 2)
-            pos["coins_qty"] = round(pos["notional_value"] / max(pos["entry_price"], 1e-9), 6)
-
-            entry = pos["entry_price"]
-            cur_price = pos.get("current_price", entry)
-            raw_pct = (cur_price - entry) / entry if pos["side"] == "LONG" else (entry - cur_price) / entry
-            pos["pnl_pct"] = round(raw_pct * new_leverage * 100, 2)
-            pos["unrealized_pnl"] = round(pos["margin_usdt"] * (raw_pct * new_leverage), 3)
-        self.save()
-
-    def update_position_prices(self, price_map: Dict[str, float]):
-        """Обновляет текущие цены открытых позиций, экстремумы MFE и чистый нереализованный PnL."""
-        for symbol, pos in list(self.open_positions.items()):
-            cur_price = price_map.get(symbol)
-            if not cur_price or cur_price <= 0:
-                continue
-
-            pos["current_price"] = cur_price
-            entry = pos["entry_price"]
-            lev = pos["leverage"]
-
-            if cur_price > pos.get("highest_price", entry):
-                pos["highest_price"] = cur_price
-            if cur_price < pos.get("lowest_price", entry):
-                pos["lowest_price"] = cur_price
-
-            if pos["side"] == "LONG":
-                raw_pct = (cur_price - entry) / entry
-            else:
-                raw_pct = (entry - cur_price) / entry
-
-            gross_unrealized = pos["margin_usdt"] * (raw_pct * lev)
-            est_fees = pos["margin_usdt"] * lev * 0.0012
-            net_unrealized = gross_unrealized - est_fees
-            pos["pnl_pct"] = round((net_unrealized / max(pos["margin_usdt"], 1e-9)) * 100, 2)
-            pos["unrealized_pnl"] = round(net_unrealized, 3)
-
-    def close_position(self, symbol: str, exit_price: float, reason: str, partial_pct: float = 1.0):
-        """
-        Закрывает позицию (частично на TP1/TP2 или полностью).
-        Частичные фиксации мгновенно возвращают маржу и прибыль в Cash, а итоговая запись
-        в trade_history создается как ЕДИНАЯ консолидированная сделка при окончательном выходе!
-        """
-        if symbol not in self.open_positions:
-            return
-
-        pos = self.open_positions[symbol]
-        lev = pos["leverage"]
-        entry = pos["entry_price"]
-
-        if pos["side"] == "LONG":
-            raw_pct = (exit_price - entry) / entry
-        else:
-            raw_pct = (entry - exit_price) / entry
-
-        partial_pct = min(max(partial_pct, 0.01), 1.0)
-        closed_margin = pos["margin_usdt"] * partial_pct
-        gross_pnl = closed_margin * (raw_pct * lev)
-
-        # Честный учет комиссий и проскальзывания (0.06% на вход + 0.06% на выход = 0.12% от закрываемого номинала)
-        notional_entry = closed_margin * lev
-        notional_exit = (pos["coins_qty"] * partial_pct) * exit_price
-        fees_and_slippage = round((notional_entry * 0.0006) + (notional_exit * 0.0006), 4)
-
-        realized_pnl = round(gross_pnl - fees_and_slippage, 4)
-        return_to_cash = round(closed_margin + realized_pnl, 4)
-        self.cash += max(return_to_cash, 0.0)
-
-        # Накапливаем финансовый итог внутри позиции
-        pos["realized_pnl_accum"] = pos.get("realized_pnl_accum", 0.0) + realized_pnl
-        pos["gross_pnl_accum"] = pos.get("gross_pnl_accum", 0.0) + gross_pnl
-        pos["fees_accum"] = pos.get("fees_accum", 0.0) + fees_and_slippage
-        pos["weighted_exit_num"] = pos.get("weighted_exit_num", 0.0) + (closed_margin * exit_price)
-        pos["weighted_exit_den"] = pos.get("weighted_exit_den", 0.0) + closed_margin
-
-        # ЧАСТИЧНОЕ ЗАКРЫТИЕ (TP1 / TP2): оставляем позицию открытой для ранера!
-        if partial_pct < 0.99:
-            pos["margin_usdt"] = round(max(pos["margin_usdt"] - closed_margin, 0.0001), 4)
-            pos["notional_value"] = round(pos["margin_usdt"] * lev, 4)
-            pos["coins_qty"] = round(pos["coins_qty"] * (1.0 - partial_pct), 6)
-
-            short_tag = f"TP1({int(round(partial_pct*100))}%)" if "TP1" in reason else ("TP2(30%)" if "TP2" in reason else f"Part({int(round(partial_pct*100))}%)")
-            notes = pos.setdefault("partial_notes", [])
-            notes.append(short_tag)
-
-            if realized_pnl > 0 or "TP" in reason:
-                self.consecutive_losses = 0
-
-            self.save()
-            slice_roi = round((realized_pnl / max(closed_margin, 1e-9)) * 100, 1)
-            print(
-                f"🎯 [PARTIAL FILL] {symbol} по ${exit_price:.4f} | Зафиксировано в кэш: ${realized_pnl:+.2f} ({slice_roi:+.1f}%) | "
-                f"В ранере осталось маржи: ${pos['margin_usdt']:.2f} | {reason}",
-                flush=True
-            )
-            return
-
-        # ПОЛНОЕ (ФИНАЛЬНОЕ) ЗАКРЫТИЕ ПОЗИЦИИ -> 1 СДЕЛКА В СТАТИСТИКЕ!
-        initial_mg = max(pos.get("initial_margin_usdt", closed_margin), 1e-9)
-        total_realized = round(pos["realized_pnl_accum"], 3)
-        total_gross = round(pos["gross_pnl_accum"], 3)
-        total_fees = round(pos["fees_accum"], 4)
-        w_den = max(pos.get("weighted_exit_den", closed_margin), 1e-9)
-        blended_exit = config.round_price(pos.get("weighted_exit_num", closed_margin * exit_price) / w_den)
-        total_roi_pct = round((total_realized / initial_mg) * 100, 2)
-
-        notes = pos.get("partial_notes", [])
-        full_reason = f"{' + '.join(notes)} ➔ {reason}" if notes else reason
-
-        trade_record = {
-            "symbol": symbol,
-            "side": pos["side"],
-            "entry_price": entry,
-            "exit_price": blended_exit,
-            "last_exit_price": exit_price,
-            "margin_usdt": round(initial_mg, 2),
-            "initial_margin_usdt": round(initial_mg, 2),
-            "partial_pct": 1.0,
-            "leverage": lev,
-            "gross_pnl": total_gross,
-            "fees_paid": total_fees,
-            "realized_pnl": total_realized,
-            "roi_pct": total_roi_pct,
-            "reason": full_reason,
-            "opened_at": pos["opened_at_str"],
-            "closed_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "duration_sec": int(time.time() - pos["opened_at"])
-        }
-        self.trade_history.append(trade_record)
-        del self.open_positions[symbol]
-
-        # Умная защита от тильта и серийных убытков:
-        # Околонулевой выход по Time-Stop (например -$0.04) не считается за аварийный стоп-лосс,
-        # а реальный стоп-лосс (<= -$0.20 или Structural Stop) активирует 3-часовой карантин монеты и Circuit Breaker!
-        is_full_stop = (total_realized <= -0.20) or ("Structural Stop" in full_reason)
-        
-        if is_full_stop:
-            self.consecutive_losses += 1
-            today_utc = time.strftime('%Y-%m-%d', time.gmtime())
-            if self.daily_loss_day != today_utc:
-                self.daily_loss_day = today_utc
-                self.daily_losses_count = 0
-            self.daily_losses_count += 1
-            self.circuit_breaker_override = False
-
-            # Умеренный карантин после полного стопа: защищает от мгновенного реванша,
-            # но не блокирует повторный вход в монету на весь день (чтобы не пропускать новые ракеты).
-            self.symbol_lockouts[symbol] = time.time() + (90 * 60)
-            print(
-                f"🔒 [КАРАНТИН] {symbol} после полного стопа ${total_realized:+.2f}. "
-                f"(Дневных стопов: {self.daily_losses_count}/{getattr(config, 'DAILY_LOSS_LIMIT', 3)})",
-                flush=True
-            )
-
-            if getattr(config, "ENABLE_CIRCUIT_BREAKER", False):
-                if self.is_daily_limit_reached():
-                    print(f"🛑 [CIRCUIT BREAKER] Дневной лимит ({config.DAILY_LOSS_LIMIT} стопа) достигнут! Защита капитала до завтра.", flush=True)
-
-                max_streak = getattr(config, "MAX_CONSECUTIVE_LOSSES", 2)
-                if self.consecutive_losses >= max_streak:
-                    pause_sec = getattr(config, "CONSECUTIVE_LOSS_PAUSE_SECONDS", 2700)
-                    if pause_sec > 0:
-                        self.pause_until = time.time() + pause_sec
-                        print(f"🛑 [CIRCUIT BREAKER] {self.consecutive_losses} стопа подряд! Пауза на {pause_sec // 60} мин.", flush=True)
-            else:
-                self.pause_until = 0.0
-        elif total_realized <= -0.08:
-            # Промежуточный минус: 30 минут карантина на монету
-            self.symbol_lockouts[symbol] = time.time() + (30 * 60)
-        elif total_realized <= 0.0:
-            # Легкий околонулевой скретч / Time-Stop: 10 минут паузы только по этой монете
-            self.symbol_lockouts[symbol] = time.time() + (10 * 60)
-        else:
-            self.consecutive_losses = 0
-
-        self.save()
-
-        try:
-            obsidian_vault.log_trade_exit({
-                "symbol": symbol,
-                "side": pos["side"],
-                "entry_price": entry,
-                "exit_price": blended_exit,
-                "realized_pnl": total_realized,
-                "realized_pnl_pct": total_roi_pct,
-                "exit_reason": full_reason
-            })
         except Exception as e:
-            print(f"⚠️ [Obsidian Exit Log Error] {e}", flush=True)
+            print(f"⚠️ Ошибка логирования входа: {e}")
+        return True
 
-        print(
-            f"🏁 [POSITION CLOSED] {symbol} (средний выход ${blended_exit:.4f}) | "
-            f"Итоговый PnL: ${total_realized:+.2f} ({total_roi_pct:+.1f}%) | {full_reason}",
-            flush=True
+    def partial_close_position(self, mint: str, exit_price: float, sell_pct: float, reason: str):
+        """Частичная фиксация позиции (Moonbags)"""
+        pos = self.positions.get(mint)
+        if pos and pos.status == "open":
+            try:
+                exit_price = float(exit_price or 0)
+                sell_pct = float(sell_pct or 0)
+            except Exception:
+                return
+            if not (exit_price > 0) or not (0 < sell_pct <= 1.0):
+                print(f"🚫 Partial отказ: битая цена/доля {pos.symbol}.")
+                return
+            if not getattr(pos, "original_amount_usd", 0):
+                pos.original_amount_usd = pos.amount_usd
+            amount_sold_usd = pos.amount_usd * sell_pct
+            real_entry_price = pos.entry_price_usd * 1.003
+            real_exit_price = exit_price * 0.997
+
+            price_diff_pct = (real_exit_price - real_entry_price) / real_entry_price if real_entry_price > 0 else 0
+            # Защита от фантома единиц цены: +5000% на partial = битые данные, не фиксируем
+            if abs(price_diff_pct) > 50:
+                print(f"🚫 Partial отказ: фантом {price_diff_pct*100:.0f}% {pos.symbol} (entry {pos.entry_price_usd}, exit {exit_price}).")
+                return
+            _f_small, _f_big, _f_emg, _f_cap = self._fees_for(getattr(pos, "chain", "solana"))
+            priority_fee_usd = _f_small if pos.amount_usd < 10.0 else _f_big
+            priority_fee_usd = min(priority_fee_usd, amount_sold_usd * _f_cap)
+
+            # PnL от проданной части
+            realized_pnl_usd = (amount_sold_usd * price_diff_pct) - priority_fee_usd
+
+            print(f"🚀 [Moonbag] Частичная фиксация {sell_pct*100}% {pos.symbol}: Профит +${realized_pnl_usd:.2f} ({reason})")
+
+            # Сохраняем этот профит в общую копилку монеты!
+            pos.pnl_usd += realized_pnl_usd
+
+            # Уменьшаем позицию на проданный процент
+            pos.amount_usd = max(0.0, pos.amount_usd - amount_sold_usd)
+            if pos.amount_usd <= 0.05 or sell_pct >= 0.99:
+                self.close_position(mint, exit_price, reason)
+                return
+            if "MOONBAG" in reason.upper() or "RISK FREE" in reason.upper() or "200%" in reason:
+                pos.is_moonbag = True
+            self.save_portfolio(force_cloud=True)
+
+    def close_position(self, mint: str, exit_price: float, reason: str):
+        pos = self.positions.get(mint)
+        if pos and pos.status == "open":
+            try:
+                exit_price = float(exit_price or 0)
+            except Exception:
+                exit_price = 0.0
+            
+            # 1. Скам / Honeypot / Непродаваемый токен / Потеря ликвидности (LP Rug, Drain):
+            # При абсолютной потере ликвидности или невозможности продать — ПОЛНАЯ потеря всех вложенных средств (-100%)!
+            _r_up = str(reason or "").upper()
+            _is_profit_exit = any(k in _r_up for k in ("TAKE", "PROFIT", "HARVEST", "TRAILING", "FLOOR", "BREAKEVEN"))
+            _is_liq_loss_or_scam = (
+                not _is_profit_exit and (
+                    exit_price <= 0.0
+                    or any(k in _r_up for k in (
+                        "HONEYPOT", "CANNOT SELL", "UNSELLABLE", "ZERO-RUG",
+                        "ABSOLUTE LIQUIDITY LOSS", "ZERO/DRAINED LIQ", "DRAINED LIQ", "LP PULLED RUG"
+                    ))
+                )
+            )
+            if _is_liq_loss_or_scam:
+                exit_price = 0.0
+
+            # Фантом единиц цены: exit в разы от entry+пика = битые данные, не пишем миллион.
+            if not _is_liq_loss_or_scam:
+                try:
+                    _ref = max(pos.entry_price_usd, pos.max_price_usd or 0) or pos.entry_price_usd
+                    if _ref > 0 and exit_price / _ref > 50:
+                        print(f"🚫 Close отказ-фантом: exit {exit_price} >> entry/peak {_ref} ({pos.symbol}). Закрываю по пику.")
+                        exit_price = pos.max_price_usd or pos.entry_price_usd
+                        reason = f"{reason} [bad-price→peak]"
+                except Exception:
+                    pass
+            pos.status = "closed"
+            pos.exit_price_usd = exit_price
+            pos.exit_reason = reason
+            pos.exit_time = time.time()
+
+            # РЕАЛЬНЫЙ РАСЧЕТ PnL С УЧЕТОМ КОМИССИЙ DEX SOLANA (0.3% вход, 0.3% выход + приоритетная комиссия сети)
+            real_entry_price = pos.entry_price_usd * 1.003
+            real_exit_price = exit_price * 0.997
+
+            # Считаем изменение цены актива (процент)
+            price_diff_pct = (real_exit_price - real_entry_price) / real_entry_price if real_entry_price > 0 else 0
+            try:
+                _held_s = max(0.0, float(pos.exit_time or time.time()) - float(pos.entry_time or time.time()))
+                if _is_liq_loss_or_scam or (price_diff_pct <= -0.35 and _held_s <= 180.0):
+                    from birth_tracker import birth_tracker as _bt_bc
+                    _bt_bc.record_bad_creator(mint, reason[:60])
+            except Exception:
+                pass
+            
+            # 2. ДИНАМИЧЕСКИЕ МИКРО-КОМИССИИ JITO (Micro-Tips)
+            # Аварийные выходы дороже: широкая проверка по смыслу, а не двум строкам
+            # (иначе Emergency Cap / ROB/BSC/GROWTH-стопы считались по дешёвому тарифу)
+            _r = reason.upper()
+            _f_small, _f_big, _f_emg, _f_cap = self._fees_for(getattr(pos, "chain", "solana"))
+            if "CRASH" in _r or "STOP" in _r or "CAP" in _r or "GUARD" in _r:
+                priority_fee_usd = _f_emg
+            else:
+                priority_fee_usd = _f_small if pos.amount_usd < 10.0 else _f_big
+
+            # Защита математики дашборда: комиссия не может превышать cap_frac от микро-позиции,
+            # иначе тестовые входы на $4 будут показывать -50% убытка только из-за комиссии.
+            # (Для Ethereum cap 20%: газ честно виден, L1-микроскальпы показывают реальный минус.)
+            priority_fee_usd = min(priority_fee_usd, pos.amount_usd * _f_cap)
+            
+            # Реальный итоговый процент инвестиции — от ИЗНАЧАЛЬНОГО сайза.
+            # Баг: остаток/0.5 занижал базу при связке TP1 20% + Moonbag 50%
+            # (остаток 0.4×orig → делили на 0.5 = 0.8×orig, +% завышался на 25%).
+            original_amount = float(getattr(pos, "original_amount_usd", 0) or 0)
+            if not original_amount:
+                _rem = pos.amount_usd
+                _tp1 = bool(getattr(pos, "tp1_done", False))
+                _tp2 = bool(getattr(pos, "tp2_done", False))
+                _rem_frac = 1.0
+                if bool(getattr(pos, "is_unlocked_pool", False)):
+                    _r1_fb = float(getattr(config, "UNLOCKED_TP1_SELL_FRAC", 0.60))
+                    _r2_fb = float(getattr(config, "UNLOCKED_TP2_SELL_FRAC", 0.65))
+                else:
+                    _r1_fb = float(getattr(config, "TP1_SELL_FRAC", 0.45))
+                    _r2_fb = float(getattr(config, "TP2_SELL_FRAC", 0.50))
+                if _tp1:
+                    _rem_frac *= (1.0 - _r1_fb)
+                if _tp2:
+                    _rem_frac *= (1.0 - _r2_fb)
+                original_amount = (_rem / _rem_frac) if (_rem and _rem_frac > 0) else _rem
+                pos.original_amount_usd = original_amount
+
+            # ХАНИПОД / РАГ / UNSELLABLE / ПОТЕРЯ ЛИКВИДНОСТИ:
+            # При абсолютной потере ликвидности — списание оставшейся в рынке части позиции,
+            # с сохранением уже зафиксированной прибыли от частичных тейков (TP1/TP2):
+            if not _is_profit_exit and (_is_liq_loss_or_scam or exit_price <= 0.0 or "HONEYPOT" in _r or "UNSELLABLE" in _r or "ABSOLUTE LIQUIDITY LOSS" in _r):
+                _rem_amt = float(getattr(pos, "amount_usd", 0.0) or 0.0)
+                _already_realized = float(getattr(pos, "pnl_usd", 0.0) or 0.0)
+                pos.pnl_usd = _already_realized - _rem_amt - priority_fee_usd
+                pos.exit_price_usd = 0.0
+                pnl_pct = pos.pnl_usd / original_amount if original_amount > 0 else -1.0
+            else:
+                # Добавляем профит от закрытия финального остатка к тому, что уже зафиксировано
+                final_pnl = (pos.amount_usd * price_diff_pct) - priority_fee_usd
+                pos.pnl_usd += final_pnl
+                pnl_pct = pos.pnl_usd / original_amount if original_amount > 0 else 0
+            
+            self.save_portfolio(force_cloud=True)
+            print(f"🔒 PAPER SELL: {pos.symbol} ({mint}) | Reason: {reason} | PnL: {pnl_pct*100:.2f}% (${pos.pnl_usd:.2f})")
+            # Структурный лог сделки (JSONL): точная статистика по exit_reason без grep-гаданий
+            try:
+                import json as _json
+                _dur = (pos.exit_time - pos.entry_time) if pos.entry_time else 0
+                _mp = ((pos.max_price_usd - pos.entry_price_usd) / pos.entry_price_usd) \
+                    if pos.entry_price_usd else 0
+                with open("trades_log.jsonl", "a") as _f:
+                    _f.write(_json.dumps({
+                        "ts": pos.exit_time, "mint": mint, "symbol": pos.symbol,
+                        "chain": pos.chain, "exit_reason": reason,
+                        "entry": pos.entry_price_usd, "exit": exit_price,
+                        "peak": pos.max_price_usd, "pnl_pct": round(pnl_pct * 100, 2),
+                        "pnl_usd": round(pos.pnl_usd, 2),
+                        "peak_pct": round(_mp * 100, 1), "held_sec": round(_dur),
+                    }) + "\n")
+            except Exception:
+                pass
+            
+            # === СОХРАНЕНИЕ ОПЫТА ДЛЯ ИИ (Continuous Learning) ===
+            try:
+                from trade_logger import TradeLogger
+                import asyncio
+                logger = TradeLogger()
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(logger.log_exit(pos.mint, pnl_pct * 100, pos.exit_reason, pos.is_mature))
+                except RuntimeError:
+                    import threading
+                    threading.Thread(target=lambda: asyncio.run(logger.log_exit(pos.mint, pnl_pct * 100, pos.exit_reason, pos.is_mature)), daemon=True).start()
+            except Exception as e:
+                print(f"⚠️ Ошибка сохранения опыта: {e}")
+
+    def _closed_sorted(self):
+        """Закрытые сделки (без фантомного PnL) по времени выхода, старые первыми."""
+        closed = [p for p in self.positions.values()
+                  if p.status == "closed" and not self._is_suspicious_pnl(p)]
+        return sorted(closed, key=lambda p: getattr(p, "exit_time", 0.0) or getattr(p, "entry_time", 0.0))
+
+    def get_realized_drawdown(self) -> float:
+        """Просадка реализованного PnL от своего максимума, в $ (>= 0)."""
+        cum = peak = 0.0
+        for p in self._closed_sorted():
+            cum += float(p.pnl_usd or 0.0)
+            peak = max(peak, cum)
+        return max(0.0, peak - cum)
+
+    def is_rolling_breaker_active(self) -> Tuple[bool, str]:
+        """Пауза входов, если сумма PnL последних N закрытых сделок <= -LOSS_USD.
+        Пауза считается от выхода последней сделки. На данных 22.10: пик +67$ в 15:19,
+        дальше 13 минусов из 14 (-35$) при паузе стрик-брейкера всего 3 мин."""
+        if not getattr(config, "ROLLING_BREAKER_ENABLED", True):
+            return False, ""
+        n = int(getattr(config, "ROLLING_BREAKER_WINDOW", 8))
+        loss = float(getattr(config, "ROLLING_BREAKER_LOSS_USD", 8.0))
+        pause = float(getattr(config, "ROLLING_BREAKER_PAUSE_MIN", 45.0))
+        closed = self._closed_sorted()
+        if len(closed) < n:
+            return False, ""
+        last = closed[-n:]
+        total = sum(float(p.pnl_usd or 0.0) for p in last)
+        if total > -loss:
+            return False, ""
+        last_exit = getattr(last[-1], "exit_time", 0.0) or getattr(last[-1], "entry_time", 0.0) or 0.0
+        elapsed = (time.time() - last_exit) / 60.0
+        if elapsed < pause:
+            return True, (f"🛑 [ROLLING BREAKER] Последние {n} сделок: ${total:.2f}. "
+                          f"Пауза ещё {pause - elapsed:.0f} мин.")
+        return False, ""
+
+    def is_streak_cooldown_active(self) -> Tuple[bool, str]:
+        """
+        Проверка защиты от серии минусов (Streak Circuit Breaker):
+        Если последние N закрытых сделок (по умолчанию 3) были в минус,
+        активируется пауза на STREAK_COOLDOWN_MINUTES (по умолчанию 30 минут)
+        с момента закрытия последнего минуса.
+        """
+        # Скользящий брейкер по сумме PnL (ловит «медленное кровотечение», которое серия
+        # из N крупных минусов подряд не видит): срабатывает раньше и держит паузу дольше.
+        _rb, _rb_msg = self.is_rolling_breaker_active()
+        if _rb:
+            return True, _rb_msg
+
+        if not getattr(config, "STREAK_COOLDOWN_ENABLED", True):
+            return False, ""
+
+        max_losses = int(getattr(config, "STREAK_MAX_CONSECUTIVE_LOSSES", 3) or 3)
+        cooldown_min = float(getattr(config, "STREAK_COOLDOWN_MINUTES", 30.0) or 30.0)
+
+        closed = [p for p in self.positions.values() if p.status == "closed" and not self._is_suspicious_pnl(p)]
+        if not closed:
+            return False, ""
+
+        sorted_closed = sorted(
+            closed,
+            key=lambda p: getattr(p, "exit_time", 0.0) or getattr(p, "entry_time", 0.0),
+            reverse=True
         )
-        self._send_telegram_async(
-            f"🏁 *POSITION CLOSED: {pos['side']} {symbol}*\n"
-            f"• Итоговый PnL: `{total_realized:+.2f} USDT` (`{total_roi_pct:+.1f}%`)\n"
-            f"• Вход: `${entry}` ➔ Средний выход: `${blended_exit}`\n"
-            f"• Причина: _{full_reason}_"
-        )
 
-    def close_all(self, reason: str = "Ручное закрытие (Panic Close)"):
-        """Экстренно закрывает все открытые позиции."""
-        for symbol, pos in list(self.open_positions.items()):
-            self.close_position(symbol, pos.get("current_price", pos["entry_price"]), reason, partial_pct=1.0)
+        # Если прямо сейчас открыта прибыльная позиция (например, CALL +$23.91):
+        # общий портфель в плюсе, торговля не блокируется!
+        _open_pnl = sum(getattr(p, "current_pnl_usd", 0.0) or 0.0 for p in self.positions.values() if p.status == "open")
+        if _open_pnl > 3.0:
+            return False, ""
 
-    def reset_daily_loss(self):
-        """Сбрасывает блокировку Circuit Breaker по запросу пользователя."""
-        self.circuit_breaker_override = True
-        self.daily_losses_count = 0
-        self.consecutive_losses = 0
-        self.pause_until = 0.0
-        self.save()
-        print("🔓 [CIRCUIT BREAKER] Блокировка снята пользователем. Торговля разблокирована!", flush=True)
+        loss_streak = 0
+        last_loss_exit_time = 0.0
+        for p in sorted_closed:
+            # Считаем по % от исходного размера позиции (на ставке $2 стоп -20% = -$0.40, старый порог -$1.50 никогда не срабатывал!)
+            _orig_p = float(getattr(p, "original_amount_usd", 0.0) or getattr(p, "amount_usd", 0.0) or 2.0)
+            _pnl_pct_p = (float(p.pnl_usd or 0.0) / _orig_p) if _orig_p > 0 else 0.0
+            if _pnl_pct_p <= -0.10 or p.pnl_usd <= -1.50:
+                loss_streak += 1
+                if last_loss_exit_time == 0.0:
+                    last_loss_exit_time = getattr(p, "exit_time", 0.0) or getattr(p, "entry_time", 0.0) or time.time()
+            elif _pnl_pct_p >= 0.10 or p.pnl_usd > 0.50:
+                break
 
-    def get_daily_loss(self) -> float:
-        """Суммарный убыток за сегодня в USD."""
-        if getattr(self, "circuit_breaker_override", False):
-            return 0.0
-        today_str = time.strftime("%Y-%m-%d")
-        daily_losses = [abs(t["realized_pnl"]) for t in self.trade_history if t.get("closed_at", "").startswith(today_str) and t["realized_pnl"] < 0]
-        return round(sum(daily_losses), 2)
+        if loss_streak >= max_losses:
+            elapsed_min = (time.time() - last_loss_exit_time) / 60.0
+            if elapsed_min < cooldown_min:
+                rem = cooldown_min - elapsed_min
+                msg = f"🛑 [STREAK COOLDOWN] Серия из {loss_streak} минусов подряд! Пауза на {rem:.1f} мин для защиты от скам-волны."
+                return True, msg
 
-    def update_shadow_outcomes(self, shadow_data: Dict[str, Any]):
-        """Отслеживает MFE/MAE отклонённых сетапов в Shadow Tracker."""
-        now = time.time()
-        for item in self.shadow_trades:
-            sym = item.get("symbol")
-            rej_p = item.get("rejected_at_price", 0.0)
-            if not sym or rej_p <= 0 or sym not in shadow_data:
-                continue
+        return False, ""
 
-            val = shadow_data[sym]
-            if isinstance(val, dict):
-                cur_p = val.get("current", rej_p)
-                max_h = val.get("high", cur_p)
-                min_l = val.get("low", cur_p)
-            else:
-                cur_p = float(val)
-                max_h = cur_p
-                min_l = cur_p
+    def is_trading_allowed(self) -> bool:
+        """Проверка глобального Kill-Switch и кулдауна серии минусов"""
+        is_cooling, reason = self.is_streak_cooldown_active()
+        if is_cooling:
+            print(reason)
+            return False
 
-            side = item.get("side", "LONG")
-            ts = item.get("timestamp", now)
-            elapsed_min = int((now - ts) / 60)
-            item["elapsed_min"] = elapsed_min
+        if not getattr(config, "KILL_SWITCH_ENABLED", True):
+            return True
+        if not hasattr(config, "MAX_DAILY_LOSS_USD"):
+            return True
+            
+        import datetime
+        today = datetime.datetime.utcnow().date()
+        daily_pnl = 0.0
+        
+        for pos in self.positions.values():
+            if pos.status == "closed":
+                if self._is_suspicious_pnl(pos):
+                    continue
+                pos_date = datetime.datetime.fromtimestamp(pos.entry_time).date()
+                if pos_date == today:
+                    daily_pnl += pos.pnl_usd
+                    
+        if daily_pnl <= -config.MAX_DAILY_LOSS_USD:
+            print(f"🛑 [KILL SWITCH] Превышен дневной лимит потерь: ${daily_pnl:.2f}. Торговля остановлена!")
+            return False
+        return True
 
-            if side == "LONG":
-                cur_delta = (cur_p - rej_p) / rej_p * 100.0
-                peak_favorable = (max_h - rej_p) / rej_p * 100.0
-                peak_adverse = (min_l - rej_p) / rej_p * 100.0
-            else:
-                cur_delta = (rej_p - cur_p) / rej_p * 100.0
-                peak_favorable = (rej_p - min_l) / rej_p * 100.0
-                peak_adverse = (rej_p - max_h) / rej_p * 100.0
-
-            item["current_price"] = cur_p
-            item["price_change_pct"] = round(cur_delta, 2)
-            item["max_profit_pct"] = round(max(item.get("max_profit_pct", 0.0), peak_favorable), 2)
-            item["max_loss_pct"] = round(min(item.get("max_loss_pct", 0.0), peak_adverse), 2)
-
-            if elapsed_min >= 10 and "change_15m_pct" not in item:
-                item["change_15m_pct"] = round(cur_delta, 2)
-            if elapsed_min >= 50 and "change_1h_pct" not in item:
-                item["change_1h_pct"] = round(cur_delta, 2)
-            if elapsed_min >= 110 and "change_2h_pct" not in item:
-                item["change_2h_pct"] = round(cur_delta, 2)
-            if elapsed_min >= 170 and "change_3h_pct" not in item:
-                item["change_3h_pct"] = round(cur_delta, 2)
-            if elapsed_min >= 230 and "change_4h_pct" not in item:
-                item["change_4h_pct"] = round(cur_delta, 2)
-            if elapsed_min >= 290 and "change_5h_pct" not in item:
-                item["change_5h_pct"] = round(cur_delta, 2)
-
-            if item["max_loss_pct"] <= -1.0:
-                item["outcome"] = f"🛡️ Спас от стопа ({item['max_loss_pct']:.2f}%)"
-            elif item["max_profit_pct"] >= 2.0:
-                item["outcome"] = f"⚠️ Упущена ракета (пик {item['max_profit_pct']:+.2f}%)"
-            elif cur_delta <= -0.4:
-                item["outcome"] = f"🛡️ Спас от минуса ({cur_delta:+.2f}%)"
-            else:
-                item["outcome"] = f"⚖️ Флэт (пик: {item['max_profit_pct']:+.2f}%, спад: {item['max_loss_pct']:.2f}%)"
-
-        self.save()
-
-    def get_shadow_stats(self) -> Dict[str, Any]:
-        total = len(self.shadow_trades)
-        if total == 0:
-            return {"total": 0, "saved": 0, "missed": 0, "flat": 0, "accuracy": 0.0}
-
-        saved = sum(1 for t in self.shadow_trades if t.get("max_loss_pct", 0) <= -1.0 or t.get("price_change_pct", 0) <= -0.4)
-        missed = sum(1 for t in self.shadow_trades if t.get("max_profit_pct", 0) >= 2.0 and t.get("max_loss_pct", 0) > -1.0)
-        flat = total - saved - missed
-        decided = saved + missed
-        acc = round((saved / decided * 100), 1) if decided > 0 else 100.0
-
-        return {
-            "total": total,
-            "saved": saved,
-            "missed": missed,
-            "flat": flat,
-            "accuracy": acc
-        }
-
-    def get_portfolio_summary(self) -> Dict[str, Any]:
-        """Возвращает агрегированную сводку (с честным учетом залоговой маржи в Equity!)."""
-        locked_margin = sum(p.get("margin_usdt", 0.0) for p in self.open_positions.values())
-        unrealized_sum = sum(p.get("unrealized_pnl", 0.0) for p in self.open_positions.values())
-        realized_open_partials = sum(p.get("realized_pnl_accum", 0.0) for p in self.open_positions.values())
-        equity = round(self.cash + locked_margin + unrealized_sum, 2)
-        total_realized_pnl = sum(t["realized_pnl"] for t in self.trade_history) + realized_open_partials
-
-        total_trades = len(self.trade_history)
-        wins = sum(1 for t in self.trade_history if t["realized_pnl"] > 0)
-        win_rate = round((wins / total_trades * 100), 1) if total_trades > 0 else 0.0
-        daily_loss = self.get_daily_loss()
-
-        return {
-            "cash": round(self.cash, 2),
-            "locked_margin": round(locked_margin, 2),
-            "equity": equity,
-            "unrealized_pnl": round(unrealized_sum, 2),
-            "total_realized_pnl": round(total_realized_pnl, 2),
-            "open_positions_count": len(self.open_positions),
-            "max_positions": config.MAX_CONCURRENT_POSITIONS,
-            "total_trades": total_trades,
-            "wins": wins,
-            "losses": total_trades - wins,
-            "win_rate": win_rate,
-            "daily_loss": daily_loss,
-            "circuit_breaker": (daily_loss >= config.MAX_DAILY_LOSS_USD) or self.is_daily_limit_reached(),
-            "is_paused": self.is_paused
-        }
-
-portfolio = PortfolioTracker()
+    def can_open_new_position(self, max_concurrent: int) -> bool:
+        if not self.is_trading_allowed():
+            return False
+        if len(self.get_open_positions()) >= max_concurrent:
+            return False
+        # Проверка свободного кэша: если осталось меньше базового ордера ($15),
+        # блокируем открытие новой позиции (защита от входа на деньги, которых нет)
+        capital = self.get_total_capital()
+        open_cost = sum(p.amount_usd for p in self.get_open_positions().values())
+        free_cash = max(0.0, capital - open_cost)  # не уходим в минус при рагах
+        base_size = float(getattr(config, "BASE_TRADE_AMOUNT_USD", 15.0) or 15.0)
+        if free_cash < base_size:
+            print(f"🛑 [CASH GUARD] Свободный кэш ${free_cash:.1f} < базового входа ${base_size:.1f}. Вход заблокирован.")
+            return False
+        return True

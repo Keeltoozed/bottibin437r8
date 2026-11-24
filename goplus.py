@@ -166,6 +166,86 @@ def _verdict_evm(info: dict, chain: str = "", pair_data: dict = None):
 RAW_SOLANA_INFO: dict = {}  # mint -> raw goplus dict
 
 
+_SOL_DEX_AUTHORITIES = {
+    "5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1",  # Raydium AMM V4
+    "D4FPEruKEHrG5NTsqazoqfv8zsFWApqTjuzFLUQDkTz5",  # Raydium CP-Swap
+    "GpMZbSM2GgvTKHJirzeGfMFoaZ8UR2X7F4v8vHTvxFbL",  # Raydium CPMM / LaunchLab Vault Authority
+    "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK",  # Raydium CLMM
+    "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA",  # PumpSwap AMM
+    "39azUYFWPz3VHgKCf3VChUwbpURdCHRxjWVowf5jUJjg",  # Pump.fun / PumpSwap Migration Authority
+    "Eo7WjKq67rjJQSZxS6z3YkapzY3eMj6Xy8X5EQVn5UaB",  # Meteora Dynamic Pools
+    "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo",  # Meteora DLMM
+    "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc",  # Orca Whirlpools
+    "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",  # Pump.fun Bonding Curve
+    "Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1",  # Pump.fun Authority
+}
+
+_SOL_POOL_OR_CEX_TAGS = (
+    "raydium", "meteora", "orca", "pump", "pumpswap", "amm", "pool", "vault",
+    "lp", "lock", "burn", "dead", "dex", "binance", "coinbase", "bybit",
+    "okx", "gate", "mexc", "kucoin", "bitget", "kraken", "wintermute",
+)
+
+
+def _extract_goplus_non_pool_holders(info: dict) -> list:
+    """Возвращает доли реальных холдеров [pct_frac, ...] без AMM-пулов, залоченных сейфов и CEX.
+    На PumpSwap и Meteora DLMM GoPlus часто оставляет tag='' у пула ликвидности (~20.7% сапплая),
+    из-за чего пул ошибочно принимался за 'кита >15%' и блокировал 100% мигрировавших токенов."""
+    holders = info.get("holders") or []
+    if not isinstance(holders, list) or not holders:
+        return []
+
+    dex_list = info.get("dex") or []
+    has_dex = isinstance(dex_list, list) and len(dex_list) > 0
+    pool_addrs = set(_SOL_DEX_AUTHORITIES)
+    if isinstance(dex_list, list):
+        for d in dex_list:
+            if isinstance(d, dict):
+                for fk in ("id", "pool_address", "address", "account", "lp_address"):
+                    val = str(d.get(fk) or "").strip()
+                    if val:
+                        pool_addrs.add(val)
+    for lph in (info.get("lp_holders") or []):
+        if isinstance(lph, dict):
+            val = str(lph.get("account") or lph.get("address") or "").strip()
+            if val and int(lph.get("is_locked", 0) or 0) == 1:
+                pool_addrs.add(val)
+
+    any_tagged_pool = False
+    for h in holders[:6]:
+        if not isinstance(h, dict):
+            continue
+        t_low = str(h.get("tag", "") or "").lower()
+        acc = str(h.get("account") or h.get("token_account") or h.get("address") or "").strip()
+        own = str(h.get("owner") or "").strip()
+        if int(h.get("is_locked", 0) or 0) == 1 or acc in pool_addrs or own in pool_addrs or any(k in t_low for k in _SOL_POOL_OR_CEX_TAGS):
+            any_tagged_pool = True
+            break
+
+    cleaned = []
+    skipped_untagged_vault = False
+    for idx, h in enumerate(holders[:12]):
+        if not isinstance(h, dict):
+            continue
+        pct = _tax_frac(h.get("percent", 0))
+        if pct <= 0.0 or pct > 0.65:
+            continue
+        if int(h.get("is_locked", 0) or 0) == 1:
+            continue
+        tag = str(h.get("tag", "") or "").lower()
+        acc = str(h.get("account") or h.get("token_account") or h.get("address") or "").strip()
+        own = str(h.get("owner") or "").strip()
+        if acc in pool_addrs or own in pool_addrs or any(k in tag for k in _SOL_POOL_OR_CEX_TAGS):
+            continue
+        # Если токен уже торгуется на DEX (has_dex), но GoPlus не разметил ни один AMM-пул тегом,
+        # то крупнейший токен-аккаунт #0 (14%..65%) — это неразмеченный AMM vault (PumpSwap 20.7% / Meteora).
+        if idx == 0 and has_dex and not any_tagged_pool and not skipped_untagged_vault and not tag and pct >= 0.14:
+            skipped_untagged_vault = True
+            continue
+        cleaned.append(pct)
+    return cleaned
+
+
 def get_solana_holder_stats(mint: str) -> dict:
     """Извлекает метрики холдеров из кэша GoPlus Solana для анализатора."""
     info = RAW_SOLANA_INFO.get(mint) or {}
@@ -174,18 +254,14 @@ def get_solana_holder_stats(mint: str) -> dict:
     holders = info.get("holders") or []
     if not isinstance(holders, list) or not holders:
         return {"top_10_pct": 0.0, "dev_pct": 0.0, "has_data": False}
-    top10_sum = 0.0
-    dev_pct = 0.0
-    valid_holders = []
-    for h in holders:
-        pct = _tax_frac(h.get("percent", 0)) * 100.0
-        tag = str(h.get("tag", "")).lower()
-        if "raydium" in tag or "meteora" in tag or "orca" in tag or "pump" in tag or pct > 65.0:
-            continue
-        valid_holders.append(pct)
-    if valid_holders:
-        dev_pct = valid_holders[0]
-        top10_sum = sum(valid_holders[:10])
+    valid_holders = [p * 100.0 for p in _extract_goplus_non_pool_holders(info)]
+    top10_sum = sum(valid_holders[:10]) if valid_holders else 0.0
+    # Не приравниваем крупнейшего холдера к деву, если creator_percent явно задан в GoPlus
+    creator_raw = info.get("creator_percent")
+    if creator_raw is not None and str(creator_raw).strip() != "":
+        dev_pct = _tax_frac(creator_raw) * 100.0
+    else:
+        dev_pct = 0.0
     return {
         "top_10_pct": top10_sum,
         "dev_pct": dev_pct,
@@ -257,20 +333,14 @@ def _verdict_sol(info: dict):
     if worst > float(_cfg("GOPLUS_MAX_SELL_TAX", 0.10)):
         return False, f"tax {worst * 100:.0f}%"
 
-    # 6. Концентрация у китов и топ-10 холдеров (защита от Cabal/Инсайдерских дампов)
-    holders = info.get("holders") or []
-    if holders and isinstance(holders, list):
-        top10_sum = 0.0
-        for h in holders[:10]:
-            pct = _tax_frac(h.get("percent", 0))
-            tag = str(h.get("tag", "")).lower()
-            if "raydium" in tag or "meteora" in tag or "orca" in tag or "pump" in tag or pct > 0.65:
-                continue
-            max_single = float(_cfg("SOLANA_MAX_SINGLE_WHALE_PCT", 0.15))
-            if pct > max_single:
-                return False, f"кит держит {pct*100:.1f}% (>{max_single*100:.0f}%) — риск дампа"
-            top10_sum += pct
-        max_top10 = float(_cfg("SOLANA_MAX_TOP10_PCT", 0.35))
+    # 6. Концентрация у китов и топ-10 холдеров (без AMM-пулов PumpSwap/Meteora/Raydium и CEX)
+    non_pool_pcts = _extract_goplus_non_pool_holders(info)
+    if non_pool_pcts:
+        max_single = float(_cfg("SOLANA_MAX_SINGLE_WHALE_PCT", 0.18))
+        if non_pool_pcts[0] > max_single:
+            return False, f"кит держит {non_pool_pcts[0]*100:.1f}% (>{max_single*100:.0f}%) — риск дампа"
+        top10_sum = sum(non_pool_pcts[:10])
+        max_top10 = float(_cfg("SOLANA_MAX_TOP10_PCT", 0.38))
         if top10_sum > max_top10:
             return False, f"топ-10 китов держат {top10_sum*100:.1f}% (>{max_top10*100:.0f}%) — кабал-риск"
 
@@ -381,9 +451,43 @@ async def check_token(address: str, chain: str, force_refresh: bool = False, pai
 
 SOLANA_RPC_URLS = [
     "https://api.mainnet-beta.solana.com",
-    "https://solana-rpc.publicnode.com",
     "https://rpc.ankr.com/solana",
+    "https://solana-rpc.publicnode.com",
 ]
+_HELIUS_429_UNTIL: float = 0.0
+_RPC_BACKOFF_UNTIL: dict = {}  # rpc_url -> unix_ts
+
+
+def _note_rpc_status(rpc_url: str, status: int) -> None:
+    """Circuit-breaker для Solana RPC: при 429/401/403 (исчерпан лимит Helius или блок ноды) отключает URL на 30 мин."""
+    global _HELIUS_429_UNTIL
+    if status in (401, 403, 429):
+        now = _t.time()
+        if "helius" in str(rpc_url or "").lower():
+            if now >= _HELIUS_429_UNTIL:
+                print(f"⚡ [RPC-BREAKER] Helius вернул HTTP {status} (квота исчерпана) -> пауза Helius 30м, переключаюсь на прямой Solana RPC.")
+            _HELIUS_429_UNTIL = now + 1800.0
+        else:
+            _RPC_BACKOFF_UNTIL[str(rpc_url)] = now + 600.0
+
+
+def _get_solana_rpcs() -> list:
+    """Возвращает приоритетный список здоровых Solana RPC без мёртвых/залимиченных ключей."""
+    import os as _os
+    now = _t.time()
+    out = []
+    custom_rpc = (_os.getenv("SOLANA_RPC_URL") or getattr(config, "SOLANA_RPC_URL", "") or "").strip()
+    if custom_rpc and custom_rpc.startswith("http"):
+        if ("helius" not in custom_rpc.lower() or now >= _HELIUS_429_UNTIL) and now >= _RPC_BACKOFF_UNTIL.get(custom_rpc, 0.0):
+            out.append(custom_rpc)
+    for u in SOLANA_RPC_URLS:
+        if u not in out and now >= _RPC_BACKOFF_UNTIL.get(u, 0.0):
+            out.append(u)
+    if now >= _HELIUS_429_UNTIL:
+        h_rpc = (_os.getenv("HELIUS_RPC_URL") or getattr(config, "HELIUS_RPC_URL", "") or "").strip()
+        if h_rpc and h_rpc.startswith("http") and h_rpc not in out:
+            out.append(h_rpc)
+    return out or ["https://api.mainnet-beta.solana.com"]
 
 
 async def check_onchain_solana_security(mint: str) -> tuple:
@@ -408,15 +512,7 @@ async def check_onchain_solana_security(mint: str) -> tuple:
         from http_client import get_session
         import aiohttp
         session = await get_session()
-        
-        rpcs = list(SOLANA_RPC_URLS)
-        try:
-            import config as _c
-            _h_rpc = getattr(_c, "HELIUS_RPC_URL", "")
-            if _h_rpc and _h_rpc not in rpcs:
-                rpcs.append(_h_rpc)
-        except Exception:
-            pass
+        rpcs = _get_solana_rpcs()
 
         payload = {
             "jsonrpc": "2.0",
@@ -431,10 +527,17 @@ async def check_onchain_solana_security(mint: str) -> tuple:
                 async with session.post(rpc, json=payload, timeout=aiohttp.ClientTimeout(total=3.5)) as resp:
                     if resp.status == 200:
                         data = await resp.json()
+                        if isinstance(data, dict) and data.get("error"):
+                            err_msg = str(data.get("error")).lower()
+                            if "max usage" in err_msg or "429" in err_msg or "rate" in err_msg:
+                                _note_rpc_status(rpc, 429)
+                                continue
                         val = (data.get("result") or {}).get("value")
                         if val is not None:
                             account_info = val
                             break
+                    else:
+                        _note_rpc_status(rpc, resp.status)
             except Exception:
                 continue
 
@@ -522,23 +625,41 @@ async def check_solana(mint: str):
         # 4. Аудит через RugCheck API (защита от скам-пулов и дампов дева):
         if verdict[0]:
             try:
-                rc_url = f"https://api.rugcheck.xyz/v1/tokens/{mint}/report/summary"
-                rc_status, rc_data = await fetch_json(rc_url, timeout=4, retries=1)
+                rc_status, rc_data = await fetch_rugcheck_report_cached(mint, ttl=120.0, timeout=5)
                 if rc_status == 200 and isinstance(rc_data, dict):
                     rc_score = rc_data.get("score", 0) or 0
-                    # Вычитаем штраф за "Low Liquidity", чтобы не блокировать молодые пулы:
-                    low_liq_penalty = sum(
+                    # Вычитаем штрафы за стандартный шум DEX/AMM-пулов и launchpad (unlocked LP, copycat,
+                    # а также текстовые предупреждения о концентрации, где RugCheck путает пул PumpSwap с китом —
+                    # реальных холдеров мы уже проверили выше в п.3 с точным исключением DEX_POOL_AUTHORITIES!):
+                    _allowed_rc_noise = (
+                        "low liquidity", "copycat", "symbol mimic",
+                        "large amount of lp unlocked", "lp provider", "single lp provider",
+                        "lp not locked", "unlocked lp",
+                        "single holder", "high holder concentration", "top 10 holders", "high ownership"
+                    )
+                    rc_noise_penalty = sum(
                         float(rk.get("score", 0) or 0)
                         for rk in (rc_data.get("risks") or [])
-                        if "low liquidity" in str(rk.get("name", "")).lower()
+                        if any(k in str(rk.get("name", "")).lower() for k in _allowed_rc_noise)
                     )
-                    clean_score = max(0.0, rc_score - low_liq_penalty)
-                    if clean_score >= 1000:
-                        verdict = (False, f"rugcheck-score {clean_score:.0f} >= 1000 (высокий риск скама/слива)")
-                    elif rc_data.get("freezeAuthority"):
+                    clean_score = max(0.0, rc_score - rc_noise_penalty)
+                    tok_meta = rc_data.get("token") if isinstance(rc_data.get("token"), dict) else rc_data
+                    freeze_val = tok_meta.get("freezeAuthority") or rc_data.get("freezeAuthority")
+                    mint_val = tok_meta.get("mintAuthority") or rc_data.get("mintAuthority")
+                    if clean_score >= 2000:
+                        verdict = (False, f"rugcheck-score {clean_score:.0f} >= 2000 (высокий риск скама/слива)")
+                    elif freeze_val and str(freeze_val) not in ("11111111111111111111111111111111", "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"):
                         verdict = (False, "rugcheck: freeze authority не отозвана")
-                    elif rc_data.get("mintAuthority"):
+                    elif mint_val and str(mint_val) not in ("11111111111111111111111111111111", "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"):
                         verdict = (False, "rugcheck: mint authority не отозвана")
+                    else:
+                        # Проверка критических рисков создателя/контракта
+                        for rk in (rc_data.get("risks") or []):
+                            _rkn = str(rk.get("name", "")).lower()
+                            _rkl = str(rk.get("level", "")).lower()
+                            if _rkl == "danger" and any(k in _rkn for k in ("creator holding", "creator history", "honeypot", "transfer fee", "permanent delegate")):
+                                verdict = (False, f"rugcheck: {rk.get('name')} (опасный риск контракта/дева)")
+                                break
             except Exception:
                 pass
     except Exception:
@@ -949,3 +1070,864 @@ async def verify_evm_token(address: str, chain: str, pair_data: dict = None) -> 
         return False, f"BSC отклонён по безопасности ({', '.join(_fail_reasons)})"
 
     return True, ""
+
+
+# =============================================================================
+# LAYER 7 & LAYER 8 (@savipww Auditor Extensions):
+# - Layer 7: RugCheck /insiders/graph (реальные связанные кластеры финансирования/трансферов)
+# - Layer 8: SPL Token Account Delegations (approve-дрейнер на топ-аккаунтах через getMultipleAccounts)
+# =============================================================================
+_DELEGATION_CACHE: dict = {}  # mint -> (ts, (ok, reason))
+_INSIDER_GRAPH_CACHE: dict = {}  # mint -> (ts, (ok, reason))
+
+
+async def check_spl_holder_delegations(mint: str, holder_token_accounts: list = None, total_supply_ui: float = 1_000_000_000.0) -> tuple:
+    """
+    Layer 8 Auditor: Проверяет скрытые SPL/Token-2022 делегации (approve drainers) у топ-20 держателей.
+    В отличие от тяжелого getProgramAccounts (который банят публичные RPC), использует 1 легкий вызов
+    getMultipleAccounts(jsonParsed) по топ-20 токен-аккаунтам (~60мс на любом RPC!).
+    """
+    if not mint:
+        return True, ""
+    now = _t.time()
+    cached = _DELEGATION_CACHE.get(mint)
+    if cached and (now - cached[0]) < 180.0:
+        return cached[1]
+
+    import aiohttp
+    from collections import Counter
+    from http_client import get_session
+
+    rpcs = _get_solana_rpcs()
+
+    SAFE_DELEGATES = {
+        "5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1",
+        "D4FPEruKEHrG5NTsqazoqfv8zsFWApqTjuzFLUQDkTz5",
+        "Eo7WjKq67rjJQSZxS6z3YkapzY3eMj6Xy8X5EQVn5UaB",
+        "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo",
+        "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc",
+        "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
+        "Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1",
+        "11111111111111111111111111111111",
+    }
+
+    max_del_accs = int(_cfg("AUDITOR_MAX_DELEGATED_ACCOUNTS", 3))
+    max_del_pct = float(_cfg("AUDITOR_MAX_DELEGATED_PCT", 5.0))
+
+    try:
+        session = await get_session()
+        accs = [str(a).strip() for a in (holder_token_accounts or []) if a and str(a).strip()][:20]
+
+        # Если список токен-аккаунтов не передан — берем топ-20 напрямую через getTokenLargestAccounts
+        if not accs:
+            largest_payload = {"jsonrpc": "2.0", "id": 1, "method": "getTokenLargestAccounts", "params": [mint]}
+            for rpc in rpcs:
+                try:
+                    async with session.post(rpc, json=largest_payload, timeout=aiohttp.ClientTimeout(total=3.0)) as resp:
+                        if resp.status == 200:
+                            ldata = await resp.json()
+                            vals = ((ldata.get("result") or {}).get("value")) or []
+                            accs = [str(x.get("address") or "").strip() for x in vals[:20] if x.get("address")]
+                            if accs:
+                                break
+                        else:
+                            _note_rpc_status(rpc, resp.status)
+                except Exception:
+                    continue
+
+        if not accs:
+            return True, ""
+
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "getMultipleAccounts",
+            "params": [accs[:20], {"encoding": "jsonParsed"}],
+        }
+        parsed_accounts = None
+        for rpc in rpcs:
+            try:
+                async with session.post(rpc, json=payload, timeout=aiohttp.ClientTimeout(total=3.5)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        val = (data.get("result") or {}).get("value")
+                        if isinstance(val, list):
+                            parsed_accounts = val
+                            break
+                    else:
+                        _note_rpc_status(rpc, resp.status)
+            except Exception:
+                continue
+
+        if not parsed_accounts:
+            return True, ""
+
+        delegate_counts = Counter()
+        delegated_ui_total = 0.0
+        for acc_obj in parsed_accounts:
+            if not isinstance(acc_obj, dict):
+                continue
+            p_info = (((acc_obj.get("data") or {}).get("parsed") or {}).get("info")) or {}
+            owner = str(p_info.get("owner") or "")
+            delegate = str(p_info.get("delegate") or "").strip()
+            if not delegate or delegate in SAFE_DELEGATES or owner in SAFE_DELEGATES:
+                continue
+            del_amt_obj = p_info.get("delegatedAmount") or {}
+            del_ui = float(del_amt_obj.get("uiAmount") or 0.0)
+            tok_ui = float((p_info.get("tokenAmount") or {}).get("uiAmount") or 0.0)
+            eff_del_ui = min(del_ui, tok_ui) if del_ui > 0 else 0.0
+            if eff_del_ui <= 0:
+                continue
+            delegate_counts[delegate] += 1
+            delegated_ui_total += eff_del_ui
+
+        if delegate_counts:
+            top_del, cnt = delegate_counts.most_common(1)[0]
+            if cnt >= max_del_accs:
+                res = (False, f"spl-delegation-drain: {cnt} top wallets delegated to {top_del[:8]}... (drain trap)")
+                _DELEGATION_CACHE[mint] = (now, res)
+                return res
+            if total_supply_ui > 0:
+                del_pct = (delegated_ui_total / total_supply_ui) * 100.0
+                if del_pct >= max_del_pct:
+                    res = (False, f"spl-delegation-drain: {del_pct:.1f}% supply delegated to {top_del[:8]}... (>={max_del_pct:.0f}%)")
+                    _DELEGATION_CACHE[mint] = (now, res)
+                    return res
+
+        res = (True, "")
+        _DELEGATION_CACHE[mint] = (now, res)
+        return res
+    except Exception:
+        return True, ""
+
+
+def check_rugcheck_report_insiders(rc_data: dict, mint: str = "") -> tuple:
+    """
+    0ms Layer 7a Auditor: проверяет graphInsidersDetected и insiderNetworks прямо из уже загруженного
+    отчёта RugCheck /report (0 дополнительных HTTP-запросов, не зависит от 429/таймаутов /insiders/graph!).
+    Блокирует кабал-рой трансферных хабов (кейсы 3B: 102 инсайдера / 10 сетей -> -100%,
+    BERNIE: 120 / 10 -> -95%, AI: 860 / 10 -> -98%, RUGPULL: 19 / 3 сети 25% -> -24%).
+    Настоящие органические ракеты (HNYDRIP +765%, ANTCAP +198%, VINTEL +188%, ZEN +134%) имеют 0 инсайдеров.
+    """
+    if not isinstance(rc_data, dict):
+        return True, ""
+    try:
+        graph_ins = int(rc_data.get("graphInsidersDetected") or 0)
+        nets = rc_data.get("insiderNetworks") or []
+        tok_meta = rc_data.get("token") or {}
+        raw_sup = float(tok_meta.get("supply") or 0.0)
+        if raw_sup <= 0:
+            raw_sup = 1_000_000_000_000_000.0
+        elif raw_sup < 1e12 and str(mint or "").endswith("pump"):
+            raw_sup = raw_sup * 1e6
+
+        if graph_ins >= 25:
+            return False, f"rc-report-insider-swarm: graphInsidersDetected={graph_ins} ({len(nets)} networks)"
+
+        if isinstance(nets, list) and nets:
+            sig_nets = 0
+            tot_accts = 0
+            tot_pct = 0.0
+            for net in nets:
+                if not isinstance(net, dict):
+                    continue
+                accts = int(net.get("activeAccounts") or 0)
+                tok_amt = float(net.get("tokenAmount") or 0.0)
+                pct = (tok_amt / raw_sup) * 100.0 if raw_sup > 0 else 0.0
+                if accts >= 8 and 8.0 <= pct <= 100.0:
+                    return False, f"rc-report-collector-hub: {accts} linked accounts moved {pct:.1f}% supply"
+                if accts >= 4 and pct >= 0.5:
+                    sig_nets += 1
+                    tot_accts += accts
+                    tot_pct += min(pct, 100.0)
+            if sig_nets >= 3 and tot_accts >= 15 and tot_pct >= 8.0:
+                return False, f"rc-report-insider-nets: {sig_nets} transfer networks ({tot_accts} accounts, {min(tot_pct, 100.0):.1f}% supply)"
+        return True, ""
+    except Exception:
+        return True, ""
+
+
+async def check_rugcheck_insider_graph(mint: str, total_supply_raw: float = 0.0, pool_accounts: set = None) -> tuple:
+    """
+    Layer 7 Auditor: Проверяет реальный ончейн-граф связанных кошельков через RugCheck /insiders/graph.
+    Отсеивает безобидных пылевых ботов (<0.35% на кошелек) и блокирует реальные инсайдерские бандлы,
+    когда >= 5 связанных кошельков суммарно держат >= 12% эмиссии (или >= 4 кошельков держат >= 18%).
+    """
+    if not mint:
+        return True, ""
+    now = _t.time()
+    cached = _INSIDER_GRAPH_CACHE.get(mint)
+    if cached and (now - cached[0]) < 180.0:
+        return cached[1]
+
+    max_bundle_n = int(_cfg("AUDITOR_MAX_BUNDLE_WALLETS", 5))
+    max_bundle_pct = float(_cfg("AUDITOR_MAX_BUNDLE_PCT", 12.0))
+    excl = set(pool_accounts or set()) | {
+        "5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1",
+        "D4FPEruKEHrG5NTsqazoqfv8zsFWApqTjuzFLUQDkTz5",
+        "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA",
+        "Eo7WjKq67rjJQSZxS6z3YkapzY3eMj6Xy8X5EQVn5UaB",
+        "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo",
+        "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc",
+        "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
+        "Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1",
+    }
+
+    try:
+        from http_client import fetch_json
+        url = f"https://api.rugcheck.xyz/v1/tokens/{mint}/insiders/graph"
+        st, data = await fetch_json(url, timeout=4, retries=0)
+        if st != 200 or not isinstance(data, list):
+            return True, ""
+
+        # Стандартная эмиссия Pump.fun с 6 decimals = 1e15 raw (защита если передан UI supply 1e9 вместо raw 1e15)
+        eff_supply = float(total_supply_raw) if total_supply_raw and total_supply_raw > 0 else 1_000_000_000_000_000.0
+        if 0 < eff_supply < 1e12 and mint.endswith("pump"):
+            eff_supply = eff_supply * 1e6
+
+        hub_nets_count = 0
+        hub_total_nodes = 0
+        hub_total_pct = 0.0
+
+        for net in data:
+            if not isinstance(net, dict):
+                continue
+            nodes = net.get("nodes") or []
+            links = net.get("links") or []
+            if len(nodes) < 4:
+                continue
+            real_Cluster_pcts = []
+            valid_participants = 0
+            seen_ids = set()
+            for nd in nodes:
+                if not isinstance(nd, dict) or not nd.get("participant", True):
+                    continue
+                if str(nd.get("type") or "").lower() in ("token_account", "tokenaccount", "ata", "amm", "pool", "vault"):
+                    continue
+                nid = str(nd.get("id") or "")
+                if not nid or nid in excl or nid in seen_ids:
+                    continue
+                seen_ids.add(nid)
+                valid_participants += 1
+                hold_raw = float(nd.get("holdings") or 0.0)
+                if hold_raw <= 0:
+                    continue
+                pct = (hold_raw / eff_supply) * 100.0
+                # Игнорируем пул (>50%) и пылевые аирдроп-кошельки (<0.35% эмиссии), чтобы не резать живые ракеты вроде ANSEM/REGRETAMINE
+                if 0.35 <= pct <= 50.0:
+                    real_Cluster_pcts.append(pct)
+
+            n_real = len(real_Cluster_pcts)
+            sum_pct = min(100.0, sum(real_Cluster_pcts))
+            if (n_real >= max_bundle_n and sum_pct >= max_bundle_pct) or (n_real >= 4 and sum_pct >= max_bundle_pct * 1.5):
+                res = (False, f"insider-graph-bundle: {n_real} linked wallets hold {sum_pct:.1f}% supply")
+                _INSIDER_GRAPH_CACHE[mint] = (now, res)
+                return res
+
+            # Детектор Collector-Hub сетей (кейсы SOLFLY и FYAT: по 10-12 суб-кошельков покупают лесенкой и сливают токены на 1 хаб-кошелёк,
+            # поэтому у отправителей holdings=0, а на хабе аккумулируется 0.7%..5% эмиссии в каждой из 4-10 сетей):
+            if valid_participants >= 4 and len(links) >= 3 and 0.35 <= sum_pct <= 35.0:
+                hub_nets_count += 1
+                hub_total_nodes += valid_participants
+                hub_total_pct += sum_pct
+                if valid_participants >= 8 and sum_pct >= 8.0:
+                    res = (False, f"insider-collector-hub: {valid_participants} linked sub-wallets consolidated {sum_pct:.1f}% supply into hub")
+                    _INSIDER_GRAPH_CACHE[mint] = (now, res)
+                    return res
+
+        if hub_nets_count >= 3 and hub_total_nodes >= 15 and hub_total_pct >= 8.0:
+            res = (
+                False,
+                f"insider-collector-swarm: {hub_nets_count} transfer hubs ({hub_total_nodes} linked sub-wallets) consolidated {hub_total_pct:.1f}% supply (staircase rug)",
+            )
+            _INSIDER_GRAPH_CACHE[mint] = (now, res)
+            return res
+
+        res = (True, "")
+        _INSIDER_GRAPH_CACHE[mint] = (now, res)
+        return res
+    except Exception:
+        return True, ""
+
+
+_STAIRCASE_CACHE: dict = {}  # key -> (ts, (ok, reason))
+
+
+def analyze_trade_tape_staircase(trades_raw: list) -> tuple:
+    """
+    Чистый детерминированный разбор ленты сделок пула (Layer 9 Auditor, GMGN/Axiom Anti-Bundler).
+    Ловит:
+    1) Синхронные пачки продаж Jito-бандлера (4+ разных кошельков в 1 секунду на тонкой ленте или 8+ в любую секунду — кейс NOTHING 20:17:58Z и 20:19:04Z).
+    2) Синхронные пачки покупок бандлера в 1 блок/секунду (7+ разных кошельков).
+    3) Клонированные некруглые размеры покупок суб-кошельков (4+ кошельков с точностью до 0.0001 SOL).
+    4) Искусственную «лесенку» (Staircase Bump-Bot): >=30 покупок, >=90% одноразовых кошельков, низкий разброс CV<=0.72, дефицит мелкого ритейла (<$18 <=22%) и >=58% ордеров в узком коридоре бота ($30-$145).
+    Возвращает (is_clean: bool, reason: str, recent_buyer_wallets: list).
+    """
+    from collections import defaultdict
+    import statistics
+
+    if not isinstance(trades_raw, list) or not trades_raw:
+        return True, "", []
+
+    buys = []
+    sells = []
+    for item in trades_raw:
+        attrs = (item.get("attributes") if isinstance(item, dict) and "attributes" in item else item) or {}
+        if not isinstance(attrs, dict):
+            continue
+        kind = str(attrs.get("kind") or "").lower()
+        if kind == "buy":
+            buys.append(attrs)
+        elif kind == "sell":
+            sells.append(attrs)
+
+    # 1. Синхронный сброс суб-кошельков в одну и ту же секунду (Jito Sell-All / Skim Burst: кейсы NOTHING 73/s, SOLFLY 105/s, BALLFIN 35/s)
+    # Важно: не блокировать высокооборотистые живые ракеты (YOUNGBULL, NOFOMO), где в 1 секунду проходит 8-14 мелких розничных продаж ($0.5-$18) на фоне покупок!
+    sell_by_sec = defaultdict(set)
+    sig_sell_by_sec = defaultdict(set)
+    sell_usd_by_sec = defaultdict(float)
+    buy_by_sec = defaultdict(set)
+    for b in buys:
+        ts_b = str(b.get("block_timestamp") or "")
+        w_b = str(b.get("tx_from_address") or "")
+        if ts_b and w_b:
+            buy_by_sec[ts_b].add(w_b)
+    for s in sells:
+        ts = str(s.get("block_timestamp") or "")
+        w = str(s.get("tx_from_address") or "")
+        u_s = float(s.get("volume_in_usd") or 0.0)
+        if ts and w:
+            sell_by_sec[ts].add(w)
+            sell_usd_by_sec[ts] += u_s
+            if u_s >= 20.0:
+                sig_sell_by_sec[ts].add(w)
+    if sell_by_sec:
+        top_s_ts, top_s_wallets = max(sell_by_sec.items(), key=lambda kv: len(kv[1]))
+        max_s_1s = len(top_s_wallets)
+        top_s_buys = len(buy_by_sec.get(top_s_ts, set()))
+        max_sig_s_1s = 0
+        top_sig_ts = top_s_ts
+        if sig_sell_by_sec:
+            top_sig_ts, top_sig_wallets = max(sig_sell_by_sec.items(), key=lambda kv: len(kv[1]))
+            max_sig_s_1s = len(top_sig_wallets)
+        top_sig_usd = sell_usd_by_sec.get(top_sig_ts, 0.0)
+        top_sig_buys = len(buy_by_sec.get(top_sig_ts, set()))
+        sig_bursts = sum(
+            1 for ts_k, ws in sig_sell_by_sec.items()
+            if len(ws) >= 8 and sell_usd_by_sec.get(ts_k, 0.0) >= 600.0 and len(buy_by_sec.get(ts_k, set())) <= 1
+        )
+        # Массовый Jito Sell-All (22+ продавцов в 1с без сопоставимых встречных покупок — не путаем с двусторонним боем 22s/20b!)
+        # ИЛИ 12+ значимых продавцов >=$20 на сумму >=$1200 без встречных покупок ИЛИ 2+ синхронных залпа по 8+ значимых продавцов
+        _unanswered_mass_sell = max_s_1s >= 22 and (top_s_buys <= 3 or max_s_1s >= max(24, top_s_buys * 3))
+        if (
+            _unanswered_mass_sell
+            or (max_sig_s_1s >= 12 and top_sig_usd >= 1200.0 and top_sig_buys <= 2)
+            or sig_bursts >= 2
+        ):
+            return False, f"bundler-sync-sells: {max_s_1s} wallets (b={top_s_buys}, {max_sig_s_1s} >=$20, ${top_sig_usd:.0f}) sold in 1s ({top_sig_ts}, bursts={sig_bursts})", []
+
+    # 1.5. Детектор 1-Shot Fast-Flip Wash Bot (кейс BALLFIN: 54 из 126 кошельков сделали ровно 1 buy >= $35 и 1 sell через 1-30с для накрутки фейкового объёма $60k/m перед рагом)
+    try:
+        from datetime import datetime as _dt_tape
+        w_tape = defaultdict(list)
+        for t_item in trades_raw:
+            t_attrs = (t_item.get("attributes") if isinstance(t_item, dict) else None) or t_item
+            if not isinstance(t_attrs, dict):
+                continue
+            w_addr = str(t_attrs.get("tx_from_address") or "")
+            k_type = str(t_attrs.get("kind") or "").lower()
+            ts_str = str(t_attrs.get("block_timestamp") or "")
+            u_val = float(t_attrs.get("volume_in_usd") or 0.0)
+            if w_addr and k_type in ("buy", "sell") and ts_str:
+                try:
+                    t_epoch = _dt_tape.fromisoformat(ts_str.replace("Z", "+00:00")).timestamp()
+                    w_tape[w_addr].append((t_epoch, k_type, u_val))
+                except Exception:
+                    pass
+        if len(w_tape) >= 12:
+            fast_flip_1shot = 0
+            for w_addr, evs in w_tape.items():
+                evs.sort(key=lambda x: x[0])
+                b_evs = [e for e in evs if e[1] == "buy"]
+                s_evs = [e for e in evs if e[1] == "sell"]
+                if len(b_evs) == 1 and len(s_evs) == 1 and b_evs[0][2] >= 35.0:
+                    dt_flip = s_evs[0][0] - b_evs[0][0]
+                    if 0.0 <= dt_flip <= 30.0:
+                        fast_flip_1shot += 1
+            flip_ratio = fast_flip_1shot / float(len(w_tape))
+            if (fast_flip_1shot >= 8 and flip_ratio >= 0.15) or (fast_flip_1shot >= 5 and flip_ratio >= 0.22):
+                return (
+                    False,
+                    f"wash-volume-fast-flip-bot: {fast_flip_1shot}/{len(w_tape)} ({flip_ratio*100:.0f}%) one-shot wallets bought & sold within <=30s",
+                    [],
+                )
+    except Exception:
+        pass
+
+    # 2. Синхронный закуп бандлера в одну секунду
+    buy_by_sec = defaultdict(set)
+    b_wallets = []
+    b_usd = []
+    nonround_sol_wallets = defaultdict(set)
+    COMMON_PRESETS = [0.05, 0.1, 0.2, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0, 5.0, 10.0]
+    for b in buys:
+        ts = str(b.get("block_timestamp") or "")
+        w = str(b.get("tx_from_address") or "")
+        usd = float(b.get("volume_in_usd") or 0.0)
+        sol_amt = float(b.get("from_token_amount") or 0.0)
+        if ts and w:
+            buy_by_sec[ts].add(w)
+        if w:
+            b_wallets.append(w)
+        if usd > 0:
+            b_usd.append(usd)
+        # Исключаем человеческие пресеты (0.1, 0.5, 1.0 SOL) и стандартные вычеты комиссий (0.0978, 0.4938 SOL)
+        if w and 0.35 <= sol_amt <= 25.0:
+            is_preset = any(abs(sol_amt - p) <= 0.018 for p in COMMON_PRESETS)
+            is_round = (abs(sol_amt * 10.0 - round(sol_amt * 10.0)) <= 0.02)
+            if not is_preset and not is_round:
+                nonround_sol_wallets[round(sol_amt, 4)].add(w)
+
+    if buy_by_sec and len(buys) <= 120:
+        top_b_ts, top_b_wallets = max(buy_by_sec.items(), key=lambda kv: len(kv[1]))
+        top_b_sells = len(sell_by_sec.get(top_b_ts, set()))
+        if len(top_b_wallets) >= 12 and (top_b_sells <= 2 or len(top_b_wallets) >= max(16, top_b_sells * 3)):
+            return False, f"bundler-sync-buys: {len(top_b_wallets)} wallets (s={top_b_sells}) bought in 1s ({top_b_ts})", []
+
+    # 3. Клонированные некруглые покупки бота (например 0.8459 SOL с 6+ разных суб-кошельков дева, как в NOTHING)
+    if nonround_sol_wallets:
+        best_amt, amt_wallets = max(nonround_sol_wallets.items(), key=lambda kv: len(kv[1]))
+        if len(amt_wallets) >= 6:
+            return False, f"staircase-cloned-buys: {len(amt_wallets)} wallets bought identical {best_amt:.4f} SOL", []
+
+    # 4. Статистический профиль искусственной «лесенки» (Staircase Bot: кейс NOTHING)
+    if len(b_usd) >= 30 and len(b_wallets) >= 30:
+        uniq_r = len(set(b_wallets)) / float(len(b_wallets))
+        small_r = sum(1 for v in b_usd if v < 18.0) / float(len(b_usd))
+        mid_r = sum(1 for v in b_usd if 30.0 <= v <= 145.0) / float(len(b_usd))
+        mean_u = statistics.mean(b_usd)
+        cv = (statistics.pstdev(b_usd) / mean_u) if mean_u > 0 else 9.9
+        if uniq_r >= 0.92 and cv <= 0.65 and small_r <= 0.18 and mid_r >= 0.65:
+            return (
+                False,
+                f"staircase-bot-pump: {uniq_r*100:.0f}% one-shot wallets, {mid_r*100:.0f}% uniform $30-$145 buys, CV={cv:.2f}",
+                [],
+            )
+
+    uniq_recent_buyers = list(dict.fromkeys(b_wallets))[:15]
+    return True, "", uniq_recent_buyers
+
+
+async def check_staircase_and_sybil_farm(mint: str, pair_address: str = "", holder_owners: list = None) -> tuple:
+    """
+    Layer 9 + Layer 10 Auditor (Защита от Staircase-ботов и ферм одноразовых суб-кошельков дева):
+    - Layer 9: Анализ последних сделок пула через GeckoTerminal /trades (синхронные сбросы Jito, лесенка ордеров).
+    - Layer 10: Мгновенная (~60мс) проверка нативных SOL-балансов топ-холдеров/покупателей через RPC getMultipleAccounts:
+      если >=85% кошельков сидят только на газовой пыли (<0.08 SOL) и ни у одного нет >=0.20 SOL — это ботоферма суб-кошельков!
+    """
+    if not mint or not _cfg("AUDITOR_STAIRCASE_ENABLED", True):
+        return True, ""
+
+    now = _t.time()
+    cache_key = f"{mint}:{pair_address or ''}"
+    cached = _STAIRCASE_CACHE.get(cache_key)
+    if cached and (now - cached[0]) < 90.0:
+        return cached[1]
+    if len(_STAIRCASE_CACHE) > 1500:
+        _STAIRCASE_CACHE.clear()
+
+    recent_buyers = []
+    # --- LAYER 9: Лента сделок пула (общий кэш /trades с Order-Flow и fail-fast max_wait=2.5с, без 20с зависаний при 429) ---
+    clean_pair = str(pair_address or "").replace("solana_", "").strip()
+    if clean_pair and len(clean_pair) >= 32 and not clean_pair.startswith("0x"):
+        try:
+            import market_data
+            trades_list = await market_data.get_pool_trades_cached(clean_pair, max_wait=2.5, ttl=10.0)
+            if isinstance(trades_list, list) and trades_list:
+                t_ok, t_why, recent_buyers = analyze_trade_tape_staircase(trades_list)
+                if not t_ok:
+                    res = (False, t_why)
+                    _STAIRCASE_CACHE[cache_key] = (now, res)
+                    return res
+        except Exception:
+            pass
+
+    # --- LAYER 10: RPC getMultipleAccounts проверка фермы газовой пыли у холдеров/покупателей (~60мс) ---
+    SAFE_SYSTEM_OWNERS = {
+        "5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1",
+        "D4FPEruKEHrG5NTsqazoqfv8zsFWApqTjuzFLUQDkTz5",
+        "Eo7WjKq67rjJQSZxS6z3YkapzY3eMj6Xy8X5EQVn5UaB",
+        "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo",
+        "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc",
+        "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
+        "Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1",
+        "11111111111111111111111111111111",
+        clean_pair,
+    }
+    candidate_wallets = []
+    for w in list(holder_owners or []) + list(recent_buyers or []):
+        ws = str(w or "").strip()
+        if len(ws) >= 32 and not ws.startswith("0x") and ws not in SAFE_SYSTEM_OWNERS and ws not in candidate_wallets:
+            candidate_wallets.append(ws)
+        if len(candidate_wallets) >= 15:
+            break
+
+    if len(candidate_wallets) >= 8:
+        try:
+            import aiohttp
+            from http_client import get_session
+            session = await get_session()
+            payload = {
+                "jsonrpc": "2.0",
+                "id": 9,
+                "method": "getMultipleAccounts",
+                "params": [candidate_wallets[:15], {"encoding": "base64"}],
+            }
+            vals = None
+            for rpc in _get_solana_rpcs():
+                try:
+                    async with session.post(rpc, json=payload, timeout=aiohttp.ClientTimeout(total=3.0)) as resp:
+                        if resp.status == 200:
+                            rdata = await resp.json()
+                            v = (rdata.get("result") or {}).get("value")
+                            if isinstance(v, list):
+                                vals = v
+                                break
+                        else:
+                            _note_rpc_status(rpc, resp.status)
+                except Exception:
+                    continue
+            if isinstance(vals, list) and len(vals) >= 8:
+                sols = [float((acc.get("lamports", 0) if isinstance(acc, dict) else 0) or 0) / 1e9 for acc in vals]
+                max_sol = max(sols) if sols else 0.0
+                dust_cnt = sum(1 for s in sols if s < 0.010)
+                dust_ratio = dust_cnt / float(len(sols))
+                if max_sol < 0.035 and dust_ratio >= 0.90:
+                    res = (
+                        False,
+                        f"sybil-gas-dust-farm: {dust_cnt}/{len(sols)} wallets hold <0.010 SOL (max {max_sol:.3f} SOL — disposable sub-wallets)",
+                    )
+                    _STAIRCASE_CACHE[cache_key] = (now, res)
+                    return res
+        except Exception:
+            pass
+
+    res = (True, "")
+    _STAIRCASE_CACHE[cache_key] = (now, res)
+    return res
+
+
+_RC_REPORT_CACHE: dict = {}  # mint -> (ts, status, data_dict_or_none)
+
+
+async def fetch_rugcheck_report_cached(mint: str, ttl: float = 120.0, timeout: int = 7) -> tuple:
+    """Единый кэшированный запрос к RugCheck /v1/tokens/{mint}/report для всех движков (SCANNER, JUP, GROK-JEV, COPY).
+    Экономит лимит 30 RPM на api.rugcheck.xyz и исключает ложные блокировки при параллельных проверках одного минта."""
+    if not mint:
+        return 0, None
+    now = _t.time()
+    if len(_RC_REPORT_CACHE) > 1500:
+        _RC_REPORT_CACHE.clear()
+    hit = _RC_REPORT_CACHE.get(mint)
+    if hit:
+        ts, st, data = hit
+        eff_ttl = ttl if (st == 200 and isinstance(data, dict)) else (15.0 if st in (400, 404) else 5.0)
+        if (now - ts) < eff_ttl:
+            return st, data
+    from http_client import fetch_json
+    url = f"https://api.rugcheck.xyz/v1/tokens/{mint}/report"
+    st, body = await fetch_json(url, timeout=timeout, retries=1)
+    if st == 200 and isinstance(body, dict):
+        _RC_REPORT_CACHE[mint] = (now, 200, body)
+        return 200, body
+    _RC_REPORT_CACHE[mint] = (now, int(st or 0), None)
+    return int(st or 0), None
+
+
+_PUMPSWAP_POOL_CACHE: dict = {}  # (mint, pair_address) -> (ts, (ok, is_canonical, reason))
+_PUMP_AMM_PROG = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA"
+_PUMP_FUN_PROG = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
+_PUMP_MIG_AUTH = "39azUYFWPz3VHgKCf3VChUwbpURdCHRxjWVowf5jUJjg"
+
+
+def _set_pumpswap_flags(
+    pair_data,
+    ok: bool,
+    is_canonical: bool,
+    rpc_unverified: bool = False,
+    lp_burned: bool = False,
+) -> None:
+    if isinstance(pair_data, dict):
+        _bt_addr = str(((pair_data.get("baseToken") or {}).get("address") or "")).strip().lower()
+        _rpc_pump_safe = bool(ok and rpc_unverified and _bt_addr.endswith("pump") and not config.is_pumpswap_liq_fdv_trap(pair_data))
+        pair_data["_pumpswap_checked"] = True
+        pair_data["_pumpswap_canonical"] = bool(is_canonical or _rpc_pump_safe)
+        pair_data["_pumpswap_rpc_unverified"] = bool(rpc_unverified)
+        pair_data["_pumpswap_lp_burned"] = bool(lp_burned)
+        if not ok:
+            pair_data["_lp_verified"] = False
+        elif is_canonical or lp_burned or _rpc_pump_safe:
+            pair_data["_lp_verified"] = True
+        else:
+            pair_data["_lp_verified"] = False
+
+
+async def _solana_rpc_call(method: str, params: list, timeout: int = 5):
+    """Failover Solana JSON-RPC call using _get_solana_rpcs() and http_client.fetch_json."""
+    try:
+        from http_client import fetch_json
+    except Exception:
+        return None
+    payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
+    for rpc_url in _get_solana_rpcs()[:3]:
+        st, data = await fetch_json(
+            rpc_url,
+            timeout=timeout,
+            retries=0,
+            method="POST",
+            json_payload=payload,
+        )
+        if st in (401, 403, 429):
+            _note_rpc_status(rpc_url, st)
+            continue
+        if st == 200 and isinstance(data, dict) and "result" in data and not data.get("error"):
+            return data.get("result")
+    return None
+
+
+def _parse_ui_token_supply(sup_res):
+    if not isinstance(sup_res, dict):
+        return None
+    val = sup_res.get("value")
+    if not isinstance(val, dict):
+        return None
+    ui = val.get("uiAmount")
+    if ui is not None:
+        try:
+            return float(ui)
+        except Exception:
+            pass
+    try:
+        raw_amt = float(val.get("amount") or 0.0)
+        dec = int(val.get("decimals") or 0)
+        return raw_amt / (10 ** dec)
+    except Exception:
+        return None
+
+
+def _pumpswap_rpc_fallback(mint: str, pair_data, reason_prefix: str) -> tuple:
+    """Fallback when PumpSwap RPC pool lookup is unavailable."""
+    if bool(_cfg("ALLOW_UNLOCKED_LP_POOLS", True)):
+        return True, False, f"{reason_prefix}-unlocked-allowed"
+    if config.is_pumpswap_liq_fdv_trap(pair_data):
+        return False, False, "pumpswap-liq-fdv-trap"
+    if isinstance(pair_data, dict):
+        liq = float((pair_data.get("liquidity") or {}).get("usd") or 0.0)
+        fdv = float(pair_data.get("fdv") or pair_data.get("marketCap") or 0.0)
+        info = pair_data.get("info") or {}
+        has_socials = bool(
+            (isinstance(info.get("socials"), list) and len(info.get("socials")) > 0)
+            or (isinstance(info.get("websites"), list) and len(info.get("websites")) > 0)
+        )
+        if fdv > 0.0 and liq >= fdv * 0.75 and not has_socials:
+            return False, False, f"{reason_prefix}-suspicious-liq-fdv"
+    if not str(mint or "").lower().endswith("pump"):
+        return False, False, f"{reason_prefix}-custom-mint"
+    return True, False, f"{reason_prefix}-unverified"
+
+
+async def verify_pumpswap_pool_onchain(
+    mint: str,
+    pair_address: str = "",
+    pair_data: dict = None,
+    ttl: float = 180.0,
+) -> tuple:
+    """
+    On-chain PumpSwap AMM Pool verification against permissionless CreatePool rugs.
+    Returns (ok, is_canonical, reason):
+      - Canonical Pump.fun migration: owner == pAMMBay..., index == 0, base_mint == mint,
+        and creator == PDA(["pool-authority", mint], 6EF8...) or legacy 39azUY...
+      - Custom CreatePool (index != 0 or EOA creator): allowed ONLY if LP mint total
+        supply is actually burned on-chain (<= 0.5) and not a liq/fdv 0-social trap.
+    """
+    mint = str(mint or "").strip()
+    if isinstance(pair_data, dict):
+        dex = str(pair_data.get("dexId") or "").lower()
+        if dex and dex != "pumpswap":
+            return True, False, "not-pumpswap"
+        if not pair_address:
+            pair_address = str(pair_data.get("pairAddress") or "").strip()
+    pair_address = str(pair_address or "").strip()
+
+    cache_key = (mint, pair_address)
+    now = _t.time()
+    cached = _PUMPSWAP_POOL_CACHE.get(cache_key)
+    if cached and (now - cached[0]) < ttl:
+        res = cached[1]
+        _rs = str(res[2] if len(res) > 2 else "")
+        _set_pumpswap_flags(
+            pair_data,
+            res[0],
+            res[1],
+            rpc_unverified=("unverified" in _rs),
+            lp_burned=("burned-lp" in _rs),
+        )
+        return res
+
+    if not pair_address:
+        res = _pumpswap_rpc_fallback(mint, pair_data, "pumpswap-no-pair")
+        if res[0]:
+            res = (False, False, "pumpswap-no-pair-address")
+        _set_pumpswap_flags(pair_data, res[0], res[1])
+        _PUMPSWAP_POOL_CACHE[cache_key] = (now - ttl + 20.0, res)
+        return res
+
+    acc_res = await _solana_rpc_call("getAccountInfo", [pair_address, {"encoding": "base64"}])
+    if acc_res is None:
+        res = _pumpswap_rpc_fallback(mint, pair_data, "pumpswap-rpc-unavailable")
+        _set_pumpswap_flags(pair_data, res[0], res[1], rpc_unverified=("unverified" in str(res[2])))
+        _PUMPSWAP_POOL_CACHE[cache_key] = (now - ttl + 20.0, res)
+        return res
+
+    acc = acc_res.get("value") if isinstance(acc_res, dict) else None
+    if not isinstance(acc, dict):
+        res = (False, False, "pumpswap-pool-missing")
+        _set_pumpswap_flags(pair_data, res[0], res[1])
+        _PUMPSWAP_POOL_CACHE[cache_key] = (now - ttl + 20.0, res)
+        return res
+
+    owner = str(acc.get("owner") or "")
+    if owner != _PUMP_AMM_PROG:
+        res = (False, False, f"pumpswap-bad-owner:{owner[:8]}")
+        _set_pumpswap_flags(pair_data, res[0], res[1])
+        _PUMPSWAP_POOL_CACHE[cache_key] = (now, res)
+        return res
+
+    try:
+        import base64 as _b64
+        import struct as _struct
+        from solders.pubkey import Pubkey as _Pubkey
+
+        raw_field = acc.get("data")
+        raw_b64 = raw_field[0] if isinstance(raw_field, list) else raw_field
+        raw = _b64.b64decode(raw_b64)
+        if len(raw) < 211:
+            res = (False, False, f"pumpswap-short-pool:{len(raw)}")
+            _set_pumpswap_flags(pair_data, res[0], res[1])
+            _PUMPSWAP_POOL_CACHE[cache_key] = (now, res)
+            return res
+
+        pool_idx = _struct.unpack_from("<H", raw, 9)[0]
+        pool_creator = str(_Pubkey.from_bytes(raw[11:43]))
+        token_0 = str(_Pubkey.from_bytes(raw[43:75]))
+        token_1 = str(_Pubkey.from_bytes(raw[75:107]))
+        lp_mint = str(_Pubkey.from_bytes(raw[107:139]))
+        pool_auth = str(
+            _Pubkey.find_program_address(
+                [b"pool-authority", bytes(_Pubkey.from_string(mint))],
+                _Pubkey.from_string(_PUMP_FUN_PROG),
+            )[0]
+        )
+    except Exception as e:
+        res = (False, False, f"pumpswap-decode-err:{type(e).__name__}")
+        _set_pumpswap_flags(pair_data, res[0], res[1])
+        _PUMPSWAP_POOL_CACHE[cache_key] = (now - ttl + 20.0, res)
+        return res
+
+    _CANONICAL_QUOTES = {
+        "So11111111111111111111111111111111111111112",    # WSOL
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC (Pump.fun теперь мигрирует и в USDC, кейс RUDY +730%!)
+        "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",  # USDT
+        "USD1ttGY1N17NEEHLmELoaybftRBUSErhqYiQzvEmuB",   # USD1
+        "USD1ttGY1N17szXhfd31eYqSo32682556356108733",    # USD1 alt
+    }
+    has_mint = (token_0 == mint or token_1 == mint)
+    has_valid_quote = (token_0 in _CANONICAL_QUOTES or token_1 in _CANONICAL_QUOTES)
+    is_pump_mint = str(mint or "").strip().lower().endswith("pump")
+
+    is_canonical = (
+        pool_idx == 0
+        and has_mint
+        and has_valid_quote
+        and pool_creator in (pool_auth, _PUMP_MIG_AUTH)
+    )
+    if is_canonical:
+        res = (True, True, f"pumpswap-canonical-idx0:{pool_creator[:8]}")
+        _set_pumpswap_flags(pair_data, True, True)
+        _PUMPSWAP_POOL_CACHE[cache_key] = (now, res)
+        if len(_PUMPSWAP_POOL_CACHE) > 2000:
+            _PUMPSWAP_POOL_CACHE.clear()
+        return res
+
+    sup_res = await _solana_rpc_call("getTokenSupply", [lp_mint])
+    lp_sup = _parse_ui_token_supply(sup_res)
+    _allow_unlocked_ps = bool(_cfg("ALLOW_UNLOCKED_LP_POOLS", True))
+    if lp_sup is None:
+        if _allow_unlocked_ps:
+            res = (True, False, f"pumpswap-custom-unlocked-idx{pool_idx}-lp-unknown")
+            _set_pumpswap_flags(pair_data, True, False, rpc_unverified=True, lp_burned=False)
+            _PUMPSWAP_POOL_CACHE[cache_key] = (now - ttl + 20.0, res)
+            return res
+        res = (False, False, f"pumpswap-custom-idx{pool_idx}-lp-unknown")
+        _set_pumpswap_flags(pair_data, False, False)
+        _PUMPSWAP_POOL_CACHE[cache_key] = (now - ttl + 20.0, res)
+        return res
+
+    if lp_sup > 0.5:
+        if _allow_unlocked_ps:
+            res = (True, False, f"pumpswap-custom-unlocked-lp:{lp_sup:.2f}-idx{pool_idx}")
+            _set_pumpswap_flags(pair_data, True, False, lp_burned=False)
+            _PUMPSWAP_POOL_CACHE[cache_key] = (now, res)
+            return res
+        # Для .pump токенов неканонический CreatePool с несожжённым LP — 100% скам-приманка (JENSEN, DACITYCOIN, BALVOTE).
+        # Для не-.pump токенов (HOGE +158%, ANT +53%) допускаем ТОЛЬКО если пул проходит жёсткий фильтр органического раннера.
+        if not is_pump_mint and isinstance(pair_data, dict) and not config.is_pumpswap_liq_fdv_trap(pair_data):
+            import time as _t_ps
+            _ca_ps = float(pair_data.get("pairCreatedAt") or 0.0)
+            _age_ps = ((_t_ps.time() * 1000.0 - _ca_ps) / 60000.0) if _ca_ps > 0 else 0.2
+            _liq_ps = float((pair_data.get("liquidity") or {}).get("usd") or 0.0)
+            _fdv_ps = float(pair_data.get("fdv") or pair_data.get("marketCap") or 0.0)
+            _vol5_ps = float((pair_data.get("volume") or {}).get("m5") or 0.0)
+            _tx5_ps = (pair_data.get("txns") or {}).get("m5") or {}
+            _b5_ps = int(_tx5_ps.get("buys") or 0)
+            _s5_ps = int(_tx5_ps.get("sells") or 0)
+            _m5_ps = (pair_data.get("priceChange") or {}).get("m5")
+            if config.is_safe_unlocked_custom_runner(
+                liq_usd=_liq_ps,
+                age_min=_age_ps,
+                vol5_usd=_vol5_ps,
+                buys5=_b5_ps,
+                sells5=_s5_ps,
+                fdv_usd=_fdv_ps,
+                m5_pct=(float(_m5_ps) if _m5_ps is not None else None),
+                pair_data=pair_data,
+            ):
+                res = (True, False, f"pumpswap-custom-organic-runner:{lp_sup:.2f}-idx{pool_idx}")
+                _set_pumpswap_flags(pair_data, True, False, lp_burned=False)
+                pair_data["_unlocked_runner_ok"] = True
+                _PUMPSWAP_POOL_CACHE[cache_key] = (now, res)
+                return res
+        res = (False, False, f"pumpswap-createpool-unburned-lp:{lp_sup:.2f}-idx{pool_idx}")
+        _set_pumpswap_flags(pair_data, False, False)
+        _PUMPSWAP_POOL_CACHE[cache_key] = (now, res)
+        return res
+
+    if config.is_pumpswap_liq_fdv_trap(pair_data):
+        res = (False, False, f"pumpswap-liq-fdv-trap-idx{pool_idx}")
+        _set_pumpswap_flags(pair_data, False, False)
+        _PUMPSWAP_POOL_CACHE[cache_key] = (now, res)
+        return res
+
+    _cur_ps_liq = float(((pair_data or {}).get("liquidity") or {}).get("usd") or 0.0) if isinstance(pair_data, dict) else 0.0
+    if isinstance(pair_data, dict) and pair_data.get("liquidity") is not None and _cur_ps_liq < 1000.0:
+        res = (False, False, f"pumpswap-custom-drained-lp:{lp_sup:.4f}-liq${_cur_ps_liq:.0f}")
+        _set_pumpswap_flags(pair_data, False, False, lp_burned=False)
+        _PUMPSWAP_POOL_CACHE[cache_key] = (now - ttl + 20.0, res)
+        return res
+
+    res = (True, False, f"pumpswap-custom-burned-lp:{lp_sup:.4f}-idx{pool_idx}")
+    _set_pumpswap_flags(pair_data, True, False, lp_burned=True)
+    _PUMPSWAP_POOL_CACHE[cache_key] = (now, res)
+    if len(_PUMPSWAP_POOL_CACHE) > 2000:
+        _PUMPSWAP_POOL_CACHE.clear()
+    return res
