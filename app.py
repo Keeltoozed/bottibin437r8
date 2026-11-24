@@ -163,19 +163,19 @@ with st.sidebar:
     if "Стандарт" in strategy_mode:
         default_lev = 12
         config.RISK_PER_TRADE_PCT = 0.025
-        config.MIN_5M_VOLUME_SURGE_RATIO = 1.45
+        config.MIN_5M_VOLUME_SURGE_RATIO = 2.00
         config.MIN_CLOSE_STRENGTH = 0.68
         config.DAILY_LOSS_LIMIT = 99
     elif "Высокий" in strategy_mode:
         default_lev = 18
         config.RISK_PER_TRADE_PCT = 0.035
-        config.MIN_5M_VOLUME_SURGE_RATIO = 1.45
+        config.MIN_5M_VOLUME_SURGE_RATIO = 2.00
         config.MIN_CLOSE_STRENGTH = 0.68
         config.DAILY_LOSS_LIMIT = 99
     else:
         default_lev = 15
         config.RISK_PER_TRADE_PCT = 0.030
-        config.MIN_5M_VOLUME_SURGE_RATIO = 1.45
+        config.MIN_5M_VOLUME_SURGE_RATIO = 2.00
         config.MIN_CLOSE_STRENGTH = 0.68
         config.DAILY_LOSS_LIMIT = 99
 
@@ -196,11 +196,11 @@ with st.sidebar:
         portfolio.save()
         st.rerun()
 
-    est_risk_usd = round(max(15.0, portfolio.get_portfolio_summary()["equity"]) * config.RISK_PER_TRADE_PCT, 2)
+    est_risk_usd = round(max(10.0, portfolio.get_portfolio_summary()["equity"]) * config.RISK_PER_TRADE_PCT, 2)
     st.text(f"Плечо входов: {portfolio.current_leverage}x | Риск 1R: ${est_risk_usd:.2f} ({config.RISK_PER_TRADE_PCT*100:.1f}%)")
-    st.text(f"Вход: 15m MTF + Пробой 12 баров + RVOL ≥ {config.MIN_5M_VOLUME_SURGE_RATIO:.2f}x")
-    st.text(f"Щит: BE +0.70% | 45% TP1 (1.4R) / 30% TP2 (2.7R) / 25% Moonbag Трейл")
-    st.text(f"Застой: 35м Time-Stop (освобождает слот)")
+    st.text(f"Вход: 6H/3H Сжатие + RugShort + RVOL ≥ {config.MIN_5M_VOLUME_SURGE_RATIO:.2f}x")
+    st.text(f"Anti-Rug Выход: 60% на {config.TARGET_1_R}R + 40% Parabolic Trail")
+    st.text(f"Защита просадки: Half-Kelly при DD ≥ {int(config.DD_GUARD_THRESHOLD*100)}%")
     st.text(f"Лимит стопов: Макс {config.DAILY_LOSS_LIMIT} в день ({portfolio.daily_losses_count}/{config.DAILY_LOSS_LIMIT})")
     st.text(f"Радар рынка: 🚀 {config.SCAN_TICKERS_LIMIT} пар Binance (MTF + Ликвидность)")
     st.text(f"Модель Groq: {config.GROQ_PRIMARY_MODEL}")
@@ -589,11 +589,10 @@ with tab_timemachine:
             pre = precompute_indicators(cdata)
 
             configs = [
-                ("🛡️ Rocket Hunter Profit-Shield (15x, Риск 3.5%, ML≥55%)", dict(leverage=15, risk_pct=0.035, lookback=12, min_surge=1.45, min_impulse=0.42, min_clv=0.68, ml_min_prob=0.55, tp1_r=1.50, tp2_r=2.80, use_profit_shield=True)),
-                ("🔥 Rocket Hunter High-Conviction (18x, Риск 3.8%, ML≥56%)", dict(leverage=18, risk_pct=0.038, lookback=12, min_surge=1.45, min_impulse=0.45, min_clv=0.68, ml_min_prob=0.56, tp1_r=1.50, tp2_r=2.80, use_profit_shield=True)),
-                ("🚀 Rocket Hunter Classic 3-Stage (12x, Риск 2.5%, ML≥54%)", dict(leverage=12, risk_pct=0.025, lookback=12, min_surge=1.45, min_impulse=0.42, min_clv=0.68, ml_min_prob=0.54, tp1_r=1.50, tp2_r=2.80, use_profit_shield=True)),
-                ("⚡ Rocket Hunter Pure Price-Action (Без ML фильтра)", dict(leverage=15, risk_pct=0.035, lookback=15, min_surge=1.35, min_impulse=0.55, ml_min_prob=0.00, tp1_r=1.5, use_continuation=False, use_ema50_macro=False, use_conviction_sizing=False, use_profit_shield=False)),
-                ("❌ Старый скальпер (Фитиль≥12%, Трейл 0.7%, Обрез SL)", dict(leverage=10, legacy_churn_mode=True, use_profit_shield=False)),
+                ("🚀 Anti-Rug Rocket Hunter (15x, 60%@1.65R + 40% Parabolic Trail)", dict(leverage=15, risk_pct=0.030, tp1_r=1.65, tp1_share=0.60)),
+                ("🔥 Anti-Rug High-Conviction (18x, Риск 3.5%, 60%@1.65R + Trail)", dict(leverage=18, risk_pct=0.035, tp1_r=1.65, tp1_share=0.60)),
+                ("🎯 Anti-Rug Fixed Target (15x, 100% на 1.70R до слива)", dict(leverage=15, risk_pct=0.030, tp1_r=1.70, tp1_share=1.00)),
+                ("❌ Старый 12-барный скальпер (Early BE + 35м Time-Stop)", dict(leverage=12, legacy_churn_mode=True)),
             ]
 
             rows = []

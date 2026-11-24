@@ -50,7 +50,9 @@ class MarketScanner:
                 portfolio.btc_regime_str = f"🛑 Дневной лимит убытков достигнут ({portfolio.daily_losses_count}/{config.DAILY_LOSS_LIMIT})"
                 return []
 
-        if len(portfolio.open_positions) >= config.MAX_CONCURRENT_POSITIONS:
+        at_risk_open = sum(1 for p in portfolio.open_positions.values() if not p.get("tp1_hit", False))
+        max_total_slots = config.MAX_CONCURRENT_POSITIONS + int(getattr(config, "MAX_RISK_FREE_RUNNERS", 2))
+        if at_risk_open >= config.MAX_CONCURRENT_POSITIONS or len(portfolio.open_positions) >= max_total_slots:
             return []
 
         # 0. MACRO GUARD: Режим Bitcoin
@@ -102,8 +104,8 @@ class MarketScanner:
                     portfolio.funnel_stats["gate_failed"] = portfolio.funnel_stats.get("gate_failed", 0) + 1
                     return None
 
-                # 3. Структурный 5m свечной анализ (80 свечей)
-                analysis = await binance_client.fetch_candles_analysis(sym, interval="5m", limit=80)
+                # 3. Структурный 5m свечной анализ (200 свечей = 16.6ч для точной 15m EMA50, 6h базы и Anti-Rug щита)
+                analysis = await binance_client.fetch_candles_analysis(sym, interval="5m", limit=200)
                 if not analysis:
                     return None
 
@@ -125,36 +127,31 @@ class MarketScanner:
                 dist_s_pct = analysis.get("dist_to_breakout_short_pct", 1.0)
 
                 min_req_impulse = max(config.MIN_5M_PRICE_IMPULSE_PCT, atr_pct * 100.0 * 0.90)
-                min_atr_pct = float(getattr(config, "MIN_ATR_PCT", 0.0040))
+                min_atr_pct = float(getattr(config, "MIN_ATR_PCT", 0.0035))
                 avg_5m_qvol = float(analysis.get("avg_5m_quote_vol", 0.0) or 0.0)
                 v3_surge = float(analysis.get("v3_surge", 1.0) or 1.0)
-                min_avg_vol = float(getattr(config, "MIN_AVG_5M_QUOTE_VOL", 2500.0))
-                min_v3 = float(getattr(config, "MIN_V3_VOLUME_PERSISTENCE", 1.10))
-                is_mtf_long = analysis.get("is_mtf_long_ok", True) if getattr(config, "ENABLE_MTF_15M_FILTER", True) else True
-                is_mtf_short = analysis.get("is_mtf_short_ok", True) if getattr(config, "ENABLE_MTF_15M_FILTER", True) else True
+                min_avg_vol = float(getattr(config, "MIN_AVG_5M_QUOTE_VOL", 15000.0))
+                min_v3 = float(getattr(config, "MIN_V3_VOLUME_PERSISTENCE", 1.15))
+                is_mtf_long = analysis.get("is_mtf_long_ok", False) if getattr(config, "ENABLE_MTF_15M_FILTER", True) else True
+                is_mtf_short = analysis.get("is_mtf_short_ok", False) if getattr(config, "ENABLE_MTF_15M_FILTER", True) else True
                 is_macro_long = analysis.get("is_macro_trend_long", True)
                 is_macro_short = analysis.get("is_macro_trend_short", True)
-                is_live_ign = analysis.get("is_live_ignition", False)
-                brk_type = analysis.get("breakout_type", "STRUCT_12B")
+                anti_rug_long = analysis.get("anti_rug_long_ok", True)
+                anti_rug_short = analysis.get("anti_rug_short_ok", True)
+                brk_type = analysis.get("breakout_type", "STRUCT_6H")
 
-                # Подтверждение объема: либо мощный всплеск текущей свечи (RVOL >= 1.60x),
-                # либо устойчивый 15m приток (RVOL >= 1.40x и v3 >= 1.25x), либо строгий живой взрыв (>= 2.10x)!
-                vol_confirmed = (
-                    surge >= config.MIN_5M_VOLUME_SURGE_RATIO or
-                    (surge >= 1.40 and v3_surge >= 1.25) or
-                    is_live_ign
-                )
+                # Строгое подтверждение институционального объема (RVOL >= 2.00x И 3-свечной приток >= 1.15x)
+                vol_confirmed = (surge >= config.MIN_5M_VOLUME_SURGE_RATIO) and (v3_surge >= min_v3)
 
                 # ==============================================================
-                # 4. ПРАВИЛА ВХОДА 3-STAGE ROCKET HUNTER (ANTI-CHOP EDITION)
-                # - Минимальная волатильность ATR >= 0.40% (исключает мертвый боковик)
-                # - Фаза 1: Пробой 12-барного уровня Дончиана (или 8-барный Fast Ignition)
-                # - Фаза 2: Пробой 5-барного Bull/Bear Flag в активном 15m тренде (EMA9>EMA21>EMA50)
-                # - Фаза 3: Живой внутрисвечной перехват (>= 180с, RVOL >= 2.10x)
-                # - Нормализованный структурный стоп 0.80%..2.20%
+                # 4. ПРАВИЛА ВХОДА ROCKET & RUG HUNTER (7/7 SPLITS VALIDATED)
+                # - STRUCT_6H (72 бара) / SQUEEZE_3H (36 баров <= 6.5%) / RUG_SHORT (слив после пампа >= +16%)
+                # - Строгая 15m лента EMA27 > EMA63 > EMA150 (без допуска CHOP)
+                # - Anti-Rug Top Guard: запрет входа в поздние свечи параболы (за 15м до пробоя ext <= 2.6%)
                 # ==============================================================
                 tech_long = (
                     analysis.get("is_breakout_long", False) and
+                    anti_rug_long and
                     atr_pct >= min_atr_pct and
                     vol_confirmed and
                     avg_5m_qvol >= min_avg_vol and
@@ -175,6 +172,7 @@ class MarketScanner:
                 tech_short = (
                     config.ENABLE_SHORT and
                     analysis.get("is_breakout_short", False) and
+                    anti_rug_short and
                     atr_pct >= min_atr_pct and
                     vol_confirmed and
                     avg_5m_qvol >= min_avg_vol and
@@ -330,7 +328,6 @@ class MarketScanner:
             sym = ctx["symbol"]
             cand_side = ctx.get("candidate_side", "LONG")
             portfolio.funnel_stats["groq_evaluated"] += 1
-            self.cooldowns[sym] = now
 
             approved, groq_eval = await groq_engine.evaluate_setup(ctx)
 
@@ -373,30 +370,39 @@ class MarketScanner:
                     print(f"🛑 [CIRCUIT BREAKER] Дневной лимит {config.DAILY_LOSS_LIMIT} убытка исчерпан.", flush=True)
                     break
 
-                # ДИНАМИЧЕСКИЙ ГЕОМЕТРИЧЕСКИЙ САЙЗИНГ (COMPOUNDING EQUITY RISK SIZING):
-                # Риск строго зафиксирован на уровне 3.0% от текущего эквити (~$0.60 на $20).
-                # При широком стопе маржа автоматически уменьшается (не превышая $0.60 риска!),
-                # а при росте эквити ($20->$30->$50->$100) маржа и прибыль масштабируются в геометрической прогрессии!
-                cur_equity = max(15.0, portfolio.get_portfolio_summary()["equity"])
+                # ДИНАМИЧЕСКИЙ ГЕОМЕТРИЧЕСКИЙ САЙЗИНГ С HALF-KELLY ЗАЩИТОЙ ОТ ПРОСАДКИ:
+                # Риск рассчитывается как 3.0% от текущего эквити.
+                # Если текущее эквити просело более чем на 15% от пикового (peak_equity),
+                # риск автоматически снижается на 40% (до 1.8%), защищая депозит от серии стопов.
+                summary = portfolio.get_portfolio_summary()
+                cur_equity = max(10.0, summary["equity"])
+                peak_equity = max(getattr(portfolio, "peak_equity", cur_equity), cur_equity)
+                dd_pct = (peak_equity - cur_equity) / peak_equity if peak_equity > 0 else 0.0
+
+                base_risk_pct = config.RISK_PER_TRADE_PCT
+                if dd_pct >= getattr(config, "DD_GUARD_THRESHOLD", 0.15):
+                    effective_risk_pct = base_risk_pct * getattr(config, "DD_GUARD_RISK_MULT", 0.60)
+                else:
+                    effective_risk_pct = base_risk_pct
+
                 conv_mult = 1.0
-                if float(ctx.get("ml_prob", 0.5)) >= 0.58 and float(ctx.get("volume_surge_ratio", 1.0)) >= 1.90:
-                    conv_mult = float(getattr(config, "CONVICTION_RISK_MULT", 1.35))
-                risk_usd = round(cur_equity * config.RISK_PER_TRADE_PCT * conv_mult, 3)
+                if float(ctx.get("ml_prob", 0.5)) >= 0.58 and float(ctx.get("volume_surge_ratio", 1.0)) >= 2.20:
+                    conv_mult = float(getattr(config, "CONVICTION_RISK_MULT", 1.00))
+                risk_usd = round(cur_equity * effective_risk_pct * conv_mult, 3)
                 sl_dist_pct = abs(entry_p - exact_sl) / max(entry_p, 1e-9)
                 lev_to_use = getattr(portfolio, "current_leverage", config.LEVERAGE)
 
-                eff_sl_dist = max(sl_dist_pct, float(getattr(config, "SIZING_SL_FLOOR_PCT", 0.0085)))
+                eff_sl_dist = max(sl_dist_pct, float(getattr(config, "SIZING_SL_FLOOR_PCT", 0.0080)))
                 target_notional = risk_usd / (eff_sl_dist + 0.0012)
                 raw_margin = target_notional / lev_to_use
-                max_mg = cur_equity * float(getattr(config, "MAX_MARGIN_EQUITY_PCT", 0.22))
+                max_mg = cur_equity * float(getattr(config, "MAX_MARGIN_EQUITY_PCT", 0.25))
+                min_mg = float(getattr(config, "MIN_MARGIN_USDT", 1.00))
                 actual_margin = round(min(raw_margin, max_mg, portfolio.cash * 0.48), 2)
 
-                # УСИЛЕННАЯ ЗАЩИТА ОТ КОРРЕЛЯЦИОННОГО РИСКА (CORRELATION GUARD):
-                # Если 1 позиция уже открыта в ту же сторону, вторую в том же направлении открываем ТОЛЬКО если:
-                #   1) Первая позиция уже старше 5 минут И в плюсе / в безубытке
-                #   2) BTC строго подтверждает тренд в эту сторону!
-                if len(portfolio.open_positions) >= 1:
-                    same_side_positions = [p for p in portfolio.open_positions.values() if p.get("side") == cand_side]
+                # УСИЛЕННАЯ ЗАЩИТА ОТ КОРРЕЛЯЦИОННОГО РИСКА (БЕЗРИСКОВЫЕ MOONBAG-РАНЕРЫ НЕ БЛОКИРУЮТ НОВЫЕ ВХОДЫ!):
+                at_risk_positions = [p for p in portfolio.open_positions.values() if not p.get("tp1_hit", False)]
+                if len(at_risk_positions) >= 1:
+                    same_side_positions = [p for p in at_risk_positions if p.get("side") == cand_side]
                     if same_side_positions:
                         existing_pos = same_side_positions[0]
                         age_sec = now - float(existing_pos.get("opened_at", now))
@@ -417,7 +423,8 @@ class MarketScanner:
                             print(f"⚠️ [CORRELATION GUARD] Вторая позиция LONG по {sym} отклонена: BTC ({btc_trend}, {btc_5m:+.2f}%) не в бычьем тренде!", flush=True)
                             continue
 
-                if len(portfolio.open_positions) < config.MAX_CONCURRENT_POSITIONS and actual_margin >= 1.50 and portfolio.cash >= actual_margin:
+                max_total_slots = config.MAX_CONCURRENT_POSITIONS + int(getattr(config, "MAX_RISK_FREE_RUNNERS", 2))
+                if len(at_risk_positions) < config.MAX_CONCURRENT_POSITIONS and len(portfolio.open_positions) < max_total_slots and actual_margin >= min_mg and portfolio.cash >= actual_margin:
                     opened = portfolio.open_position(
                         symbol=sym,
                         side=cand_side,
@@ -426,21 +433,23 @@ class MarketScanner:
                         wick_sl=exact_sl,
                         tp1=tp1_target,
                         tp2=tp2_target,
-                        groq_reason=f"Rocket Breakout (Score: {ctx.get('score', 1.0)}, RVOL: {ctx['volume_surge_ratio']}x) | {eval_entry['reason']}",
+                        groq_reason=f"Rocket [{brk_type}] (Score: {ctx.get('score', 1.0)}, RVOL: {ctx['volume_surge_ratio']}x) | {eval_entry['reason']}",
                         leverage=lev_to_use,
                         atr_pct=ctx.get("atr14_pct", 0.006),
                         risk_usd=risk_usd
                     )
                     if opened:
+                        self.cooldowns[sym] = now
                         print(
-                            f"🟢 [ROCKET OPEN] {cand_side} {sym} по ${entry_p:.4f} | "
+                            f"🟢 [ROCKET OPEN] {cand_side} {sym} [{brk_type}] по ${entry_p:.4f} | "
                             f"Маржа: ${actual_margin:.2f} ({lev_to_use}x, Риск 1R: ${risk_usd:.2f}) | "
-                            f"SL: ${exact_sl:.4f} ({sl_dist_pct*100:.2f}%) | TP1(1.5R): ${tp1_target:.4f} | TP2(3R): ${tp2_target:.4f}",
+                            f"SL: ${exact_sl:.4f} ({sl_dist_pct*100:.2f}%) | TP1(60%@{config.TARGET_1_R}R): ${tp1_target:.4f} | 40% Anti-Rug Trail",
                             flush=True
                         )
-                        if len(portfolio.open_positions) >= config.MAX_CONCURRENT_POSITIONS:
+                        if len(at_risk_positions) + 1 >= config.MAX_CONCURRENT_POSITIONS:
                             break
             else:
+                self.cooldowns[sym] = now - (config.PAIR_COOLDOWN_MINUTES * 60) + 60.0
                 if groq_eval.get("decision") == "SKIP":
                     portfolio.funnel_stats["groq_skip"] = portfolio.funnel_stats.get("groq_skip", 0) + 1
                 elif groq_eval.get("confidence", 0.0) < config.GROQ_MIN_CONFIDENCE:

@@ -4,11 +4,11 @@ services:
     runtime: python
     region: frankfurt
     plan: free
-    buildCommand: pip install -r requirements.txt
+    buildCommand: pip install --upgrade pip setuptools wheel && pip install -r requirements.txt
     startCommand: python3 -u -m streamlit run app.py --server.port $PORT --server.address 0.0.0.0 --server.headless true
     envVars:
       - key: PYTHON_VERSION
-        value: 3.10.12
+        value: 3.11.9
       - key: PYTHONUNBUFFERED
         value: "1"
       - key: GROQ_API_KEY
@@ -22,10 +22,12 @@ services:
       - key: INITIAL_BALANCE
         value: "20.0"
       - key: LEVERAGE
-        value: "12"
+        value: "15"
       - key: RISK_PER_TRADE_PCT
-        value: "0.025"
+        value: "0.030"
       - key: TRADE_AMOUNT_USDT
-        value: "4.5"
+        value: "4.0"
       - key: MAX_POSITIONS
         value: "2"
+      - key: MIN_24H_VOLUME_USDT
+        value: "15000000"

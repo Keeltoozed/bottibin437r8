@@ -273,13 +273,13 @@ class BinanceClient:
 
         return list(combined_dict.values())[:limit]
 
-    async def fetch_candles_analysis(self, symbol: str, interval: str = "5m", limit: int = 80) -> Optional[Dict[str, Any]]:
+    async def fetch_candles_analysis(self, symbol: str, interval: str = "5m", limit: int = 200) -> Optional[Dict[str, Any]]:
         """
-        Запрашивает 5m свечи и выполняет структурный анализ пробоя (Rocket Hunter Engine):
-        - Строго разделяет закрытые свечи (candles[:-1]) и текущую живую цену (candles[-1]).
-        - Вычисляет пробой 20-барного канала Дончиана и быстрый 12-барный Ignition.
-        - Рассчитывает силу закрытия свечи (Close Location Value) вместо ошибочного фильтра нижнего фитиля.
-        - Вычисляет ЧЕСТНЫЙ структурный стоп (за фитиль + ATR буфер) БЕЗ искусственного зажима внутри свечи!
+        Запрашивает 5m свечи (200 баров = 16.6ч для прогрева EMA150 / 15m EMA50) и выполняет структурный анализ:
+        - 6H Structural Breakout (72 бара) + 3H Tight Squeeze Ignition (36 баров при сжатии <= 6.5%).
+        - Rug-Hunter Breakdown (перехват слива после пампа >= +16% при пробое 16-барной полки и EMA50).
+        - Строгий 15m MTF фильтр (EMA27 > EMA63 > EMA150 на 5m — без допуска пилы CHOP!).
+        - Anti-Rug Top Guard: блокирует покупку параболического хая, если монета уже была растянута 15 мин назад.
         """
         raw_candles = await self._request_with_fallback("klines", params={"symbol": symbol, "interval": interval, "limit": limit})
         if not raw_candles or len(raw_candles) < 30:
@@ -392,167 +392,135 @@ class BinanceClient:
             rs = avg_gain / avg_loss
             rsi = round(100.0 - (100.0 / (1.0 + rs)), 1)
 
-        # 15m Multi-Timeframe (MTF) Trend Analysis (строго по закрытым 5m барам)
-        c15_closes = [closed_candles[i]["close"] for i in range(2, len(closed_candles), 3)]
-        if len(c15_closes) >= 7:
-            ema9_15m = config.round_price(calc_ema(c15_closes, 9))
-            ema21_15m = config.round_price(calc_ema(c15_closes, 21) if len(c15_closes) >= 21 else calc_ema(c15_closes, len(c15_closes)))
-            cur_15m = c15_closes[-1]
-            if cur_15m >= ema21_15m * 0.998 and ema9_15m >= ema21_15m * 0.998:
-                trend_15m = "BULL"
-            elif cur_15m <= ema21_15m * 1.002 and ema9_15m <= ema21_15m * 1.002:
-                trend_15m = "BEAR"
-            else:
-                trend_15m = "CHOP"
+        # 15m Multi-Timeframe (MTF) Trend Analysis: EMA27 (=15m EMA9), EMA63 (=15m EMA21), EMA150 (=15m EMA50)
+        def calc_ema_series(values: List[float], period: int) -> List[float]:
+            k = 2.0 / (period + 1.0)
+            res = [values[0]]
+            for v in values[1:]:
+                res.append(v * k + res[-1] * (1.0 - k))
+            return res
+
+        ema21_series = calc_ema_series(closed_closes, min(21, len(closed_closes)))
+        ema27 = config.round_price(calc_ema(closed_closes, min(27, len(closed_closes))))
+        ema63 = config.round_price(calc_ema(closed_closes, min(63, len(closed_closes))))
+        ema150 = config.round_price(calc_ema(closed_closes, min(150, len(closed_closes))))
+
+        sig_cl = closed_signal_c["close"]
+        if sig_cl >= ema63 * 0.998 and ema27 >= ema63 * 0.998 and ema63 >= ema150 * 0.996:
+            trend_15m = "BULL"
+        elif sig_cl <= ema63 * 1.002 and ema27 <= ema63 * 1.002 and ema63 <= ema150 * 1.004:
+            trend_15m = "BEAR"
         else:
             trend_15m = "CHOP"
-            ema9_15m = ema9
-            ema21_15m = ema21
 
-        is_mtf_long_ok = (trend_15m in ("BULL", "CHOP"))
-        is_mtf_short_ok = (trend_15m in ("BEAR", "CHOP"))
+        # СТРОГИЙ MTF ФИЛЬТР (ИСПРАВЛЕН БАГ ДОПУСКА CHOP!): в лонг только в BULL, в шорт только в BEAR (или при RUG_HUNTER_SHORT)
+        is_mtf_long_ok = (trend_15m == "BULL")
+        is_mtf_short_ok = (trend_15m == "BEAR")
+
+        # ANTI-RUG TOP GUARD (защита от покупки параболического хая перед сливом):
+        # 1) За 3 свечи (15 мин) до пробоя цена должна находиться в базе рядом с EMA21 (<= 2.6%), а не лететь в 4-й свече пампа!
+        # 2) Не входить, если монета уже сделала вертикальный климакс > +18% за последние 3 часа (36 баров).
+        if len(closed_closes) >= 5:
+            ext_prev3_pct = round(abs(closed_closes[-4] - ema21_series[-4]) / max(ema21_series[-4], 1e-9), 4)
+        else:
+            ext_prev3_pct = 0.0
+        if len(closed_closes) >= 38:
+            ret_3h_pct = round((sig_cl - closed_closes[-37]) / max(closed_closes[-37], 1e-9), 4)
+        else:
+            ret_3h_pct = round((sig_cl - closed_closes[0]) / max(closed_closes[0], 1e-9), 4)
+
+        max_pre_ext = float(getattr(config, "MAX_PRE_BREAKOUT_EXT_PCT", 0.026))
+        max_climax_3h = float(getattr(config, "MAX_3H_CLIMAX_RETURN_PCT", 0.18))
+        anti_rug_long_ok = (ext_prev3_pct <= max_pre_ext) and (ret_3h_pct <= max_climax_3h)
+        anti_rug_short_ok = (ext_prev3_pct <= max_pre_ext) and (ret_3h_pct >= -max_climax_3h)
 
         # 3-свечной кумулятивный приток объема (Volume Persistence за последние 15 минут)
         prior_3_vols = [c["quote_vol"] for c in closed_candles[-3:]]
         v3_surge = round((sum(prior_3_vols) / 3.0) / max(avg_vol, 1.0), 2)
 
         # ======================================================================
-        # 3-ФАЗНЫЙ ПЕРЕХВАТ РАКЕТ (3-STAGE ROCKET CATCHER):
-        # 1) Структурный пробой базы Дончиана (12 баров / 1 час или 8-барный Fast Ignition)
-        # 2) Продолжение тренда (5-барный Bull/Bear Flag после импульса 15m >= 0.80% в тренде EMA9>EMA21>EMA50)
-        # 3) Живой внутрисвечной перехват (Live Intra-Bar Ignition при взрыве текущей 5m свечи в реальном времени!)
+        # 3-РЕЖИМНЫЙ ПЕРЕХВАТ РАКЕТ И СЛИВОВ (ROCKET & RUG HUNTER ENGINE):
+        # 1) STRUCT_6H: Пробой 72-барного канала Дончиана (6 часов) на RVOL >= 2.0x
+        # 2) SQUEEZE_3H: Ранний старт ракеты из узкого 3ч сжатия (36 баров <= 6.5%) на RVOL >= 2.2x
+        # 3) RUG_SHORT: Слив памповой монеты (после роста >= +16% за 6ч пробой 16-барного лоя и EMA50 на RVOL >= 2.1x)
         # ======================================================================
-        lookback = int(getattr(config, "BREAKOUT_LOOKBACK_BARS", 12))
-        fast_lb = int(getattr(config, "FAST_IGNITION_LOOKBACK_BARS", 8))
-        fast_surge = float(getattr(config, "FAST_IGNITION_SURGE", 2.40))
-        cont_lb = int(getattr(config, "CONTINUATION_LOOKBACK_BARS", 5))
+        lookback = int(getattr(config, "BREAKOUT_LOOKBACK_BARS", 72))
+        sq_lb = int(getattr(config, "SQUEEZE_LOOKBACK_BARS", 36))
+        sq_max_rng = float(getattr(config, "SQUEEZE_MAX_RANGE_PCT", 0.065))
+        sq_min_rvol = float(getattr(config, "SQUEEZE_MIN_RVOL", 2.20))
+        min_rvol = float(getattr(config, "MIN_5M_VOLUME_SURGE_RATIO", 2.00))
 
         struct_slice = closed_candles[-(lookback + 1):-1] if len(closed_candles) > lookback else closed_candles[:-1]
-        fast_slice = closed_candles[-(fast_lb + 1):-1] if len(closed_candles) > fast_lb else closed_candles[:-1]
-        cont_slice = closed_candles[-(cont_lb + 1):-1] if len(closed_candles) > cont_lb else closed_candles[:-1]
+        sq_slice = closed_candles[-(sq_lb + 1):-1] if len(closed_candles) > sq_lb else closed_candles[:-1]
 
         donchian_high = max(c["high"] for c in struct_slice)
         donchian_low = min(c["low"] for c in struct_slice)
-        fast_high = max(c["high"] for c in fast_slice)
-        fast_low = min(c["low"] for c in fast_slice)
-        flag_high_5 = max(c["high"] for c in cont_slice)
-        flag_low_5 = min(c["low"] for c in cont_slice)
+        sq_high = max(c["high"] for c in sq_slice)
+        sq_low = min(c["low"] for c in sq_slice)
+        sq_range_pct = (sq_high - sq_low) / max(sq_low, 1e-9)
 
-        # Фаза 1: Структурный пробой базы
-        is_struct_long = (
-            (closed_signal_c["close"] > donchian_high) or
-            (surge_ratio >= fast_surge and closed_signal_c["close"] > fast_high and ema9 >= ema21)
-        )
-        is_struct_short = (
-            (closed_signal_c["close"] < donchian_low) or
-            (surge_ratio >= fast_surge and closed_signal_c["close"] < fast_low and ema9 <= ema21)
-        )
+        is_struct_long = (sig_cl > donchian_high) and (surge_ratio >= min_rvol)
+        is_struct_short = (sig_cl < donchian_low) and (surge_ratio >= min_rvol)
 
-        # Фаза 2: Пробой флага продолжения ракеты (Bull/Bear Flag Continuation)
-        enable_flag = getattr(config, "ENABLE_FLAG_CONTINUATION", True)
-        is_flag_long = enable_flag and (
-            closed_signal_c["close"] > flag_high_5 and
-            ema9 > ema21 > ema50 and
-            pct_15m >= 0.85 and
-            surge_ratio >= 1.75
-        )
-        is_flag_short = enable_flag and (
-            closed_signal_c["close"] < flag_low_5 and
-            ema9 < ema21 < ema50 and
-            pct_15m <= -0.85 and
-            surge_ratio >= 1.75
-        )
+        is_squeeze_long = (not is_struct_long) and (sq_range_pct <= sq_max_rng) and (sig_cl > sq_high) and (surge_ratio >= max(min_rvol, sq_min_rvol))
+        is_squeeze_short = (not is_struct_short) and (sq_range_pct <= sq_max_rng) and (sig_cl < sq_low) and (surge_ratio >= max(min_rvol, sq_min_rvol))
 
-        # Фаза 3: Живой внутрисвечной перехват ракеты (Live Intra-Bar Ignition — только во 2-й половине свечи >= 180с против ложных фитилей!)
-        enable_live = getattr(config, "ENABLE_LIVE_INTRABAR_IGNITION", True)
-        live_elapsed_sec = max(1.0, (int(time.time() * 1000) - current_live_c["time"]) / 1000.0)
-        live_rvol = round(current_live_c["quote_vol"] / avg_vol, 2) if avg_vol > 0 else 0.0
-        live_rng = max(current_live_c["high"] - current_live_c["low"], 1e-9)
-        live_uw = round((current_live_c["high"] - max(current_live_c["open"], current_price)) / live_rng, 3)
-        live_lw = round((min(current_live_c["open"], current_price) - current_live_c["low"]) / live_rng, 3)
-        live_clv_l = round((current_price - current_live_c["low"]) / live_rng, 3)
-        live_clv_s = round((current_live_c["high"] - current_price) / live_rng, 3)
-        live_pct_5m = round((current_price - closed_signal_c["close"]) / max(closed_signal_c["close"], 1e-9) * 100.0, 2)
-        live_high_12 = max(c["high"] for c in closed_candles[-lookback:])
-        live_low_12 = min(c["low"] for c in closed_candles[-lookback:])
+        # Детектор слива после пампа (Rug-Hunter Short)
+        is_rug_short = False
+        if getattr(config, "ENABLE_RUG_HUNTER_SHORT", True) and not is_struct_short and not is_squeeze_short and len(closed_candles) >= 20:
+            rug_lb = int(getattr(config, "RUG_SUPPORT_BARS", 16))
+            rug_slice = closed_candles[-(rug_lb + 1):-1] if len(closed_candles) > rug_lb else closed_candles[:-1]
+            rug_low_16 = min(c["low"] for c in rug_slice)
+            pump_6h = (donchian_high - donchian_low) / max(donchian_low, 1e-9)
+            off_high_6h = (donchian_high - sig_cl) / max(donchian_high, 1e-9)
+            if (
+                pump_6h >= float(getattr(config, "RUG_PUMP_MIN_PCT", 0.16))
+                and 0.03 <= off_high_6h <= 0.22
+                and sig_cl < rug_low_16
+                and sig_cl < ema50
+                and surge_ratio >= 2.10
+            ):
+                is_rug_short = True
+                is_mtf_short_ok = True  # Слом после пампа идет раньше разворота медленной 12-часовой EMA150!
 
-        is_live_long = (
-            enable_live and not is_struct_long and not is_flag_long and
-            live_elapsed_sec >= 180.0 and
-            current_price > live_high_12 and
-            live_rvol >= 2.10 and
-            live_pct_5m >= max(0.75, atr14_pct * 100.0 * 1.0) and
-            live_clv_l >= 0.78 and live_uw <= 0.18 and
-            current_price > ema9 >= ema21 * 0.998 and
-            current_price >= ema50 * 0.996
-        )
-        is_live_short = (
-            enable_live and not is_struct_short and not is_flag_short and
-            live_elapsed_sec >= 180.0 and
-            current_price < live_low_12 and
-            live_rvol >= 2.10 and
-            live_pct_5m <= -max(0.75, atr14_pct * 100.0 * 1.0) and
-            live_clv_s >= 0.78 and live_lw <= 0.18 and
-            current_price < ema9 <= ema21 * 1.002 and
-            current_price <= ema50 * 1.004
-        )
+        is_breakout_long = is_struct_long or is_squeeze_long
+        is_breakout_short = is_struct_short or is_squeeze_short or is_rug_short
 
-        # Если сработал живой внутрисвечной взрыв (Фаза 3), подставляем метрики активного импульсного бара!
-        if is_live_long or is_live_short:
-            surge_ratio = max(surge_ratio, live_rvol)
-            pct_5m = live_pct_5m
-            close_strength_long = live_clv_l
-            close_strength_short = live_clv_s
-            upper_wick_pct = live_uw
-            lower_wick_pct = live_lw
-            live_drift_long_pct = round(max(0.0, (current_price - live_high_12) / max(live_high_12, 1e-9)), 4)
-            live_drift_short_pct = round(max(0.0, (live_low_12 - current_price) / max(live_low_12, 1e-9)), 4)
-            ema21_ext_pct = round(abs(current_price - ema21) / max(ema21, 1e-9), 4)
-
-        is_breakout_long = is_struct_long or is_flag_long or is_live_long
-        is_breakout_short = is_struct_short or is_flag_short or is_live_short
-
-        if is_live_long or is_live_short:
-            breakout_type = "LIVE_IGNITION"
-        elif is_flag_long or is_flag_short:
-            breakout_type = "FLAG_CONT"
+        if is_rug_short:
+            breakout_type = "RUG_SHORT"
+        elif is_squeeze_long or is_squeeze_short:
+            breakout_type = "SQUEEZE_3H"
         elif is_struct_long or is_struct_short:
-            breakout_type = "STRUCT_12B"
+            breakout_type = "STRUCT_6H"
         else:
             breakout_type = "WATCH"
 
-        target_high_ref = flag_high_5 if (enable_flag and ema9 > ema21 > ema50 and pct_15m >= 0.60) else donchian_high
-        target_low_ref = flag_low_5 if (enable_flag and ema9 < ema21 < ema50 and pct_15m <= -0.60) else donchian_low
-        ref_price_for_dist = current_price if (is_live_long or is_live_short) else closed_signal_c["close"]
+        target_high_ref = sq_high if sq_range_pct <= sq_max_rng else donchian_high
+        target_low_ref = sq_low if sq_range_pct <= sq_max_rng else donchian_low
+        ref_price_for_dist = sig_cl
         dist_to_breakout_long_pct = round(max(0.0, (target_high_ref - ref_price_for_dist) / max(ref_price_for_dist, 1e-9) * 100.0), 2)
         dist_to_breakout_short_pct = round(max(0.0, (ref_price_for_dist - target_low_ref) / max(ref_price_for_dist, 1e-9) * 100.0), 2)
 
-        # УМНЫЙ СТРУКТУРНЫЙ СТОП-ЛОСС (БЕЗ ПОТЕРИ ТОЧНОСТИ НА МЕМАХ И ШИРОКИХ ХВОСТАХ ПРЕДЫДУЩЕГО БАРА):
-        active_sig_c = current_live_c if (is_live_long or is_live_short) else closed_signal_c
+        # УМНЫЙ СТРУКТУРНЫЙ СТОП-ЛОСС (1.60 * ATR14 БУФЕР ЗА ФИТИЛЬ СВЕЧИ):
+        active_sig_c = closed_signal_c
         recent_wick_low = min(prev_closed_c["low"], active_sig_c["low"])
         raw_wick_sl = config.round_price(recent_wick_low * (1.0 - config.WICK_BUFFER_PCT))
         raw_sl_pct = (current_price - raw_wick_sl) / max(current_price, 1e-9)
-        max_allowed_sl = float(getattr(config, "STOP_LOSS_MAX_PCT", 0.0135))
-        min_allowed_sl = float(getattr(config, "STOP_LOSS_MIN_PCT", 0.0055))
+        max_allowed_sl = float(getattr(config, "STOP_LOSS_MAX_PCT", 0.0350))
+        min_allowed_sl = float(getattr(config, "STOP_LOSS_MIN_PCT", 0.0080))
+        sl_atr_mult = float(getattr(config, "SL_ATR_MULT", 1.60))
 
-        if raw_sl_pct > max_allowed_sl:
-            sig_low_sl_pct = (current_price - active_sig_c["low"] * (1.0 - config.WICK_BUFFER_PCT)) / max(current_price, 1e-9)
-            raw_sl_pct = min(raw_sl_pct, max(sig_low_sl_pct, 1.25 * atr14_pct))
-
-        true_long_sl_pct = round(min(max(raw_sl_pct, 1.2 * atr14_pct, min_allowed_sl), max_allowed_sl), 4)
+        true_long_sl_pct = round(min(max(raw_sl_pct, sl_atr_mult * atr14_pct, min_allowed_sl), max_allowed_sl), 4)
         wick_stop_loss = config.round_price(current_price * (1.0 - true_long_sl_pct))
 
         recent_wick_high = max(prev_closed_c["high"], active_sig_c["high"])
         raw_short_sl = config.round_price(recent_wick_high * (1.0 + config.WICK_BUFFER_PCT))
         raw_short_sl_pct = (raw_short_sl - current_price) / max(current_price, 1e-9)
-        if raw_short_sl_pct > max_allowed_sl:
-            sig_high_sl_pct = (active_sig_c["high"] * (1.0 + config.WICK_BUFFER_PCT) - current_price) / max(current_price, 1e-9)
-            raw_short_sl_pct = min(raw_short_sl_pct, max(sig_high_sl_pct, 1.25 * atr14_pct))
 
-        true_short_sl_pct = round(min(max(raw_short_sl_pct, 1.2 * atr14_pct, min_allowed_sl), max_allowed_sl), 4)
+        true_short_sl_pct = round(min(max(raw_short_sl_pct, sl_atr_mult * atr14_pct, min_allowed_sl), max_allowed_sl), 4)
         short_wick_stop_loss = config.round_price(current_price * (1.0 + true_short_sl_pct))
 
-        ref_close_trend = current_price if (is_live_long or is_live_short) else closed_signal_c["close"]
+        ref_close_trend = closed_signal_c["close"]
         if ref_close_trend >= ema9 >= ema21:
             trend = "BULLISH"
         elif ref_close_trend <= ema9 <= ema21:
@@ -572,7 +540,7 @@ class BinanceClient:
             "is_breakout_long": is_breakout_long,
             "is_breakout_short": is_breakout_short,
             "breakout_type": breakout_type,
-            "is_live_ignition": bool(is_live_long or is_live_short),
+            "is_live_ignition": False,
             "close_strength_long": close_strength_long,
             "close_strength_short": close_strength_short,
             "ema21_ext_pct": ema21_ext_pct,
@@ -597,6 +565,10 @@ class BinanceClient:
             "trend_15m": trend_15m,
             "is_mtf_long_ok": is_mtf_long_ok,
             "is_mtf_short_ok": is_mtf_short_ok,
+            "anti_rug_long_ok": anti_rug_long_ok,
+            "anti_rug_short_ok": anti_rug_short_ok,
+            "ext_prev3_pct": ext_prev3_pct,
+            "ret_3h_pct": ret_3h_pct,
             "ema50": ema50,
             "is_macro_trend_long": is_macro_trend_long,
             "is_macro_trend_short": is_macro_trend_short,

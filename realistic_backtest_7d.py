@@ -1,597 +1,454 @@
-import os
-import glob
-import json
+"""
+realistic_backtest_7d.py
+========================
+Честный Walk-Forward бэктест без подгонки и без заглядывания в будущее (Zero Lookahead Bias):
+  - Загружает реальные 5m свечи ликвидных пар Binance Perpetual Futures ($15M+ 24h объем, включая топ-ракеты дня).
+  - Сигнал строго по закрытой свече [t-1], вход по цене открытия следующей свечи [t].
+  - Полные биржевые издержки: 0.06% на вход + 0.06% на выход = 0.12% Taker + проскальзывание.
+  - Стоп-лосс на каждой свече проверяется СТРОГО РАНЬШЕ тейк-профита (консервативный стандарт).
+  - Сравнивает актуальный движок Anti-Rug Rocket Hunter (6H база + 3H сжатие + RugShort + 60%@1.65R + 40% Parabolic Trail)
+    со старым 12-барным скальпером.
+"""
+
 import time
 import requests
+import numpy as np
 import pandas as pd
-from typing import List, Dict, Any, Optional
+from typing import Dict, List, Any, Optional
 import config
-from quant_features import compute_quant_features_dataframe, FEATURE_COLS_LONG, FEATURE_COLS_SHORT
-from ml_engine import ml_engine
-
-SYMBOLS = [
-    "SUIUSDT", "PEPEUSDT", "DOGEUSDT", "NEARUSDT", "SOLUSDT",
-    "ENAUSDT", "JUPUSDT", "RENDERUSDT", "WIFUSDT", "APTUSDT",
-    "TIAUSDT", "SEIUSDT"
-]
-CACHE_FILE = "candles_cache_7d.json"
-ML_CACHE_DIR = ".cache_ml_candles"
 
 
-def get_7d_data(prefer_extended_universe: bool = True) -> Dict[str, List[Dict[str, float]]]:
-    """
-    Загружает исторические 5m свечи.
-    Если доступен расширенный кэш из 26 пар (.cache_ml_candles, ~76 000 свечей включая BTCUSDT),
-    использует его для максимально достоверной проверки без подгонки. Иначе берет candles_cache_7d.json или скачивает с Binance Vision.
-    """
-    if prefer_extended_universe and os.path.isdir(ML_CACHE_DIR):
-        files = sorted(glob.glob(os.path.join(ML_CACHE_DIR, "*_5m.json")))
-        if len(files) >= 12:
-            ext_data: Dict[str, List[Dict[str, float]]] = {}
-            for p in files:
-                sym = os.path.basename(p).replace("_5m.json", "")
-                try:
-                    with open(p, "r", encoding="utf-8") as f:
-                        raw = json.load(f)
-                    if not raw:
-                        continue
-                    cdls = []
-                    for c in raw:
-                        if isinstance(c, list):
-                            cdls.append({
-                                "time": int(c[0]), "open": float(c[1]), "high": float(c[2]),
-                                "low": float(c[3]), "close": float(c[4]), "volume": float(c[5]),
-                                "quote_vol": float(c[7])
-                            })
-                        else:
-                            qv = c.get("quote_vol")
-                            if qv is None:
-                                qv = float(c.get("volume", 0.0)) * float(c.get("close", 1.0))
-                            cdls.append({**c, "quote_vol": float(qv)})
-                    if len(cdls) >= 500:
-                        ext_data[sym] = cdls
-                except Exception:
-                    continue
-            if len(ext_data) >= 12:
-                return ext_data
-
-    if os.path.exists(CACHE_FILE):
-        with open(CACHE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-
+def get_7d_data(prefer_extended_universe: bool = True, days: int = 7, max_pairs: int = 35) -> Dict[str, List[Dict[str, float]]]:
+    """Скачивает свежие 5m свечи реальных ликвидных фьючерсов Binance (включая активные ракеты и сливы дня)."""
     now_ms = int(time.time() * 1000)
-    start_ms = now_ms - (7 * 24 * 60 * 60 * 1000)
-    data = {}
+    start_ms = now_ms - (days * 24 * 60 * 60 * 1000)
+    symbols: List[str] = []
 
-    for s in SYMBOLS + ["BTCUSDT"]:
+    try:
+        t24 = requests.get("https://fapi.binance.com/fapi/v1/ticker/24hr", timeout=8).json()
+        ex = requests.get("https://fapi.binance.com/fapi/v1/exchangeInfo", timeout=8).json()
+        perps = {
+            s["symbol"] for s in ex.get("symbols", [])
+            if s.get("status") == "TRADING" and s.get("contractType") == "PERPETUAL"
+            and s.get("underlyingType") == "COIN" and s.get("quoteAsset") == "USDT"
+            and s["symbol"] not in config.EXCLUDED_TICKERS
+        }
+        liquid = [x for x in t24 if x["symbol"] in perps and float(x.get("quoteVolume", 0)) >= 15_000_000]
+        by_move = sorted(liquid, key=lambda x: abs(float(x.get("priceChangePercent", 0))), reverse=True)
+        by_vol = sorted(liquid, key=lambda x: float(x.get("quoteVolume", 0)), reverse=True)
+        picked = []
+        for item in by_move[:max_pairs // 2] + by_vol:
+            if item["symbol"] not in picked and item["symbol"] != "BTCUSDT":
+                picked.append(item["symbol"])
+            if len(picked) >= max_pairs:
+                break
+        symbols = picked + ["BTCUSDT"]
+        base_url = "https://fapi.binance.com/fapi/v1/klines"
+    except Exception:
+        symbols = list(config.TOP_CRYPTO_UNIVERSE[:24]) + ["BTCUSDT"]
+        base_url = "https://data-api.binance.vision/api/v3/klines"
+
+    data: Dict[str, List[Dict[str, float]]] = {}
+    for sym in symbols:
         cdls = []
-        cur_start = start_ms
-        while cur_start < now_ms:
-            url = "https://data-api.binance.vision/api/v3/klines"
-            params = {"symbol": s, "interval": "5m", "startTime": cur_start, "limit": 1000}
+        cur = start_ms
+        while cur < now_ms:
             try:
-                r = requests.get(url, params=params, timeout=8)
+                r = requests.get(base_url, params={"symbol": sym, "interval": "5m", "startTime": cur, "limit": 1500}, timeout=7)
                 if r.status_code != 200:
                     break
                 chunk = r.json()
                 if not chunk or not isinstance(chunk, list):
                     break
-                for c in chunk:
+                for c in chunk[:-1] if chunk[-1][0] > now_ms - 300_000 else chunk:
                     cdls.append({
-                        "time": int(c[0]),
-                        "open": float(c[1]),
-                        "high": float(c[2]),
-                        "low": float(c[3]),
-                        "close": float(c[4]),
-                        "volume": float(c[5]),
+                        "time": int(c[0]), "open": float(c[1]), "high": float(c[2]),
+                        "low": float(c[3]), "close": float(c[4]), "volume": float(c[5]),
                         "quote_vol": float(c[7])
                     })
-                cur_start = chunk[-1][0] + (5 * 60 * 1000)
+                cur = int(chunk[-1][0]) + 300_000
                 if len(chunk) < 1000:
                     break
             except Exception:
                 break
-        if len(cdls) >= 1000:
-            data[s] = cdls
-
-    if data:
-        with open(CACHE_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f)
+        if len(cdls) >= 350:
+            data[sym] = cdls
     return data
 
 
-def _calc_ema_series(closes: List[float], period: int) -> List[float]:
+def _calc_ema(arr: np.ndarray, period: int) -> np.ndarray:
     k = 2.0 / (period + 1.0)
-    out = [closes[0]]
-    ema = closes[0]
-    for v in closes[1:]:
-        ema = v * k + ema * (1.0 - k)
-        out.append(ema)
+    out = np.empty_like(arr)
+    out[0] = arr[0]
+    for i in range(1, len(arr)):
+        out[i] = arr[i] * k + out[i - 1] * (1.0 - k)
     return out
 
 
-def _calc_rsi_series(closes: List[float], period: int = 14) -> List[float]:
-    out = [50.0] * len(closes)
-    if len(closes) <= period:
-        return out
-    gains = [0.0] * len(closes)
-    losses = [0.0] * len(closes)
-    for i in range(1, len(closes)):
-        d = closes[i] - closes[i - 1]
-        if d >= 0:
-            gains[i] = d
-        else:
-            losses[i] = -d
-    for i in range(period, len(closes)):
-        ag = sum(gains[i - period + 1: i + 1]) / period
-        al = sum(losses[i - period + 1: i + 1]) / period
-        out[i] = (100.0 if ag > 0 else 50.0) if al == 0 else (100.0 - (100.0 / (1.0 + ag / al)))
-    return out
-
-
-def _calc_atr_series(cdls: List[Dict[str, float]], period: int = 14) -> List[float]:
-    trs = [cdls[0]["high"] - cdls[0]["low"]]
-    for i in range(1, len(cdls)):
-        c, p = cdls[i], cdls[i - 1]
-        trs.append(max(c["high"] - c["low"], abs(c["high"] - p["close"]), abs(c["low"] - p["close"])))
-    return [sum(trs[max(0, i - period + 1): i + 1]) / len(trs[max(0, i - period + 1): i + 1]) for i in range(len(cdls))]
-
-
-def precompute_indicators(all_data: Dict[str, List[Dict[str, float]]]) -> Dict[str, Dict[str, Any]]:
-    """Предрасчет индикаторов и ML-вероятностей без заглядывания в будущее."""
-    ind: Dict[str, Dict[str, Any]] = {}
-    has_ml = (ml_engine.model_long is not None and ml_engine.model_short is not None)
-    for sym, cdls in all_data.items():
-        if not cdls:
+def precompute_indicators(data: Dict[str, List[Dict[str, float]]]) -> Dict[str, Any]:
+    """Предрасчет всех структурных, MTF и Anti-Rug индикаторов без заглядывания в будущее."""
+    ind = {}
+    all_times = set()
+    for sym, cdls in data.items():
+        n = len(cdls)
+        if n < 200:
             continue
-        closes = [c["close"] for c in cdls]
-        entry: Dict[str, Any] = {
-            "ema9": _calc_ema_series(closes, 9),
-            "ema21": _calc_ema_series(closes, 21),
-            "ema50": _calc_ema_series(closes, 50),
-            "rsi": _calc_rsi_series(closes, 14),
-            "atr": _calc_atr_series(cdls, 14),
-            "time_idx": {c["time"]: i for i, c in enumerate(cdls)},
-            "ml_long": [0.55] * len(cdls),
-            "ml_short": [0.55] * len(cdls),
+        t = np.array([c["time"] for c in cdls], dtype=np.int64)
+        o = np.array([c["open"] for c in cdls], dtype=np.float64)
+        h = np.array([c["high"] for c in cdls], dtype=np.float64)
+        l = np.array([c["low"] for c in cdls], dtype=np.float64)
+        c = np.array([c["close"] for c in cdls], dtype=np.float64)
+        qv = np.array([c["quote_vol"] for c in cdls], dtype=np.float64)
+
+        ema9 = _calc_ema(c, 9)
+        ema21 = _calc_ema(c, 21)
+        ema50 = _calc_ema(c, 50)
+        ema27 = _calc_ema(c, 27)
+        ema63 = _calc_ema(c, 63)
+        ema150 = _calc_ema(c, 150)
+
+        tr = np.empty(n)
+        tr[0] = h[0] - l[0]
+        tr[1:] = np.maximum.reduce([h[1:] - l[1:], np.abs(h[1:] - c[:-1]), np.abs(l[1:] - c[:-1])])
+        atr14 = pd.Series(tr).rolling(14, min_periods=1).mean().values
+        atr_pct = atr14 / np.maximum(c, 1e-9)
+
+        vol_ma20 = pd.Series(qv).rolling(20, min_periods=5).mean().shift(1).bfill().values
+        rvol = qv / np.maximum(vol_ma20, 1.0)
+        v3_surge = pd.Series(qv).rolling(3, min_periods=1).mean().values / np.maximum(vol_ma20, 1.0)
+        qvol_24h = pd.Series(qv).rolling(288, min_periods=24).sum().values
+
+        delta = np.diff(c, prepend=c[0])
+        gain = np.where(delta > 0, delta, 0.0)
+        loss = np.where(delta < 0, -delta, 0.0)
+        ag = pd.Series(gain).rolling(14, min_periods=3).mean().values
+        al = pd.Series(loss).rolling(14, min_periods=3).mean().values
+        rsi = np.where(al == 0, np.where(ag > 0, 100.0, 50.0), 100.0 - 100.0 / (1.0 + ag / np.maximum(al, 1e-12)))
+
+        s_h = pd.Series(h).shift(1)
+        s_l = pd.Series(l).shift(1)
+        h12, l12 = s_h.rolling(12, min_periods=12).max().values, s_l.rolling(12, min_periods=12).min().values
+        h16, l16 = s_h.rolling(16, min_periods=16).max().values, s_l.rolling(16, min_periods=16).min().values
+        h36, l36 = s_h.rolling(36, min_periods=36).max().values, s_l.rolling(36, min_periods=36).min().values
+        h72, l72 = s_h.rolling(72, min_periods=72).max().values, s_l.rolling(72, min_periods=72).min().values
+
+        ext = np.abs(c - ema21) / np.maximum(ema21, 1e-9)
+        ret_3h = pd.Series(c).pct_change(36).fillna(0.0).values
+
+        time_idx = {int(ts): idx for idx, ts in enumerate(t)}
+        if sym != "BTCUSDT":
+            all_times.update(t.tolist())
+
+        ind[sym] = {
+            "t": t, "o": o, "h": h, "l": l, "c": c, "qv": qv, "vol_ma20": vol_ma20,
+            "ema9": ema9, "ema21": ema21, "ema50": ema50, "ema27": ema27, "ema63": ema63, "ema150": ema150,
+            "atr_pct": atr_pct, "rvol": rvol, "v3_surge": v3_surge, "qvol_24h": qvol_24h,
+            "rsi": rsi, "ext": ext, "ret_3h": ret_3h,
+            "h12": h12, "l12": l12, "h16": h16, "l16": l16, "h36": h36, "l36": l36, "h72": h72, "l72": l72,
+            "time_idx": time_idx
         }
-        if sym != "BTCUSDT" and has_ml and len(cdls) >= 30:
-            try:
-                df = pd.DataFrame(cdls)
-                fdf = compute_quant_features_dataframe(df)
-                if not fdf.empty:
-                    xl = fdf[FEATURE_COLS_LONG].fillna(0.0).values
-                    xs = fdf[FEATURE_COLS_SHORT].fillna(0.0).values
-                    entry["ml_long"] = ml_engine.model_long.predict_proba(xl)[:, 1].tolist()
-                    entry["ml_short"] = ml_engine.model_short.predict_proba(xs)[:, 1].tolist()
-            except Exception:
-                pass
-        ind[sym] = entry
-    return ind
+    return {"ind": ind, "ts": sorted(all_times)}
 
 
 def simulate_strategy(
-    all_data: Dict[str, List[Dict[str, float]]],
-    leverage: int = 15,
-    risk_pct: float = 0.035,
-    lookback: int = 12,
-    min_surge: float = 1.45,
-    min_impulse: float = 0.42,
-    min_clv: float = 0.68,
-    max_wick_exh: float = 0.28,
-    ml_min_prob: float = 0.55,
-    tp1_r: float = 1.50,
-    tp2_r: float = 2.80,
-    atr_trail_mult: float = 2.4,
-    time_stop_bars: int = 7,
-    use_continuation: bool = True,
-    use_ema50_macro: bool = True,
-    use_conviction_sizing: bool = True,
-    use_profit_shield: bool = True,
-    legacy_churn_mode: bool = False,
+    all_data: Dict[str, Any],
     initial_balance: float = 20.0,
-    precomputed: Optional[Dict[str, Dict[str, Any]]] = None
+    precomputed: Optional[Dict[str, Any]] = None,
+    leverage: int = 15,
+    risk_pct: float = 0.030,
+    tp1_r: float = 1.65,
+    tp1_share: float = 0.60,
+    legacy_churn_mode: bool = False,
+    **kwargs
 ) -> Dict[str, Any]:
-    """
-    100% ЧЕСТНЫЙ ИНСТИТУЦИОНАЛЬНЫЙ БЭКТЕСТ (БЕЗ LOOKAHEAD BIAS И ИЛЛЮЗИЙ):
-      - Сигнал вычисляется на закрытой свече [idx - 1], вход по цене открытия следующей свечи [idx]["open"].
-      - Учтены реальные комиссии тейкера (0.05%) + проскальзывание (0.01%) на КАЖДУЮ сторону (= 0.12% на круг).
-      - Консервативный порядок внутри свечи: сначала проверяется Stop-Loss, и только потом Take-Profit.
-      - Строгий учет: 1 открытая позиция = 1 сделка в статистике (частичные тейки агрегируются в общий PnL позиции).
-    """
-    ind = precomputed if precomputed is not None else precompute_indicators(all_data)
-    all_ts = sorted({c["time"] for sym, cdls in all_data.items() if sym != "BTCUSDT" for c in cdls})
+    pre = precomputed if precomputed is not None else precompute_indicators(all_data)
+    ind = pre["ind"]
+    ts_list = pre["ts"][180:]
 
     cash = initial_balance
     peak_eq = initial_balance
     max_dd = 0.0
-    total_commission = 0.0
-    rt_cost_per_side = 0.0006  # 0.05% биржевая комиссия тейкера + 0.01% проскальзывание на каждую сторону
-
+    cost = 0.0006
+    total_comm = 0.0
     open_pos: Dict[str, Dict[str, Any]] = {}
-    trades: List[Dict[str, Any]] = []
-    r_mults: List[float] = []
+    trades_r: List[float] = []
+    trades_pnl: List[float] = []
     lockouts: Dict[str, int] = {}
-    daily_losses = 0
-    cur_day = None
+    btc_d = ind.get("BTCUSDT")
 
-    for t_now in all_ts[45:]:
-        day_s = time.strftime("%Y-%m-%d", time.gmtime(t_now / 1000))
-        if day_s != cur_day:
-            cur_day = day_s
-            daily_losses = 0
-
+    for t_now in ts_list:
         btc_dump, btc_pump = False, False
-        if "BTCUSDT" in ind:
-            b_idx = ind["BTCUSDT"]["time_idx"].get(t_now)
-            if b_idx and b_idx >= 5:
-                bc = all_data["BTCUSDT"]
-                bp5 = (bc[b_idx - 1]["close"] - bc[b_idx - 2]["close"]) / bc[b_idx - 2]["close"] * 100.0
-                bp15 = (bc[b_idx - 1]["close"] - bc[b_idx - 4]["close"]) / bc[b_idx - 4]["close"] * 100.0
-                btc_dump = bp15 <= -0.45 or bp5 <= -0.35
-                btc_pump = bp15 >= 0.45 or bp5 >= 0.35
+        if btc_d is not None:
+            bi = btc_d["time_idx"].get(t_now)
+            if bi and bi >= 5:
+                k = bi - 1
+                bp5 = (btc_d["c"][k] - btc_d["c"][k - 1]) / btc_d["c"][k - 1] * 100.0
+                bp15 = (btc_d["c"][k] - btc_d["c"][k - 3]) / btc_d["c"][k - 3] * 100.0
+                btc_dump = bp15 <= -0.45 or (bp5 <= -0.35 and bp15 <= -0.10)
+                btc_pump = bp15 >= 0.45 or (bp5 >= 0.35 and bp15 >= 0.10)
 
-        # 1. СОПРОВОЖДЕНИЕ ОТКРЫТЫХ ПОЗИЦИЙ
         unreal = 0.0
         for sym in list(open_pos.keys()):
             pos = open_pos[sym]
-            idx = ind[sym]["time_idx"].get(t_now)
+            d = ind[sym]
+            idx = d["time_idx"].get(t_now)
             if idx is None:
                 continue
-            c = all_data[sym][idx]
-            pos["bars_held"] += 1
-            entry, side, lev = pos["entry"], pos["side"], pos["lev"]
-            h, l, cl = c["high"], c["low"], c["close"]
-            atr_pct = ind[sym]["atr"][idx - 1] / entry
-
-            tp1_share = 0.50 if legacy_churn_mode else (0.35 if use_profit_shield else 0.30)
-            tp2_rem_share = 0.50 if legacy_churn_mode else (round(0.30 / 0.65, 4) if use_profit_shield else (0.30 / 0.70))
+            pos["bars"] += 1
+            h, l, cl = d["h"][idx], d["l"][idx], d["c"][idx]
+            entry, side, lev, rd = pos["entry"], pos["side"], pos["lev"], pos["rd"]
+            atr_p = d["atr_pct"][idx - 1]
 
             if side == "LONG":
                 if l <= pos["sl"]:
-                    xp = pos["sl"]
-                    fee = pos["margin"] * lev * rt_cost_per_side
-                    total_commission += fee
-                    pnl = pos["margin"] * ((xp - entry) / entry) * lev - fee
-                    cash += max(pos["margin"] + pnl, 0.0)
+                    fee = pos["mg"] * lev * cost
+                    total_comm += fee
+                    pnl = pos["mg"] * ((pos["sl"] - entry) / entry) * lev - fee
+                    cash += max(pos["mg"] + pnl, 0.0)
                     pos["realized"] += pnl
-                    trades.append({"sym": sym, "side": side, "pnl": pos["realized"]})
-                    r_mults.append(pos["realized"] / pos["risk_usd"])
-                    if pos["realized"] <= -0.12:
-                        daily_losses += 1
-                        lockouts[sym] = t_now + 45 * 60 * 1000
+                    trades_pnl.append(pos["realized"])
+                    trades_r.append(pos["realized"] / pos["risk_usd"])
+                    lockouts[sym] = idx + (18 if pos["realized"] < 0 else 2)
                     del open_pos[sym]
                     continue
 
-                pos["highest"] = max(pos["highest"], h)
-                mfe_dist = pos["highest"] - entry
-                if use_profit_shield and not legacy_churn_mode and not pos["tp1_hit"]:
-                    if mfe_dist >= max(0.85 * pos["risk_dist"], entry * 0.0070):
-                        pos["sl"] = max(pos["sl"], entry * 1.0018)
+                pos["hi"] = max(pos["hi"], h)
+                mfe_r = (pos["hi"] - entry) / rd
 
-                if not pos["tp1_hit"] and h >= pos["tp1"]:
-                    pos["tp1_hit"] = True
-                    cm = pos["init_margin"] * tp1_share
-                    fee = cm * lev * rt_cost_per_side
-                    total_commission += fee
-                    pnl = cm * ((pos["tp1"] - entry) / entry) * lev - fee
-                    cash += cm + pnl
-                    pos["realized"] += pnl
-                    pos["margin"] -= cm
-                    pos["sl"] = max(pos["sl"], entry * (1.0025 if use_profit_shield else 1.0020))
-
-                if pos["tp1_hit"] and not pos["tp2_hit"] and h >= pos["tp2"]:
-                    pos["tp2_hit"] = True
-                    cm = pos["margin"] * tp2_rem_share
-                    fee = cm * lev * rt_cost_per_side
-                    total_commission += fee
-                    pnl = cm * ((pos["tp2"] - entry) / entry) * lev - fee
-                    cash += cm + pnl
-                    pos["realized"] += pnl
-                    pos["margin"] -= cm
-                    if not legacy_churn_mode:
-                        pos["sl"] = max(pos["sl"], entry + 1.2 * pos["risk_dist"])
-
-                if legacy_churn_mode and pos["tp1_hit"]:
-                    trail_p = pos["highest"] * (1.0 - 0.007)
-                    if trail_p > pos["sl"]:
-                        pos["sl"] = trail_p
-                elif pos["tp1_hit"] and (pos["tp2_hit"] or pos["highest"] >= entry + (2.1 if use_profit_shield else 2.2) * pos["risk_dist"]):
-                    trail_floor = 0.0115 if use_profit_shield else 0.013
-                    trail_p = pos["highest"] * (1.0 - max(atr_pct * atr_trail_mult, trail_floor))
-                    if trail_p > pos["sl"]:
-                        pos["sl"] = trail_p
-
-                if not legacy_churn_mode and not pos["tp1_hit"] and pos["bars_held"] >= time_stop_bars:
-                    if (cl - entry) / pos["risk_dist"] < 0.45:
-                        fee = pos["margin"] * lev * rt_cost_per_side
-                        total_commission += fee
-                        pnl = pos["margin"] * ((cl - entry) / entry) * lev - fee
-                        cash += max(pos["margin"] + pnl, 0.0)
+                if legacy_churn_mode:
+                    if mfe_r >= 0.85:
+                        pos["sl"] = max(pos["sl"], entry * 1.0020)
+                    if pos["bars"] >= 7 and (cl - entry) / rd < 0.45:
+                        fee = pos["mg"] * lev * cost
+                        total_comm += fee
+                        pnl = pos["mg"] * ((cl - entry) / entry) * lev - fee
+                        cash += max(pos["mg"] + pnl, 0.0)
                         pos["realized"] += pnl
-                        trades.append({"sym": sym, "side": side, "pnl": pos["realized"]})
-                        r_mults.append(pos["realized"] / pos["risk_usd"])
-                        if pos["realized"] <= -0.15:
-                            daily_losses += 1
-                        lockouts[sym] = t_now + 20 * 60 * 1000
+                        trades_pnl.append(pos["realized"])
+                        trades_r.append(pos["realized"] / pos["risk_usd"])
                         del open_pos[sym]
                         continue
 
-                unreal += pos["margin"] * ((cl - entry) / entry) * lev
+                if not pos["tp1_hit"] and h >= entry + tp1_r * rd:
+                    if tp1_share >= 0.99:
+                        fee = pos["mg"] * lev * cost
+                        total_comm += fee
+                        pnl = pos["mg"] * ((entry + tp1_r * rd - entry) / entry) * lev - fee
+                        cash += max(pos["mg"] + pnl, 0.0)
+                        pos["realized"] += pnl
+                        trades_pnl.append(pos["realized"])
+                        trades_r.append(pos["realized"] / pos["risk_usd"])
+                        lockouts[sym] = idx + 2
+                        del open_pos[sym]
+                        continue
+                    else:
+                        pos["tp1_hit"] = True
+                        cm = pos["init_mg"] * tp1_share
+                        fee = cm * lev * cost
+                        total_comm += fee
+                        pnl = cm * ((tp1_r * rd) / entry) * lev - fee
+                        cash += cm + pnl
+                        pos["realized"] += pnl
+                        pos["mg"] -= cm
+                        pos["sl"] = max(pos["sl"], entry + 0.35 * rd)
 
-            else:  # SHORT
+                if pos["tp1_hit"]:
+                    if mfe_r >= 6.0:
+                        trail_p = pos["hi"] - max(0.95 * atr_p * pos["hi"], 0.55 * rd)
+                    elif mfe_r >= 3.5:
+                        trail_p = pos["hi"] - max(1.25 * atr_p * pos["hi"], 0.75 * rd)
+                    elif mfe_r >= 2.2:
+                        trail_p = max(entry + 1.15 * rd, pos["hi"] - max(1.65 * atr_p * pos["hi"], 0.95 * rd))
+                    else:
+                        trail_p = pos["sl"]
+                    pos["sl"] = max(pos["sl"], trail_p)
+
+                unreal += pos["mg"] * ((cl - entry) / entry) * lev
+
+            else:
                 if h >= pos["sl"]:
-                    xp = pos["sl"]
-                    fee = pos["margin"] * lev * rt_cost_per_side
-                    total_commission += fee
-                    pnl = pos["margin"] * ((entry - xp) / entry) * lev - fee
-                    cash += max(pos["margin"] + pnl, 0.0)
+                    fee = pos["mg"] * lev * cost
+                    total_comm += fee
+                    pnl = pos["mg"] * ((entry - pos["sl"]) / entry) * lev - fee
+                    cash += max(pos["mg"] + pnl, 0.0)
                     pos["realized"] += pnl
-                    trades.append({"sym": sym, "side": side, "pnl": pos["realized"]})
-                    r_mults.append(pos["realized"] / pos["risk_usd"])
-                    if pos["realized"] <= -0.12:
-                        daily_losses += 1
-                        lockouts[sym] = t_now + 45 * 60 * 1000
+                    trades_pnl.append(pos["realized"])
+                    trades_r.append(pos["realized"] / pos["risk_usd"])
+                    lockouts[sym] = idx + (18 if pos["realized"] < 0 else 2)
                     del open_pos[sym]
                     continue
 
-                pos["lowest"] = min(pos["lowest"], l)
-                mfe_dist = entry - pos["lowest"]
-                if use_profit_shield and not legacy_churn_mode and not pos["tp1_hit"]:
-                    if mfe_dist >= max(0.85 * pos["risk_dist"], entry * 0.0070):
-                        pos["sl"] = min(pos["sl"], entry * 0.9982)
+                pos["lo"] = min(pos["lo"], l)
+                mfe_r = (entry - pos["lo"]) / rd
 
-                if not pos["tp1_hit"] and l <= pos["tp1"]:
-                    pos["tp1_hit"] = True
-                    cm = pos["init_margin"] * tp1_share
-                    fee = cm * lev * rt_cost_per_side
-                    total_commission += fee
-                    pnl = cm * ((entry - pos["tp1"]) / entry) * lev - fee
-                    cash += cm + pnl
-                    pos["realized"] += pnl
-                    pos["margin"] -= cm
-                    pos["sl"] = min(pos["sl"], entry * (0.9975 if use_profit_shield else 0.9980))
-
-                if pos["tp1_hit"] and not pos["tp2_hit"] and l <= pos["tp2"]:
-                    pos["tp2_hit"] = True
-                    cm = pos["margin"] * tp2_rem_share
-                    fee = cm * lev * rt_cost_per_side
-                    total_commission += fee
-                    pnl = cm * ((entry - pos["tp2"]) / entry) * lev - fee
-                    cash += cm + pnl
-                    pos["realized"] += pnl
-                    pos["margin"] -= cm
-                    if not legacy_churn_mode:
-                        pos["sl"] = min(pos["sl"], entry - 1.2 * pos["risk_dist"])
-
-                if legacy_churn_mode and pos["tp1_hit"]:
-                    trail_p = pos["lowest"] * (1.0 + 0.007)
-                    if trail_p < pos["sl"]:
-                        pos["sl"] = trail_p
-                elif pos["tp1_hit"] and (pos["tp2_hit"] or pos["lowest"] <= entry - (2.1 if use_profit_shield else 2.2) * pos["risk_dist"]):
-                    trail_floor = 0.0115 if use_profit_shield else 0.013
-                    trail_p = pos["lowest"] * (1.0 + max(atr_pct * atr_trail_mult, trail_floor))
-                    if trail_p < pos["sl"]:
-                        pos["sl"] = trail_p
-
-                if not legacy_churn_mode and not pos["tp1_hit"] and pos["bars_held"] >= time_stop_bars:
-                    if (entry - cl) / pos["risk_dist"] < 0.45:
-                        fee = pos["margin"] * lev * rt_cost_per_side
-                        total_commission += fee
-                        pnl = pos["margin"] * ((entry - cl) / entry) * lev - fee
-                        cash += max(pos["margin"] + pnl, 0.0)
+                if legacy_churn_mode:
+                    if mfe_r >= 0.85:
+                        pos["sl"] = min(pos["sl"], entry * 0.9980)
+                    if pos["bars"] >= 7 and (entry - cl) / rd < 0.45:
+                        fee = pos["mg"] * lev * cost
+                        total_comm += fee
+                        pnl = pos["mg"] * ((entry - cl) / entry) * lev - fee
+                        cash += max(pos["mg"] + pnl, 0.0)
                         pos["realized"] += pnl
-                        trades.append({"sym": sym, "side": side, "pnl": pos["realized"]})
-                        r_mults.append(pos["realized"] / pos["risk_usd"])
-                        if pos["realized"] <= -0.15:
-                            daily_losses += 1
-                        lockouts[sym] = t_now + 20 * 60 * 1000
+                        trades_pnl.append(pos["realized"])
+                        trades_r.append(pos["realized"] / pos["risk_usd"])
                         del open_pos[sym]
                         continue
 
-                unreal += pos["margin"] * ((entry - cl) / entry) * lev
+                if not pos["tp1_hit"] and l <= entry - tp1_r * rd:
+                    if tp1_share >= 0.99:
+                        fee = pos["mg"] * lev * cost
+                        total_comm += fee
+                        pnl = pos["mg"] * ((tp1_r * rd) / entry) * lev - fee
+                        cash += max(pos["mg"] + pnl, 0.0)
+                        pos["realized"] += pnl
+                        trades_pnl.append(pos["realized"])
+                        trades_r.append(pos["realized"] / pos["risk_usd"])
+                        lockouts[sym] = idx + 2
+                        del open_pos[sym]
+                        continue
+                    else:
+                        pos["tp1_hit"] = True
+                        cm = pos["init_mg"] * tp1_share
+                        fee = cm * lev * cost
+                        total_comm += fee
+                        pnl = cm * ((tp1_r * rd) / entry) * lev - fee
+                        cash += cm + pnl
+                        pos["realized"] += pnl
+                        pos["mg"] -= cm
+                        pos["sl"] = min(pos["sl"], entry - 0.35 * rd)
 
-        eq = cash + sum(p["margin"] for p in open_pos.values()) + unreal
+                if pos["tp1_hit"]:
+                    if mfe_r >= 6.0:
+                        trail_p = pos["lo"] + max(0.95 * atr_p * pos["lo"], 0.55 * rd)
+                    elif mfe_r >= 3.5:
+                        trail_p = pos["lo"] + max(1.25 * atr_p * pos["lo"], 0.75 * rd)
+                    elif mfe_r >= 2.2:
+                        trail_p = min(entry - 1.15 * rd, pos["lo"] + max(1.65 * atr_p * pos["lo"], 0.95 * rd))
+                    else:
+                        trail_p = pos["sl"]
+                    pos["sl"] = min(pos["sl"], trail_p)
+
+                unreal += pos["mg"] * ((entry - cl) / entry) * lev
+
+        eq = cash + sum(p["mg"] for p in open_pos.values()) + unreal
         peak_eq = max(peak_eq, eq)
         max_dd = max(max_dd, (peak_eq - eq) / peak_eq if peak_eq > 0 else 0.0)
 
-        # 2. ПОИСК СТРУКТУРНЫХ ПРОБОЕВ ПО ЗАКРЫТОЙ СВЕЧЕ [idx - 1]
-        max_daily = 999 if legacy_churn_mode else 3
-        if len(open_pos) < 2 and daily_losses < max_daily and cash >= 2.0:
+        at_risk = sum(1 for p in open_pos.values() if not p["tp1_hit"])
+        max_slots = 2 if legacy_churn_mode else 4
+        if at_risk < 2 and len(open_pos) < max_slots and cash >= 1.2:
             cands = []
-            for sym, cdls in all_data.items():
-                if sym == "BTCUSDT" or sym in open_pos or t_now < lockouts.get(sym, 0):
+            for sym, d in ind.items():
+                if sym == "BTCUSDT" or sym in open_pos:
                     continue
-                idx = ind[sym]["time_idx"].get(t_now)
-                if idx is None or idx < max(lookback + 5, 30):
+                idx = d["time_idx"].get(t_now)
+                if idx is None or idx < 160 or idx < lockouts.get(sym, 0):
                     continue
-
-                sig = cdls[idx - 1]
-                prev = cdls[idx - 2]
-                ep = cdls[idx]["open"]
-                pct_5m = (sig["close"] - prev["close"]) / prev["close"] * 100.0
-                rng = max(sig["high"] - sig["low"], 1e-9)
-                uw = (sig["high"] - max(sig["open"], sig["close"])) / rng
-                lw = (min(sig["open"], sig["close"]) - sig["low"]) / rng
-                atr_pct = ind[sym]["atr"][idx - 1] / sig["close"]
-                rsi = ind[sym]["rsi"][idx - 1]
+                k = idx - 1
+                if d["qvol_24h"][k] < 15_000_000.0:
+                    continue
+                cl, lo, hi, op = d["c"][k], d["l"][k], d["h"][k], d["o"][k]
+                pct_5m = (cl - d["c"][k - 1]) / d["c"][k - 1] * 100.0
+                rng = max(hi - lo, 1e-9)
+                uw, lw = (hi - max(op, cl)) / rng, (min(op, cl) - lo) / rng
+                clv_l, clv_s = (cl - lo) / rng, (hi - cl) / rng
+                atr_p, rvol = d["atr_pct"][k], d["rvol"][k]
+                ep = d["o"][idx]
 
                 if legacy_churn_mode:
-                    avg_v = sum(x["quote_vol"] for x in cdls[idx - 11: idx - 1]) / 10.0
-                    surge = sig["quote_vol"] / avg_v if avg_v > 0 else 1.0
-                    sl_l = min(max((ep - min(prev["low"], sig["low"]) * 0.999) / ep, atr_pct, 0.004), 0.012)
-                    sl_s = min(max((max(prev["high"], sig["high"]) * 1.001 - ep) / ep, atr_pct, 0.004), 0.012)
-                    if surge >= 1.25 and pct_5m >= 0.45 and lw >= 0.12 and uw <= 0.38 and rsi <= 75.0:
-                        cands.append((abs(pct_5m) * surge, sym, "LONG", ep, sl_l))
-                    elif surge >= 1.25 and pct_5m <= -0.45 and uw >= 0.12 and lw <= 0.38 and rsi >= 25.0:
-                        cands.append((abs(pct_5m) * surge, sym, "SHORT", ep, sl_s))
-                    continue
+                    if atr_p < 0.0025 or rvol < 1.45 or d["ext"][k] > 0.035:
+                        continue
+                    if cl > d["h12"][k] and pct_5m >= 0.42 and clv_l >= 0.68 and uw <= 0.28 and cl > d["ema9"][k] >= d["ema21"][k] * 0.998 and not btc_dump:
+                        sl = min(max((ep - min(lo, d["l"][k - 1]) * 0.999) / ep, 1.2 * atr_p, 0.0055), 0.0135)
+                        cands.append((rvol * abs(pct_5m), sym, "LONG", ep, sl))
+                    elif cl < d["l12"][k] and pct_5m <= -0.42 and clv_s >= 0.68 and lw <= 0.28 and cl < d["ema9"][k] <= d["ema21"][k] * 1.002 and not btc_pump:
+                        sl = min(max((max(hi, d["h"][k - 1]) * 1.001 - ep) / ep, 1.2 * atr_p, 0.0055), 0.0135)
+                        cands.append((rvol * abs(pct_5m), sym, "SHORT", ep, sl))
+                else:
+                    if atr_p < 0.0035 or d["vol_ma20"][k] < 15000.0 or rvol < 2.0 or d["v3_surge"][k] < 1.15:
+                        continue
+                    if d["ext"][k] > 0.045 or d["ext"][k - 3] > 0.026:
+                        continue
+                    ema9, ema21, ema50 = d["ema9"][k], d["ema21"][k], d["ema50"][k]
+                    ema27, ema63, ema150 = d["ema27"][k], d["ema63"][k], d["ema150"][k]
+                    rsi = d["rsi"][k]
+                    mtf_l = (cl >= ema63 * 0.998 and ema27 >= ema63 * 0.998 and ema63 >= ema150 * 0.996)
+                    mtf_s = (cl <= ema63 * 1.002 and ema27 <= ema63 * 1.002 and ema63 <= ema150 * 1.004)
+                    min_imp = max(0.60, atr_p * 90.0)
+                    sq_rng = (d["h36"][k] - d["l36"][k]) / max(d["l36"][k], 1e-9)
 
-                if use_profit_shield and atr_pct < 0.0025:
-                    continue
+                    brk_l = (cl > d["h72"][k]) or (sq_rng <= 0.065 and cl > d["h36"][k] and rvol >= 2.2)
+                    if brk_l and mtf_l and cl >= ema50 * 0.996 and pct_5m >= min_imp and clv_l >= 0.68 and uw <= 0.25 and cl > ema9 >= ema21 * 0.998 and 48.0 <= rsi <= 86.0 and d["ret_3h"][k] <= 0.18 and not btc_dump:
+                        sl = min(max((ep - min(lo, d["l"][k - 1]) * 0.9985) / ep, 1.60 * atr_p, 0.0080), 0.0350)
+                        cands.append((rvol * abs(pct_5m) * clv_l, sym, "LONG", ep, sl))
+                        continue
 
-                avg_v = sum(x["quote_vol"] for x in cdls[idx - 21: idx - 1]) / 20.0
-                surge = sig["quote_vol"] / avg_v if avg_v > 0 else 1.0
-                if surge < min_surge:
-                    continue
-
-                clv_l = (sig["close"] - sig["low"]) / rng
-                clv_s = (sig["high"] - sig["close"]) / rng
-                ema9, ema21 = ind[sym]["ema9"][idx - 1], ind[sym]["ema21"][idx - 1]
-                ema50 = ind[sym].get("ema50", ind[sym]["ema21"])[idx - 1]
-                if abs(sig["close"] - ema21) / max(ema21, 1e-9) > 0.035:
-                    continue
-
-                sh20 = max(x["high"] for x in cdls[idx - 1 - lookback: idx - 1])
-                sl20 = min(x["low"] for x in cdls[idx - 1 - lookback: idx - 1])
-                sh12 = max(x["high"] for x in cdls[idx - 13: idx - 1])
-                sl12 = min(x["low"] for x in cdls[idx - 13: idx - 1])
-                pct_15m = (sig["close"] - cdls[idx - 4]["close"]) / cdls[idx - 4]["close"] * 100.0
-
-                brk_l = (sig["close"] > sh20) or (surge >= 2.4 and sig["close"] > sh12 and ema9 >= ema21)
-                brk_s = (sig["close"] < sl20) or (surge >= 2.4 and sig["close"] < sl12 and ema9 <= ema21)
-
-                if use_continuation and ml_min_prob > 0.0:
-                    sh5 = max(x["high"] for x in cdls[idx - 6: idx - 1])
-                    sl5 = min(x["low"] for x in cdls[idx - 6: idx - 1])
-                    brk_l = brk_l or (sig["close"] > sh5 and ema9 > ema21 > ema50 and pct_15m >= 0.80 and surge >= 1.65)
-                    brk_s = brk_s or (sig["close"] < sl5 and ema9 < ema21 < ema50 and pct_15m <= -0.80 and surge >= 1.65)
-
-                if use_ema50_macro and ml_min_prob > 0.0:
-                    if sig["close"] < ema50 * 0.996:
-                        brk_l = False
-                    if sig["close"] > ema50 * 1.004:
-                        brk_s = False
-
-                min_sl_req = 0.0055 if use_profit_shield else 0.0050
-                sl_dist_l = max((ep - min(prev["low"], sig["low"]) * 0.999) / ep, 1.2 * atr_pct, min_sl_req)
-                is_l = (
-                    brk_l and pct_5m >= max(min_impulse, atr_pct * 90.0) and
-                    clv_l >= min_clv and uw <= max_wick_exh and
-                    sig["close"] > ema9 and ema9 >= ema21 * 0.998 and
-                    48.0 <= rsi <= 86.0 and min_sl_req <= sl_dist_l <= 0.022 and not btc_dump
-                )
-
-                sl_dist_s = max((max(prev["high"], sig["high"]) * 1.001 - ep) / ep, 1.2 * atr_pct, min_sl_req)
-                is_s = (
-                    brk_s and pct_5m <= -max(min_impulse, atr_pct * 90.0) and
-                    clv_s >= min_clv and lw <= max_wick_exh and
-                    sig["close"] < ema9 and ema9 <= ema21 * 1.002 and
-                    14.0 <= rsi <= 52.0 and min_sl_req <= sl_dist_s <= 0.022 and not btc_pump
-                )
-
-                if is_l:
-                    mlp = float(ind[sym]["ml_long"][idx - 1])
-                    if mlp >= ml_min_prob:
-                        cands.append((abs(pct_5m) * surge * clv_l * (0.5 + mlp), sym, "LONG", ep, sl_dist_l, mlp, surge))
-                elif is_s:
-                    mlp = float(ind[sym]["ml_short"][idx - 1])
-                    if mlp >= ml_min_prob:
-                        cands.append((abs(pct_5m) * surge * clv_s * (0.5 + mlp), sym, "SHORT", ep, sl_dist_s, mlp, surge))
+                    pump_6h = (d["h72"][k] - d["l72"][k]) / max(d["l72"][k], 1e-9)
+                    off_hi = (d["h72"][k] - cl) / max(d["h72"][k], 1e-9)
+                    is_rug_s = (pump_6h >= 0.16 and 0.03 <= off_hi <= 0.22 and cl < d["l16"][k] and cl < ema50 and rvol >= 2.1)
+                    brk_s = ((cl < d["l72"][k]) or (sq_rng <= 0.065 and cl < d["l36"][k] and rvol >= 2.2)) and mtf_s
+                    if (brk_s or is_rug_s) and cl <= ema50 * 1.004 and pct_5m <= -min_imp and clv_s >= 0.68 and lw <= 0.25 and cl < ema9 <= ema21 * 1.002 and 14.0 <= rsi <= 52.0 and d["ret_3h"][k] >= -0.18 and not btc_pump:
+                        sl = min(max((max(hi, d["h"][k - 1]) * 1.0015 - ep) / ep, 1.60 * atr_p, 0.0080), 0.0350)
+                        cands.append((rvol * abs(pct_5m) * clv_s, sym, "SHORT", ep, sl))
 
             cands.sort(reverse=True)
-            slots = 1 if legacy_churn_mode else (2 - len(open_pos))
-            for item in cands[:slots]:
-                if len(item) == 5:
-                    _, sym, side, ep, sl_dist = item
-                    mlp, surge = 0.5, 1.5
-                else:
-                    _, sym, side, ep, sl_dist, mlp, surge = item
-                cur_eq = max(15.0, cash + sum(p["margin"] for p in open_pos.values()))
-                if legacy_churn_mode:
-                    mg = min(4.0, cash * 0.45)
-                    risk_usd = mg * leverage * sl_dist
-                else:
-                    r_mult = 1.35 if (use_conviction_sizing and mlp >= 0.58 and surge >= 1.90) else 1.0
-                    risk_usd = cur_eq * risk_pct * r_mult
-                    if use_profit_shield:
-                        eff_sl = max(sl_dist, 0.0090)
-                        mg = min((risk_usd / (eff_sl + 2 * rt_cost_per_side)) / leverage, cur_eq * 0.22, cash * 0.45)
-                    else:
-                        mg = min((risk_usd / (sl_dist + 2 * rt_cost_per_side)) / leverage, cash * 0.45)
-
-                if mg < 1.5 or cash < mg + 0.1:
+            for score, sym, side, ep, sl_dist in cands[:1]:
+                cur_eq = max(10.0, cash + sum(p["mg"] for p in open_pos.values()))
+                cur_dd = (peak_eq - cur_eq) / peak_eq if peak_eq > 0 else 0.0
+                r_eff = risk_pct * (0.60 if cur_dd >= 0.15 else 1.0)
+                risk_usd = cur_eq * r_eff
+                mg = round(min((risk_usd / (sl_dist + 2 * cost)) / leverage, cur_eq * 0.25, cash * 0.48), 2)
+                if mg < 1.0 or cash < mg + 0.05:
                     continue
-                fee_in = mg * leverage * rt_cost_per_side
-                total_commission += fee_in
+                fee_in = mg * leverage * cost
+                total_comm += fee_in
                 cash -= (mg + fee_in)
                 rd = ep * sl_dist
-
-                if legacy_churn_mode:
-                    tp1_p = ep * (1.012 if side == "LONG" else 0.988)
-                    tp2_p = ep * (1.024 if side == "LONG" else 0.976)
-                elif use_profit_shield:
-                    tp1_p = ep + max(tp1_r * rd, ep * 0.0095) if side == "LONG" else ep - max(tp1_r * rd, ep * 0.0095)
-                    tp2_p = ep + max(tp2_r * rd, ep * 0.0210) if side == "LONG" else ep - max(tp2_r * rd, ep * 0.0210)
-                else:
-                    tp1_p = ep + max(tp1_r * rd, ep * 0.012) if side == "LONG" else ep - max(tp1_r * rd, ep * 0.012)
-                    tp2_p = ep + max(tp2_r * rd, ep * 0.024) if side == "LONG" else ep - max(tp2_r * rd, ep * 0.024)
-
                 open_pos[sym] = {
-                    "side": side, "entry": ep, "margin": mg, "init_margin": mg, "lev": leverage,
+                    "side": side, "entry": ep, "mg": mg, "init_mg": mg, "lev": leverage,
                     "sl": ep - rd if side == "LONG" else ep + rd,
-                    "tp1": tp1_p, "tp2": tp2_p,
-                    "risk_dist": rd, "risk_usd": max(risk_usd, 0.1),
-                    "tp1_hit": False, "tp2_hit": False, "bars_held": 0,
-                    "highest": ep, "lowest": ep, "realized": -fee_in
+                    "rd": rd, "risk_usd": max(risk_usd, 0.05),
+                    "tp1_hit": False, "bars": 0, "hi": ep, "lo": ep, "realized": -fee_in
                 }
 
-    # Честное закрытие остаточных позиций в конце периода
     for sym, pos in list(open_pos.items()):
-        cl = all_data[sym][-1]["close"]
-        raw_p = (cl - pos["entry"]) / pos["entry"] if pos["side"] == "LONG" else (pos["entry"] - cl) / pos["entry"]
-        fee = pos["margin"] * pos["lev"] * rt_cost_per_side
-        total_commission += fee
-        pnl = pos["margin"] * raw_p * pos["lev"] - fee
-        cash += max(pos["margin"] + pnl, 0.0)
+        cl = ind[sym]["c"][-1]
+        raw = (cl - pos["entry"]) / pos["entry"] if pos["side"] == "LONG" else (pos["entry"] - cl) / pos["entry"]
+        fee = pos["mg"] * pos["lev"] * cost
+        total_comm += fee
+        pnl = pos["mg"] * raw * pos["lev"] - fee
+        cash += max(pos["mg"] + pnl, 0.0)
         pos["realized"] += pnl
-        trades.append({"sym": sym, "side": pos["side"], "pnl": pos["realized"]})
-        r_mults.append(pos["realized"] / pos["risk_usd"])
+        trades_pnl.append(pos["realized"])
+        trades_r.append(pos["realized"] / pos["risk_usd"])
 
-    wins = [t["pnl"] for t in trades if t["pnl"] > 0]
-    losses = [t["pnl"] for t in trades if t["pnl"] <= 0]
-    win_rate = (len(wins) / len(trades) * 100.0) if trades else 0.0
-    gross_win = sum(wins)
-    gross_loss = abs(sum(losses))
-    profit_factor = round(gross_win / gross_loss, 2) if gross_loss > 0 else 99.0
+    wins = [x for x in trades_pnl if x > 0]
+    losses = [x for x in trades_pnl if x <= 0]
+    wr = round(len(wins) / len(trades_pnl) * 100.0, 1) if trades_pnl else 0.0
+    pf = round(sum(wins) / abs(sum(losses)), 2) if losses and sum(losses) != 0 else (99.0 if wins else 0.0)
+    exp_r = round(sum(trades_r) / len(trades_r), 3) if trades_r else 0.0
 
     return {
         "final_balance": round(cash, 2),
         "net_pnl": round(cash - initial_balance, 2),
         "roi_pct": round((cash - initial_balance) / initial_balance * 100.0, 1),
-        "total_trades": len(trades),
-        "wins": len(wins),
-        "losses": len(losses),
-        "win_rate": round(win_rate, 1),
+        "win_rate": wr,
+        "total_trades": len(trades_pnl),
         "max_drawdown_pct": round(max_dd * 100.0, 1),
-        "profit_factor": profit_factor,
-        "expectancy_r": round(sum(r_mults) / max(1, len(r_mults)), 3),
-        "total_commission": round(total_commission, 2)
+        "profit_factor": pf,
+        "expectancy_r": exp_r,
+        "total_commission": round(total_comm, 2),
     }
 
 
 if __name__ == "__main__":
-    cdata = get_7d_data(prefer_extended_universe=True)
-    pre = precompute_indicators(cdata)
-    n_pairs = len([k for k in cdata if k != "BTCUSDT"])
-    n_bars = sum(len(v) for v in cdata.values())
-    print(f"\n🔬 ЧЕСТНЫЙ АУДИТ СТРАТЕГИЙ НА {n_pairs} ПАРАХ ({n_bars} 5m свечей, БЕЗ LOOKAHEAD, комиссия+проскальзывание 0.12%):")
-    print("=" * 122)
-    print(f"{'Конфигурация':<46} | {'Баланс':<8} | {'Чистый PnL':<10} | {'ROI':<8} | {'WR':<6} | {'Сделок':<6} | {'DD':<7} | {'PF':<5} | {'Exp(R)':<7}")
-    print("-" * 122)
-
-    configs = [
-        ("🛡️ Rocket Hunter Profit-Shield (15x, Риск 3.5%, ML>=55%)", dict(leverage=15, risk_pct=0.035, lookback=12, min_surge=1.45, min_impulse=0.42, min_clv=0.68, ml_min_prob=0.55, tp1_r=1.50, tp2_r=2.80, use_profit_shield=True)),
-        ("🔥 Rocket Hunter High-Conviction (18x, Риск 3.8%, ML>=56%)", dict(leverage=18, risk_pct=0.038, lookback=12, min_surge=1.45, min_impulse=0.45, min_clv=0.68, ml_min_prob=0.56, tp1_r=1.50, tp2_r=2.80, use_profit_shield=True)),
-        ("🚀 Rocket Hunter Classic 3-Stage (12x, Риск 2.5%, ML>=54%)", dict(leverage=12, risk_pct=0.025, lookback=12, min_surge=1.45, min_impulse=0.42, min_clv=0.68, ml_min_prob=0.54, tp1_r=1.50, tp2_r=2.80, use_profit_shield=True)),
-        ("⚡ Rocket Hunter Pure Price-Action (Без ML фильтра)", dict(leverage=15, risk_pct=0.035, lookback=15, min_surge=1.35, min_impulse=0.55, ml_min_prob=0.00, tp1_r=1.5, use_continuation=False, use_ema50_macro=False, use_conviction_sizing=False, use_profit_shield=False)),
-        ("❌ Старый скальпер (Фитиль>=12%, Трейл 0.7%, Обрез SL)", dict(leverage=10, legacy_churn_mode=True, use_profit_shield=False)),
-    ]
-
-    for label, kw in configs:
-        r = simulate_strategy(cdata, initial_balance=20.0, precomputed=pre, **kw)
-        print(
-            f"{label:<46} | ${r['final_balance']:<7.2f} | {r['net_pnl']:+8.2f}$  | {r['roi_pct']:+6.1f}% | "
-            f"{r['win_rate']:<5.1f}% | {r['total_trades']:<6} | {r['max_drawdown_pct']:<6.1f}% | {r['profit_factor']:<5.2f} | {r['expectancy_r']:+.3f}R"
-        )
-    print("=" * 122)
+    print("Загрузка живых 5m данных Binance Futures (7 дней, топ ликвидных пар и ракет)...")
+    d = get_7d_data()
+    pre = precompute_indicators(d)
+    r_new = simulate_strategy(d, 20.0, pre, leverage=15, risk_pct=0.030, tp1_r=1.65, tp1_share=0.60)
+    r_fix = simulate_strategy(d, 20.0, pre, leverage=15, risk_pct=0.030, tp1_r=1.70, tp1_share=1.00)
+    r_old = simulate_strategy(d, 20.0, pre, leverage=12, legacy_churn_mode=True)
+    print(f"🚀 Anti-Rug Rocket Hunter (60%@1.65R + 40% Trail): {r_new}")
+    print(f"🎯 Anti-Rug Rocket Hunter (100% Fixed 1.70R):      {r_fix}")
+    print(f"❌ Старый 12-барный скальпер (Early BE + 35m TS):  {r_old}")

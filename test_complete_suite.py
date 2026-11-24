@@ -62,8 +62,8 @@ async def run_suite():
     assert sol_analysis is not None and "is_breakout_long" in sol_analysis and "close_strength_long" in sol_analysis
     print(f"  ✓ Радар отобрал {len(tickers)} ликвидных пар; структурный разбор SOLUSDT корректен (CLV={sol_analysis['close_strength_long']})")
 
-    # 3. ТЕСТ АСИММЕТРИЧНОГО ВЫХОДА (45% / 30% / 25% RUNNER) И ЧЕСТНОГО УЧЕТА 1 ПОЗИЦИЯ = 1 СДЕЛКА
-    print("\n[ТЕСТ 3/6] Проверка выхода 45%/30%/25% и консолидации 1 позиции в 1 сделку...")
+    # 3. ТЕСТ ANTI-RUG ROCKET HARVEST (60% В КЭШ НА 1.65R + 40% БЕЗРИСКОВЫЙ MOONBAG + СВОБОДНЫЙ СЛОТ)
+    print("\n[ТЕСТ 3/7] Проверка Anti-Rug выхода (60% на 1.65R + 40% Parabolic Trail + безрисковый слот)...")
     portfolio.open_positions.clear()
     portfolio.trade_history.clear()
     portfolio.symbol_lockouts.clear()
@@ -72,36 +72,40 @@ async def run_suite():
     portfolio.pause_until = 0.0
     portfolio.cash = 20.0
 
-    # Вход $10.0, SL $9.88 (-1.2%), маржа $3.80, плечо 12x -> при открытии Equity ОБЯЗАН оставаться $20.00!
     opened = portfolio.open_position(
-        symbol="PEPEUSDT", side="LONG", entry_price=10.0, size_usdt=3.80,
-        wick_sl=9.88, tp1=10.18, tp2=10.36, groq_reason="Rocket Breakout Test",
-        leverage=12, atr_pct=0.006, risk_usd=0.50
+        symbol="GUAUSDT", side="LONG", entry_price=10.0, size_usdt=4.00,
+        wick_sl=9.88, tp1=10.198, tp2=10.72, groq_reason="Anti-Rug Rocket Test",
+        leverage=15, atr_pct=0.008, risk_usd=0.60
     )
     assert opened
     summary_open = portfolio.get_portfolio_summary()
     assert abs(summary_open["equity"] - 20.0) < 0.01, f"Equity при открытии должен быть $20.00, а не ${summary_open['equity']}"
+    assert int(getattr(config, "TIME_STOP_MINUTES", 0)) == 0, "Time-Stop по умолчанию должен быть 0 (отключен)!"
     print(f"  ✓ Позиция открыта: Cash=${summary_open['cash']:.2f}, Залог=${summary_open['locked_margin']:.2f}, Equity=${summary_open['equity']:.2f}")
 
-    # Шаг 1: TP1 (+1.8% = 1.5R) -> закрываем 30%
-    portfolio.close_position("PEPEUSDT", 10.18, "🎯 TP1 1.5R: 30% в кэш", partial_pct=config.TP1_PARTIAL_PCT)
-    assert len(portfolio.trade_history) == 0, "Частичный тейк НЕ должен раздувать историю сделок до закрытия позиции!"
-    assert "PEPEUSDT" in portfolio.open_positions
+    # Шаг 1: TP1 (+1.65R) -> мгновенно забираем 60% прибыли в кэш ДО возможного слива и запираем стоп остатка в +0.35R!
+    portfolio.open_positions["GUAUSDT"]["tp1_hit"] = True
+    portfolio.open_positions["GUAUSDT"]["wick_sl"] = 10.042
+    portfolio.open_positions["GUAUSDT"]["breakeven_set"] = True
+    portfolio.close_position("GUAUSDT", 10.198, f"🎯 TP1 {config.TARGET_1_R}R: 60% в кэш", partial_pct=config.TP1_PARTIAL_PCT)
+    assert "GUAUSDT" in portfolio.open_positions, "40% Moonbag должен остаться в рынке для ловли большой ракеты!"
+    assert len(portfolio.trade_history) == 0, "Частичный тейк не должен дробить сделку в статистике!"
 
-    # Шаг 2: TP2 (+3.6% = 3.0R) -> закрываем еще 25% от исходной, оставляя 50% ранера
-    portfolio.close_position("PEPEUSDT", 10.36, "🎯 TP2 3.0R: еще 25% в кэш", partial_pct=config.TP2_PARTIAL_OF_REMAINING)
-    assert len(portfolio.trade_history) == 0
-    rem_mg = portfolio.open_positions["PEPEUSDT"]["margin_usdt"]
-    expected_runner_mg = 3.80 * (1.0 - config.TP1_PARTIAL_PCT - (1.0 - config.TP1_PARTIAL_PCT) * config.TP2_PARTIAL_OF_REMAINING)
-    assert abs(rem_mg - expected_runner_mg) < 0.05, f"Доля ранера должна быть ${expected_runner_mg:.2f}, получено ${rem_mg:.2f}"
+    # Проверяем, что безрисковый Moonbag (tp1_hit=True) НЕ блокирует открытие 2 новых активных ракет!
+    assert portfolio.open_position("LISTAUSDT", "LONG", 1.0, 3.0, 0.985, 1.025, 1.09, "Wave 1", 15)
+    assert portfolio.open_position("EVAAUSDT", "SHORT", 2.0, 3.0, 2.03, 1.95, 1.82, "Rug Short", 15)
+    print("  ✓ Безрисковый 40% Moonbag не блокирует слоты: успешно открыты 2 новые ракеты параллельно!")
+    portfolio.close_position("LISTAUSDT", 1.0, "Cleanup", partial_pct=1.0)
+    portfolio.close_position("EVAAUSDT", 2.0, "Cleanup", partial_pct=1.0)
+    portfolio.trade_history.clear()
 
-    # Шаг 3: Ранер ловит ракету +7.5% ($10.75) и закрывается по ATR-трейлингу!
-    portfolio.close_position("PEPEUSDT", 10.75, "🚀 ATR Runner Trail", partial_pct=1.0)
-    assert "PEPEUSDT" not in portfolio.open_positions
-    assert len(portfolio.trade_history) == 1, "Вся позиция (TP1+TP2+Runner) должна записаться ровно как 1 сделка!"
+    # Шаг 2: Ракета взлетает на +12% ($11.20) и закрывается по плотному Anti-Rug Parabolic Trail до слива!
+    portfolio.close_position("GUAUSDT", 11.20, "🚀 Anti-Rug Rocket Trail", partial_pct=1.0)
+    assert "GUAUSDT" not in portfolio.open_positions
+    assert len(portfolio.trade_history) == 1, "Вся позиция (60% TP1 + 40% Ранер) обязана записаться ровно как 1 сделка!"
     rec = portfolio.trade_history[0]
-    print(f"  ✓ Ракета закрыта 1 единой сделкой: PnL ${rec['realized_pnl']:+.2f} ({rec['roi_pct']:+.1f}%) | {rec['reason']}")
-    assert portfolio.cash > 21.5, f"Баланс должен существенно вырасти на ракете, получено ${portfolio.cash:.2f}"
+    print(f"  ✓ Большая ракета схвачена до слива 1 сделкой: PnL ${rec['realized_pnl']:+.2f} ({rec['roi_pct']:+.1f}%) | {rec['reason']}")
+    assert portfolio.cash > 23.0, f"Баланс должен мощно вырасти на большой ракете, получено ${portfolio.cash:.2f}"
 
     # 4. ТЕСТ TIME-STOP БЕЗ ЛОЖНОЙ БЛОКИРОВКИ CIRCUIT BREAKER
     print("\n[ТЕСТ 4/6] Проверка мягкого Time-Stop (не замораживает бота на околонулевом выходе)...")

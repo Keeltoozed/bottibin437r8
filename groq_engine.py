@@ -97,32 +97,35 @@ class GroqEngine:
             ml_prob_val = ml_res.get("ml_probability", 0.5)
         ml_prob_str = f"Quant ML Win Prob: {int(ml_prob_val * 100)}%"
 
+        max_ext_ui = getattr(config, "MAX_EMA21_EXTENSION_PCT", 0.045) * 100.0
+        brk_label = context.get("breakout_type", "STRUCT_6H")
+
         if cand_side == "LONG":
             clv_pct = context.get("close_strength_long", 0.75) * 100.0
             sl_price = context.get("wick_stop_loss", cur_p * 0.99)
             sl_dist = context.get("sl_pct_distance", 0.01) * 100.0
-            prompt = f"""Evaluate Structural Momentum Breakout LONG for {symbol} on Binance Futures ({lev}x leverage, fixed 2.5% equity risk).
-Metrics: Price ${cur_p}, Confirmed 20-bar Range Breakout: YES, 5m RVOL: {vol_surge}x, Close Strength (CLV): {clv_pct:.0f}%, 5m Impulse: {p5m:+.2f}%, 15m: {p15m:+.2f}%, EMA21 Extension: {ema21_ext:.2f}%, RSI14: {rsi_val}, Trend: {trend_val}, Upper/Lower Wick: {u_wick:.1f}%/{l_wick:.1f}%, ATR14: {atr_pct:.2f}%, Structural SL: ${sl_price} ({sl_dist:.2f}%), BTC: {btc_reg}.
+            prompt = f"""Evaluate Structural Momentum Breakout LONG ({brk_label}) for {symbol} on Binance Futures ({lev}x leverage, fixed 3.0% equity risk).
+Metrics: Price ${cur_p}, Confirmed Multi-Hour Base Breakout ({brk_label}): YES, 5m RVOL: {vol_surge}x, Close Strength (CLV): {clv_pct:.0f}%, 5m Impulse: {p5m:+.2f}%, 15m: {p15m:+.2f}%, EMA21 Extension: {ema21_ext:.2f}%, RSI14: {rsi_val}, Trend: {trend_val}, Upper/Lower Wick: {u_wick:.1f}%/{l_wick:.1f}%, ATR14: {atr_pct:.2f}%, Structural SL: ${sl_price} ({sl_dist:.2f}%), BTC: {btc_reg}.
 Quant & Memory: {ml_prob_str} | {token_mem}
 Prop-Desk Rules:
-1. Fresh volume breakouts (RVOL >= 1.8x, CLV >= 68%) naturally print RSI 70-85 on ignition — DO NOT reject for RSI <= 86!
-2. Approve ("BUY", confidence 0.70-0.92) when volume expansion is strong, upper wick <= 28%, and EMA21 extension <= 3.5%.
-3. Reject ("SKIP") ONLY if obvious Bull Trap (upper wick > 28%), extreme late climax (RSI > 86 or EMA21 extension > 3.5%), or BTC is dumping.
+1. Fresh multi-hour breakouts (RVOL >= 2.0x, CLV >= 68%) naturally print RSI 70-85 on ignition — DO NOT reject for RSI <= 86!
+2. Approve ("BUY", confidence 0.75-0.94) when volume expansion is strong, upper wick <= 25%, and EMA21 extension <= {max_ext_ui:.1f}%.
+3. Reject ("SKIP") ONLY if obvious Bull Trap (upper wick > 25%), extreme late climax (RSI > 86 or EMA21 extension > {max_ext_ui:.1f}%), or BTC is dumping.
 Return ONLY valid JSON matching exact keys:
-{{"trap_risk": false, "decision": "BUY", "confidence": 0.78, "reason": "Concise 1-sentence prop-trader thesis in Russian"}}"""
+{{"trap_risk": false, "decision": "BUY", "confidence": 0.82, "reason": "Concise 1-sentence prop-trader thesis in Russian"}}"""
         else:
             clv_pct = context.get("close_strength_short", 0.75) * 100.0
             sl_price = context.get("short_wick_stop_loss", cur_p * 1.01)
             sl_dist = context.get("short_sl_pct_distance", 0.01) * 100.0
-            prompt = f"""Evaluate Structural Momentum Breakdown SHORT for {symbol} on Binance Futures ({lev}x leverage, fixed 2.5% equity risk).
-Metrics: Price ${cur_p}, Confirmed 20-bar Range Breakdown: YES, 5m RVOL: {vol_surge}x, Bear Close Strength: {clv_pct:.0f}%, 5m Impulse: {p5m:+.2f}%, 15m: {p15m:+.2f}%, EMA21 Extension: {ema21_ext:.2f}%, RSI14: {rsi_val}, Trend: {trend_val}, Upper/Lower Wick: {u_wick:.1f}%/{l_wick:.1f}%, ATR14: {atr_pct:.2f}%, Structural SL: ${sl_price} ({sl_dist:.2f}%), BTC: {btc_reg}.
+            prompt = f"""Evaluate Structural / Rug-Hunter Breakdown SHORT ({brk_label}) for {symbol} on Binance Futures ({lev}x leverage, fixed 3.0% equity risk).
+Metrics: Price ${cur_p}, Confirmed Breakdown ({brk_label}): YES, 5m RVOL: {vol_surge}x, Bear Close Strength: {clv_pct:.0f}%, 5m Impulse: {p5m:+.2f}%, 15m: {p15m:+.2f}%, EMA21 Extension: {ema21_ext:.2f}%, RSI14: {rsi_val}, Trend: {trend_val}, Upper/Lower Wick: {u_wick:.1f}%/{l_wick:.1f}%, ATR14: {atr_pct:.2f}%, Structural SL: ${sl_price} ({sl_dist:.2f}%), BTC: {btc_reg}.
 Quant & Memory: {ml_prob_str} | {token_mem}
 Prop-Desk Rules:
-1. Fresh breakdowns (RVOL >= 1.8x, Bear Close Strength >= 68%) naturally print RSI 15-30 on ignition — DO NOT reject for RSI >= 14!
-2. Approve ("SHORT", confidence 0.70-0.92) when breakdown volume is real, lower wick <= 28%, and EMA21 extension <= 3.5%.
-3. Reject ("SKIP") ONLY if obvious Bear Trap absorption (lower wick > 28%), extreme late exhaustion (RSI < 14 or EMA21 extension > 3.5%), or BTC is pumping.
+1. Fresh breakdowns & post-pump rug dumps (RVOL >= 2.0x, Bear Close Strength >= 68%) naturally print RSI 15-30 on ignition — DO NOT reject for RSI >= 14!
+2. Approve ("SHORT", confidence 0.75-0.94) when breakdown volume is real, lower wick <= 25%, and EMA21 extension <= {max_ext_ui:.1f}%.
+3. Reject ("SKIP") ONLY if obvious Bear Trap absorption (lower wick > 25%), extreme late exhaustion (RSI < 14 or EMA21 extension > {max_ext_ui:.1f}%), or BTC is pumping.
 Return ONLY valid JSON matching exact keys:
-{{"trap_risk": false, "decision": "SHORT", "confidence": 0.78, "reason": "Concise 1-sentence prop-trader thesis in Russian"}}"""
+{{"trap_risk": false, "decision": "SHORT", "confidence": 0.82, "reason": "Concise 1-sentence prop-trader thesis in Russian"}}"""
 
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -195,14 +198,14 @@ Return ONLY valid JSON matching exact keys:
         clv_val = context.get("close_strength_long", 0.7) if cand_side == "LONG" else context.get("close_strength_short", 0.7)
         wick_val = context.get("upper_wick_pct", 0.1) if cand_side == "LONG" else context.get("lower_wick_pct", 0.1)
 
-        # A+ Quant Rocket Override: если квантовая модель ML (>= 58%), объем RVOL (>= 1.85x) и свеча закрылась мощно без тени истощения,
-        # не позволяем перестраховке LLM упустить подтвержденную ракету!
+        # A+ Structural Rocket Override: если кандидат прошел строгий 6H/3H/Rug пробой + 15m MTF + Anti-Rug фильтр
+        # с мощным объемом RVOL >= 2.10x и чистым закрытием CLV >= 72% (фитиль <= 22%), не даем перестраховке LLM упустить ракету!
         if (
             eval_result.get("decision") != expected_decision and
-            float(ml_prob_val or 0.5) >= 0.58 and
-            float(vol_surge) >= 1.85 and
+            float(vol_surge) >= 2.10 and
             float(clv_val) >= 0.72 and
             float(wick_val) <= 0.22 and
+            float(context.get("ema21_ext_pct", 0)) <= config.MAX_EMA21_EXTENSION_PCT and
             float(context.get(sl_key, 0)) <= config.MAX_ALLOWED_SL_PCT
         ):
             eval_result["decision"] = expected_decision
