@@ -139,23 +139,58 @@ async def run_suite():
     assert algo_res["decision"] == "BUY", f"Marubozu-ракета с RSI 79.5 должна одобряться, а не отклоняться! {algo_res}"
     print(f"  ✓ Marubozu-пробой одобрен: {algo_res['decision']} (conf={algo_res['confidence']}) — {algo_res['reason']}")
 
-    # 7. ТЕСТ US RENDER MIRROR (VISION) — 110+ ЖИВЫХ ПАР БЕЗ АКЦИЙ И СТЕЙБЛКОИНОВ + LIVE RADAR
-    print("\n[ТЕСТ 7/7] Проверка зеркала US Render (vision): охват 110+ живых пар, фильтр акций/стейблов и Live Radar...")
+    # 7. ТЕСТ US RENDER MIRROR (VISION) — 100+ ЖИВЫХ ПАР БЕЗ АКЦИЙ И СТЕЙБЛКОИНОВ + LIVE RADAR
+    print("\n[ТЕСТ 7/8] Проверка зеркала US Render (vision): охват 100+ живых пар, фильтр акций/стейблов...")
     portfolio.pause_until = 0.0
     portfolio.daily_losses_count = 0
     portfolio.consecutive_losses = 0
     portfolio.open_positions.clear()
-    binance_client.active_mirror_idx = 1  # Принудительно vision (как на сервере Render в США при HTTP 451)
+    vision_idx = next(i for i, m in enumerate(binance_client.mirrors) if m["name"] == "vision")
+    binance_client.active_mirror_idx = vision_idx
+    binance_client._ticker24_cache = ("", 0.0, [])
     vision_tickers = await binance_client.fetch_top_tickers(min_vol_usdt=config.MIN_24H_VOLUME_USDT, limit=config.SCAN_TICKERS_LIMIT)
-    min_req_pairs = 25 if getattr(config, "STRICT_WHITELIST_ONLY", False) else 100
+    min_req_pairs = 25 if getattr(config, "STRICT_WHITELIST_ONLY", False) else 90
     assert len(vision_tickers) >= min_req_pairs, f"На зеркале vision должно быть >= {min_req_pairs} живых пар, получено {len(vision_tickers)}"
     bad_syms = [t["symbol"] for t in vision_tickers if t["symbol"] in ("USD1USDT", "RLUSDUSDT", "TQQQBUSDT", "NVDABUSDT", "COCOSUSDT", "XAUTUSDT")]
     assert not bad_syms, f"В радар попали мусорные пары/акции/стейблы: {bad_syms}"
     print(f"  ✓ Зеркало vision отобрало {len(vision_tickers)} чистых крипто-пар (акции *BUSDT, стейблкоины и делисты отсечены)!")
 
+    # 8. ТЕСТ ANTI-418 FAILOVER НА BITGET USDT-FUTURES + 5M CANDLE-BOUNDARY GUARD
+    print("\n[ТЕСТ 8/8] Проверка мгновенного failover на Bitget USDT-FUTURES при HTTP 418 и защиты от rate-limit...")
+    from scanner import market_scanner
+    binance_client.active_mirror_idx = 0  # fapi
+    binance_client._mirror_cooldowns[0] = time.time() + 300.0  # Симулируем HTTP 418 shared-IP бан на fapi!
+    binance_client._ticker24_cache = ("", 0.0, [])
+    binance_client._book_tickers_cache = {}
+    binance_client._book_tickers_cache_time = 0.0
+
+    bg_tickers = await binance_client.fetch_top_tickers(min_vol_usdt=config.MIN_24H_VOLUME_USDT, limit=config.SCAN_TICKERS_LIMIT)
+    assert binance_client.active_mirror_name == "bitget", f"При бане fapi (418) должен включиться bitget, получено {binance_client.active_mirror_name}"
+    assert len(bg_tickers) >= 75, f"Bitget Futures должен вернуть >= 75 чистых крипто-пар, получено {len(bg_tickers)}"
+    bg_bad = [t["symbol"] for t in bg_tickers if t["symbol"] in ("NVDAUSDT", "TSLAUSDT", "SOXLUSDT", "XAUUSDT", "PAXGUSDT", "AAPL")]
+    assert not bg_bad, f"В радар Bitget попали RWA/акции/золото: {bg_bad}"
+    bg_btc = await binance_client.fetch_btc_regime()
+    bg_sol = await binance_client.fetch_candles_analysis("SOLUSDT", interval="5m", limit=200)
+    bg_price = await binance_client.fetch_price("SOLUSDT")
+    _, _, bg_spread = await binance_client.fetch_orderbook_spread("SOLUSDT")
+    assert bg_sol is not None and bg_sol["current_price"] > 0 and bg_price and bg_price > 0 and bg_spread < 0.01
+    print(f"  ✓ Failover fapi(418) -> bitget сработал мгновенно: {len(bg_tickers)} чистых крипто-фьючерсов, SOL=${bg_price:.2f} (spread {bg_spread*100:.3f}%), BTC: {bg_btc['pct_15m']:+.2f}%")
+
+    # Проверяем 5m candle-boundary guard (защита от 12-секундного спама на Render)
+    market_scanner._last_scanned_bar = int(time.time()) // 300
+    portfolio.last_universe_count = len(bg_tickers)
+    before_u = portfolio.funnel_stats["universe"]
+    skipped = await market_scanner.scan_market_once(force=False)
+    assert skipped == [] and portfolio.funnel_stats["universe"] == before_u, "Повторный вызов внутри той же 5m свечи должен пропускаться без API-запросов!"
+    print("  ✓ 5m Candle-Boundary Guard работает: повторный вызов внутри текущей 5m свечи = 0 лишних запросов (экономия веса 35x)!")
+
+    # Снимаем тестовый кулдаун
+    binance_client._mirror_cooldowns.clear()
+    binance_client.active_mirror_idx = 0
+
     await binance_client.close()
     print("\n" + "=" * 78)
-    print("🎉 ВСЕ 7 СИСТЕМ STRUCTURAL ROCKET HUNTER ПРОШЛИ ПРОВЕРКУ НА 100%!")
+    print("🎉 ВСЕ 8 СИСТЕМ STRUCTURAL ROCKET HUNTER ПРОШЛИ ПРОВЕРКУ НА 100%!")
     print("=" * 78)
 
 

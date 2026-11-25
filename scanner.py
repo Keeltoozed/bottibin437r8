@@ -31,12 +31,25 @@ class MarketScanner:
         self.is_running = False
         self.cooldowns: Dict[str, float] = {}
         self._last_log_time = 0.0
+        self._last_scanned_bar: int = 0
+        self._last_mirror_used: str = ""
 
-    async def scan_market_once(self) -> List[Dict[str, Any]]:
-        """Один параллельный проход сканирования рынка."""
+    async def scan_market_once(self, force: bool = False) -> List[Dict[str, Any]]:
+        """Один параллельный проход сканирования рынка строго на закрытии 5m свечи (защита от HTTP 418/429)."""
         now = time.time()
         now_str = time.strftime("%H:%M:%S")
         portfolio.last_scan_str = now_str
+
+        # УМНАЯ ЗАЩИТА ОТ ЛИМИТОВ API (35x ЭКОНОМИЯ ВЕСА НА RENDER):
+        # Стратегия работает строго по закрытым 5-минутным свечам!
+        # Полный скан 80-100 пар запускается 1 раз в начале каждой новой 5m свечи (через 3с после закрытия бара),
+        # а не 25 раз подряд за те же 5 минут — полностью исключает HTTP 418/429 бан на Render!
+        cur_bar = int(now) // 300
+        sec_into_bar = now % 300.0
+        if not force and self._last_scanned_bar == cur_bar and portfolio.last_universe_count > 0:
+            return []
+        if not force and self._last_scanned_bar > 0 and sec_into_bar < 3.0:
+            return []
 
         pause_until = getattr(portfolio, "pause_until", 0.0)
         if getattr(config, "ENABLE_CIRCUIT_BREAKER", False):
@@ -59,7 +72,7 @@ class MarketScanner:
         btc_regime = await binance_client.fetch_btc_regime()
         portfolio.btc_regime_str = btc_regime.get("status_str", "")
 
-        # 1. UNIVERSE: Широкий радар пробоев (до 115-120 ликвидных пар как на fapi, так и на vision)
+        # 1. UNIVERSE: Широкий радар пробоев (до 115-150 ликвидных пар на fapi / bitget / vision)
         tickers = await binance_client.fetch_top_tickers(
             min_vol_usdt=config.MIN_24H_VOLUME_USDT,
             limit=config.SCAN_TICKERS_LIMIT
@@ -67,14 +80,20 @@ class MarketScanner:
         portfolio.last_universe_count = len(tickers)
         portfolio.funnel_stats["universe"] += len(tickers)
 
-        should_log = (now - self._last_log_time) >= 60.0
+        should_log = force or (now - self._last_log_time) >= 60.0
         if should_log:
             self._last_log_time = now
 
+        if not tickers:
+            if should_log:
+                print(f"⚠️ [ROCKET RADAR] {now_str} [{binance_client.active_mirror_name}] — Нет ответа от биржи, повтор через {config.SCAN_INTERVAL_SECONDS}с...", flush=True)
+            return []
+
         # Если ticker24 еще не заполнил кеш стакана (например на fapi), подгружаем bookTickers одним запросом
-        if not binance_client._book_tickers_cache or (time.time() - binance_client._book_tickers_cache_time) >= 5.0:
+        if not binance_client._book_tickers_cache or (time.time() - binance_client._book_tickers_cache_time) >= 30.0:
             await binance_client.fetch_all_book_tickers()
-        sem = asyncio.Semaphore(16)
+        # Мягкий параллелизм (6 потоков вместо 16) полностью исключает burst-лимиты Binance/Bitget на Render!
+        sem = asyncio.Semaphore(6)
 
         async def check_ticker(t: Dict[str, Any]) -> Any:
             sym = t["symbol"]
@@ -130,11 +149,23 @@ class MarketScanner:
                 min_atr_pct = float(getattr(config, "MIN_ATR_PCT", 0.0025))
                 avg_5m_qvol = float(analysis.get("avg_5m_quote_vol", 0.0) or 0.0)
                 v3_surge = float(analysis.get("v3_surge", 1.0) or 1.0)
-                # КРИТИЧЕСКИЙ ФИКС RENDER (VISION SPOT MIRROR): спотовый 5m объем в 10-20 раз меньше фьючерсного (особенно до старта ракеты вроде MANTRA)!
-                is_spot_mirror = (binance_client.active_mirror_name != "fapi")
-                min_avg_vol = float(getattr(config, "SPOT_MIRROR_MIN_AVG_5M_VOL", 600.0)) if is_spot_mirror else float(getattr(config, "MIN_AVG_5M_QUOTE_VOL", 15000.0))
+                # Адаптация порога 5m объема под активное зеркало:
+                # fapi ($15K/5m), bitget ($2K/5m + >=$5K пробойная свеча), vision/spot ($600/5m + >=$2.5K пробойная свеча).
+                is_spot_mirror = binance_client.is_spot_mirror
+                is_bitget_mirror = (binance_client.active_mirror_name == "bitget")
+                if is_spot_mirror:
+                    min_avg_vol = float(getattr(config, "SPOT_MIRROR_MIN_AVG_5M_VOL", 600.0))
+                elif is_bitget_mirror:
+                    min_avg_vol = float(getattr(config, "BITGET_MIRROR_MIN_AVG_5M_VOL", 2000.0))
+                else:
+                    min_avg_vol = float(getattr(config, "MIN_AVG_5M_QUOTE_VOL", 15000.0))
                 last_5m_qvol = float(analysis.get("last_quote_volume", 0.0) or 0.0)
-                vol_floor_ok = (avg_5m_qvol >= min_avg_vol) and ((not is_spot_mirror) or (last_5m_qvol >= 2500.0))
+                if is_spot_mirror:
+                    vol_floor_ok = (avg_5m_qvol >= min_avg_vol) and (last_5m_qvol >= 2500.0)
+                elif is_bitget_mirror:
+                    vol_floor_ok = (avg_5m_qvol >= min_avg_vol) and (last_5m_qvol >= 5000.0)
+                else:
+                    vol_floor_ok = (avg_5m_qvol >= min_avg_vol)
                 min_v3 = float(getattr(config, "MIN_V3_VOLUME_PERSISTENCE", 1.10))
                 is_mtf_long = analysis.get("is_mtf_long_ok", False) if getattr(config, "ENABLE_MTF_15M_FILTER", True) else True
                 is_mtf_short = analysis.get("is_mtf_short_ok", False) if getattr(config, "ENABLE_MTF_15M_FILTER", True) else True
@@ -301,6 +332,11 @@ class MarketScanner:
         all_scored = [r["data"] for r in results if isinstance(r, dict) and r.get("kind") == "candidate"]
         watch_pool = [r["data"] for r in results if isinstance(r, dict) and r.get("kind") == "watch"]
         portfolio.funnel_stats["hard_gates"] += len(all_scored)
+
+        # Помечаем текущую 5m свечу как отсканированную ТОЛЬКО если реально получены свечи (иначе ретрай на резервном зеркале!)
+        if all_scored or watch_pool:
+            self._last_scanned_bar = cur_bar
+            self._last_mirror_used = binance_client.active_mirror_name
 
         all_scored.sort(key=lambda x: x.get("score", 0.0), reverse=True)
         watch_pool.sort(key=lambda x: x.get("watch_activity", 0.0), reverse=True)

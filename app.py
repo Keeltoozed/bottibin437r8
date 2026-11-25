@@ -162,7 +162,7 @@ with st.sidebar:
         with st.spinner("Сканирование рынка Binance Futures..."):
             try:
                 loop = asyncio.new_event_loop()
-                loop.run_until_complete(market_scanner.scan_market_once())
+                loop.run_until_complete(market_scanner.scan_market_once(force=True))
                 loop.close()
                 st.success("Сканирование завершено!")
             except Exception as e:

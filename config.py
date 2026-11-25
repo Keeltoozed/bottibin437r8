@@ -133,11 +133,13 @@ TAKER_FEE_PCT = float(os.getenv("TAKER_FEE_PCT", "0.0006"))
 # 6. MARKET SCANNER & DYNAMIC LIQUID FUTURES UNIVERSE ($15M+ 24H VOL — БЕЗ ШОР)
 # ==============================================================================
 MIN_24H_VOLUME_USDT = float(os.getenv("MIN_24H_VOLUME_USDT", "15000000"))                 # От $15M USDT на fapi
-SPOT_MIRROR_MIN_VOL_USDT = float(os.getenv("SPOT_MIRROR_MIN_VOL_USDT", "1200000"))        # $1.2M Spot USDT на vision (Render)
+BITGET_MIRROR_MIN_VOL_USDT = float(os.getenv("BITGET_MIRROR_MIN_VOL_USDT", "1000000"))    # $1.0M+ чистых крипто-фьючерсов на Bitget (резерв при HTTP 418 на Render)
+SPOT_MIRROR_MIN_VOL_USDT = float(os.getenv("SPOT_MIRROR_MIN_VOL_USDT", "1200000"))        # $1.2M Spot USDT на vision (резерв)
 SCAN_TICKERS_LIMIT = min(int(os.getenv("SCAN_TICKERS_LIMIT", "150")), 200)                # Проверяем все ликвидные пары целиком
 MIN_24H_TRADES_COUNT = int(os.getenv("MIN_24H_TRADES_COUNT", "3500"))
 SPOT_MIRROR_MIN_TRADES = int(os.getenv("SPOT_MIRROR_MIN_TRADES", "1200"))                 # Адаптация числа сделок под Spot vision
 MIN_AVG_5M_QUOTE_VOL = float(os.getenv("MIN_AVG_5M_QUOTE_VOL", "15000.0"))                # $15K/5m свеча на фьючерсах fapi
+BITGET_MIRROR_MIN_AVG_5M_VOL = float(os.getenv("BITGET_MIRROR_MIN_AVG_5M_VOL", "2000.0")) # $2K/5m база (и >= $5K пробойная свеча) на Bitget Futures
 SPOT_MIRROR_MIN_AVG_5M_VOL = float(os.getenv("SPOT_MIRROR_MIN_AVG_5M_VOL", "600.0"))      # $600/5m база (и >= $2500 пробойная свеча) на Spot vision — ловит MANTRA (+111%) на старте!
 MIN_V3_VOLUME_PERSISTENCE = float(os.getenv("MIN_V3_VOLUME_PERSISTENCE", "1.10"))         # Кумулятивный приток объема за 3 свечи >= 1.10x
 ENABLE_MTF_15M_FILTER = os.getenv("ENABLE_MTF_15M_FILTER", "true").lower() == "true"      # Строгая 15m лента EMA9 > EMA21 > EMA50
