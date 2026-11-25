@@ -177,15 +177,18 @@ def simulate_strategy(
     btc_d = ind.get("BTCUSDT")
 
     for t_now in ts_list:
-        btc_dump, btc_pump = False, False
+        btc_dump = btc_pump = btc_flush = btc_spike = False
+        bp5 = bp15 = 0.0
         if btc_d is not None:
             bi = btc_d["time_idx"].get(t_now)
             if bi and bi >= 5:
                 k = bi - 1
                 bp5 = (btc_d["c"][k] - btc_d["c"][k - 1]) / btc_d["c"][k - 1] * 100.0
                 bp15 = (btc_d["c"][k] - btc_d["c"][k - 3]) / btc_d["c"][k - 3] * 100.0
-                btc_dump = bp15 <= -0.45 or (bp5 <= -0.35 and bp15 <= -0.10)
-                btc_pump = bp15 >= 0.45 or (bp5 >= 0.35 and bp15 >= 0.10)
+                btc_dump = bp15 <= -0.55 or bp5 <= -0.40
+                btc_pump = bp15 >= 0.55 or bp5 >= 0.40
+                btc_flush = bp5 <= -0.38 or bp15 <= -0.75
+                btc_spike = bp5 >= 0.38 or bp15 >= 0.75
 
         unreal = 0.0
         for sym in list(open_pos.keys()):
@@ -366,40 +369,53 @@ def simulate_strategy(
                         sl = min(max((max(hi, d["h"][k - 1]) * 1.001 - ep) / ep, 1.2 * atr_p, 0.0055), 0.0135)
                         cands.append((rvol * abs(pct_5m), sym, "SHORT", ep, sl))
                 else:
-                    if atr_p < 0.0035 or d["vol_ma20"][k] < 15000.0 or rvol < 2.0 or d["v3_surge"][k] < 1.15:
+                    if atr_p < 0.0025 or d["vol_ma20"][k] < 15000.0 or rvol < 1.80 or d["v3_surge"][k] < 1.10:
                         continue
-                    if d["ext"][k] > 0.045 or d["ext"][k - 3] > 0.026:
+                    if d["ext"][k] > 0.048 or d["ext"][k - 3] > 0.028:
                         continue
                     ema9, ema21, ema50 = d["ema9"][k], d["ema21"][k], d["ema50"][k]
                     ema27, ema63, ema150 = d["ema27"][k], d["ema63"][k], d["ema150"][k]
                     rsi = d["rsi"][k]
-                    mtf_l = (cl >= ema63 * 0.998 and ema27 >= ema63 * 0.998 and ema63 >= ema150 * 0.996)
-                    mtf_s = (cl <= ema63 * 1.002 and ema27 <= ema63 * 1.002 and ema63 <= ema150 * 1.004)
-                    min_imp = max(0.60, atr_p * 90.0)
-                    sq_rng = (d["h36"][k] - d["l36"][k]) / max(d["l36"][k], 1e-9)
+                    pct_15m = (cl - d["c"][k - 3]) / d["c"][k - 3] * 100.0
+                    alpha_5m = pct_5m - bp5
+                    alpha_15m = pct_15m - bp15
+                    mtf_l = (cl >= ema63 * 0.998 and ema27 >= ema63 * 0.998 and ema63 >= ema150 * 0.995)
+                    mtf_s = (cl <= ema63 * 1.002 and ema27 <= ema63 * 1.002 and ema63 <= ema150 * 1.005)
+                    min_imp = max(0.55, atr_p * 85.0)
+                    sq_rng = (d["h16"][k] - d["l16"][k]) / max(d["l16"][k], 1e-9)
 
-                    brk_l = (cl > d["h72"][k]) or (sq_rng <= 0.065 and cl > d["h36"][k] and rvol >= 2.2)
-                    if brk_l and mtf_l and cl >= ema50 * 0.996 and pct_5m >= min_imp and clv_l >= 0.68 and uw <= 0.25 and cl > ema9 >= ema21 * 0.998 and 48.0 <= rsi <= 86.0 and d["ret_3h"][k] <= 0.18 and not btc_dump:
-                        sl = min(max((ep - min(lo, d["l"][k - 1]) * 0.9985) / ep, 1.60 * atr_p, 0.0080), 0.0350)
-                        cands.append((rvol * abs(pct_5m) * clv_l, sym, "LONG", ep, sl))
+                    brk_l = (cl > d["h36"][k]) or (sq_rng <= 0.065 and cl > d["h16"][k] and rvol >= 2.0)
+                    if (
+                        brk_l and mtf_l and cl >= ema50 * 0.996 and pct_5m >= min_imp
+                        and alpha_5m >= 0.80 and alpha_15m >= 1.00
+                        and clv_l >= 0.66 and uw <= 0.26 and cl > ema9 >= ema21 * 0.998
+                        and 48.0 <= rsi <= 86.0 and d["ret_3h"][k] <= 0.20 and not btc_dump and not btc_spike
+                    ):
+                        sl = min(max((ep - min(lo, d["l"][k - 1]) * 0.9985) / ep, 1.55 * atr_p, 0.0080), 0.0360)
+                        cands.append((rvol * alpha_5m * clv_l, sym, "LONG", ep, sl))
                         continue
 
                     pump_6h = (d["h72"][k] - d["l72"][k]) / max(d["l72"][k], 1e-9)
                     off_hi = (d["h72"][k] - cl) / max(d["h72"][k], 1e-9)
-                    is_rug_s = (pump_6h >= 0.16 and 0.03 <= off_hi <= 0.22 and cl < d["l16"][k] and cl < ema50 and rvol >= 2.1)
-                    brk_s = ((cl < d["l72"][k]) or (sq_rng <= 0.065 and cl < d["l36"][k] and rvol >= 2.2)) and mtf_s
-                    if (brk_s or is_rug_s) and cl <= ema50 * 1.004 and pct_5m <= -min_imp and clv_s >= 0.68 and lw <= 0.25 and cl < ema9 <= ema21 * 1.002 and 14.0 <= rsi <= 52.0 and d["ret_3h"][k] >= -0.18 and not btc_pump:
-                        sl = min(max((max(hi, d["h"][k - 1]) * 1.0015 - ep) / ep, 1.60 * atr_p, 0.0080), 0.0350)
-                        cands.append((rvol * abs(pct_5m) * clv_s, sym, "SHORT", ep, sl))
+                    is_rug_s = (pump_6h >= 0.15 and 0.03 <= off_hi <= 0.22 and cl < d["l16"][k] and cl < ema50 and rvol >= 2.0)
+                    brk_s = ((cl < d["l36"][k]) or (sq_rng <= 0.065 and cl < d["l16"][k] and rvol >= 2.0)) and mtf_s
+                    if (
+                        (brk_s or is_rug_s) and cl <= ema50 * 1.004 and pct_5m <= -min_imp
+                        and alpha_5m <= -0.80 and alpha_15m <= -1.00
+                        and clv_s >= 0.66 and lw <= 0.26 and cl < ema9 <= ema21 * 1.002
+                        and 14.0 <= rsi <= 52.0 and d["ret_3h"][k] >= -0.20 and not btc_pump and not btc_flush
+                    ):
+                        sl = min(max((max(hi, d["h"][k - 1]) * 1.0015 - ep) / ep, 1.55 * atr_p, 0.0080), 0.0360)
+                        cands.append((rvol * abs(alpha_5m) * clv_s, sym, "SHORT", ep, sl))
 
             cands.sort(reverse=True)
             for score, sym, side, ep, sl_dist in cands[:1]:
                 cur_eq = max(10.0, cash + sum(p["mg"] for p in open_pos.values()))
                 cur_dd = (peak_eq - cur_eq) / peak_eq if peak_eq > 0 else 0.0
-                r_eff = risk_pct * (0.60 if cur_dd >= 0.15 else 1.0)
+                r_eff = risk_pct * (0.75 if cur_dd >= 0.18 else 1.0)
                 risk_usd = cur_eq * r_eff
                 mg = round(min((risk_usd / (sl_dist + 2 * cost)) / leverage, cur_eq * 0.25, cash * 0.48), 2)
-                if mg < 1.0 or cash < mg + 0.05:
+                if mg < 0.50 or cash < mg + 0.05:
                     continue
                 fee_in = mg * leverage * cost
                 total_comm += fee_in

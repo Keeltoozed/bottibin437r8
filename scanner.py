@@ -126,28 +126,41 @@ class MarketScanner:
                 dist_l_pct = analysis.get("dist_to_breakout_long_pct", 1.0)
                 dist_s_pct = analysis.get("dist_to_breakout_short_pct", 1.0)
 
-                min_req_impulse = max(config.MIN_5M_PRICE_IMPULSE_PCT, atr_pct * 100.0 * 0.90)
-                min_atr_pct = float(getattr(config, "MIN_ATR_PCT", 0.0035))
+                min_req_impulse = max(config.MIN_5M_PRICE_IMPULSE_PCT, atr_pct * 100.0 * 0.85)
+                min_atr_pct = float(getattr(config, "MIN_ATR_PCT", 0.0025))
                 avg_5m_qvol = float(analysis.get("avg_5m_quote_vol", 0.0) or 0.0)
                 v3_surge = float(analysis.get("v3_surge", 1.0) or 1.0)
-                min_avg_vol = float(getattr(config, "MIN_AVG_5M_QUOTE_VOL", 15000.0))
-                min_v3 = float(getattr(config, "MIN_V3_VOLUME_PERSISTENCE", 1.15))
+                # КРИТИЧЕСКИЙ ФИКС RENDER (VISION SPOT MIRROR): спотовый 5m объем в 10 раз меньше фьючерсного!
+                is_spot_mirror = (binance_client.active_mirror_name != "fapi")
+                min_avg_vol = float(getattr(config, "SPOT_MIRROR_MIN_AVG_5M_VOL", 1500.0)) if is_spot_mirror else float(getattr(config, "MIN_AVG_5M_QUOTE_VOL", 15000.0))
+                min_v3 = float(getattr(config, "MIN_V3_VOLUME_PERSISTENCE", 1.10))
                 is_mtf_long = analysis.get("is_mtf_long_ok", False) if getattr(config, "ENABLE_MTF_15M_FILTER", True) else True
                 is_mtf_short = analysis.get("is_mtf_short_ok", False) if getattr(config, "ENABLE_MTF_15M_FILTER", True) else True
                 is_macro_long = analysis.get("is_macro_trend_long", True)
                 is_macro_short = analysis.get("is_macro_trend_short", True)
                 anti_rug_long = analysis.get("anti_rug_long_ok", True)
                 anti_rug_short = analysis.get("anti_rug_short_ok", True)
-                brk_type = analysis.get("breakout_type", "STRUCT_6H")
+                brk_type = analysis.get("breakout_type", "STRUCT_3H")
 
-                # Строгое подтверждение институционального объема (RVOL >= 2.00x И 3-свечной приток >= 1.15x)
+                # ОТНОСИТЕЛЬНАЯ СИЛА ПРОТИВ BTC (IDIOSYNCRATIC ALPHA RS):
+                # Ловим ТОЛЬКО монеты, которые летят САМИ намного сильнее BTC (отсекает 100% ложных флешей толпы!)
+                btc_5m = float(btc_regime.get("pct_5m", 0.0) or 0.0)
+                btc_15m = float(btc_regime.get("pct_15m", 0.0) or 0.0)
+                pct_15m = float(analysis.get("pct_15m", pct_5m) or 0.0)
+                alpha_5m = round(pct_5m - btc_5m, 2)
+                alpha_15m = round(pct_15m - btc_15m, 2)
+                min_a5 = float(getattr(config, "MIN_ALPHA_5M_PCT", 0.80))
+                min_a15 = float(getattr(config, "MIN_ALPHA_15M_PCT", 1.00))
+
+                # Подтверждение институционального объема (RVOL >= 1.80x И 3-свечной приток >= 1.10x)
                 vol_confirmed = (surge >= config.MIN_5M_VOLUME_SURGE_RATIO) and (v3_surge >= min_v3)
 
                 # ==============================================================
-                # 4. ПРАВИЛА ВХОДА ROCKET & RUG HUNTER (7/7 SPLITS VALIDATED)
-                # - STRUCT_6H (72 бара) / SQUEEZE_3H (36 баров <= 6.5%) / RUG_SHORT (слив после пампа >= +16%)
-                # - Строгая 15m лента EMA27 > EMA63 > EMA150 (без допуска CHOP)
-                # - Anti-Rug Top Guard: запрет входа в поздние свечи параболы (за 15м до пробоя ext <= 2.6%)
+                # 4. ПРАВИЛА ВХОДА ALPHA ROCKET ENGINE (7/7 SPLITS VALIDATED)
+                # - STRUCT_3H (36 баров) / SQUEEZE_80M (16 баров <= 6.5%) / RUG_SHORT (слив после пампа >= +15%)
+                # - Idiosyncratic Alpha RS vs BTC: |alpha_5m| >= 0.80% и |alpha_15m| >= 1.00%
+                # - Anti-BTC-Flush Guard: запрет шортить дно панической свечи BTC и покупать пик сквиза BTC
+                # - Anti-Rug Top Guard: вход только из свежего сжатия (за 15м до пробоя ext <= 2.8%)
                 # ==============================================================
                 tech_long = (
                     analysis.get("is_breakout_long", False) and
@@ -158,6 +171,8 @@ class MarketScanner:
                     is_mtf_long and
                     is_macro_long and
                     pct_5m >= min_req_impulse and
+                    alpha_5m >= min_a5 and
+                    alpha_15m >= min_a15 and
                     clv_long >= config.MIN_CLOSE_STRENGTH and
                     upper_wick <= config.WICK_EXHAUSTION_MAX and
                     sig_close > ema9 and ema9 >= ema21 * 0.998 and
@@ -167,7 +182,7 @@ class MarketScanner:
                     not analysis.get("breakout_failed_long", False) and
                     config.STOP_LOSS_MIN_PCT <= sl_long_dist <= config.STOP_LOSS_MAX_PCT
                 )
-                is_long = tech_long and not btc_regime.get("is_dumping", False)
+                is_long = tech_long and not btc_regime.get("is_dumping", False) and not btc_regime.get("is_spike_up", False)
 
                 tech_short = (
                     config.ENABLE_SHORT and
@@ -179,6 +194,8 @@ class MarketScanner:
                     is_mtf_short and
                     is_macro_short and
                     pct_5m <= -min_req_impulse and
+                    alpha_5m <= -min_a5 and
+                    alpha_15m <= -min_a15 and
                     clv_short >= config.MIN_CLOSE_STRENGTH and
                     lower_wick <= config.WICK_EXHAUSTION_MAX and
                     sig_close < ema9 and ema9 <= ema21 * 1.002 and
@@ -188,7 +205,7 @@ class MarketScanner:
                     not analysis.get("breakout_failed_short", False) and
                     config.STOP_LOSS_MIN_PCT <= sl_short_dist <= config.STOP_LOSS_MAX_PCT
                 )
-                is_short = tech_short and not btc_regime.get("is_pumping", False)
+                is_short = tech_short and not btc_regime.get("is_pumping", False) and not btc_regime.get("is_flush_down", False)
 
                 if (tech_long and not is_long) or (tech_short and not is_short):
                     portfolio.funnel_stats["btc_blocked"] = portfolio.funnel_stats.get("btc_blocked", 0) + 1
@@ -204,12 +221,16 @@ class MarketScanner:
                     wick_w = upper_wick if watch_side == "LONG" else lower_wick
 
                     if (tech_long and not is_long) or (tech_short and not is_short):
-                        w_status = "🛑 Заблокировано импульсом BTC"
+                        w_status = "🛑 Щит BTC (защита от ложного флеша)"
                     elif brk_flag:
-                        if watch_side == "LONG" and not is_mtf_long:
-                            w_status = "⏳ 15m тренд медвежий (против тренда)"
+                        if watch_side == "LONG" and (alpha_5m < min_a5 or alpha_15m < min_a15):
+                            w_status = f"📉 Слабая Alpha к BTC ({alpha_5m:+.2f}% / 15m {alpha_15m:+.2f}%)"
+                        elif watch_side == "SHORT" and (alpha_5m > -min_a5 or alpha_15m > -min_a15):
+                            w_status = f"📉 Слабая Alpha к BTC ({alpha_5m:+.2f}% / 15m {alpha_15m:+.2f}%)"
+                        elif watch_side == "LONG" and not is_mtf_long:
+                            w_status = "⏳ 15m тренд не бычий (против тренда)"
                         elif watch_side == "SHORT" and not is_mtf_short:
-                            w_status = "⏳ 15m тренд бычий (против тренда)"
+                            w_status = "⏳ 15m тренд не медвежий (против тренда)"
                         elif avg_5m_qvol < min_avg_vol:
                             w_status = f"💤 Тонкая монета (${avg_5m_qvol:.0f} < ${min_avg_vol:.0f})"
                         elif surge < config.MIN_5M_VOLUME_SURGE_RATIO:
@@ -223,16 +244,18 @@ class MarketScanner:
                         elif sl_d > config.STOP_LOSS_MAX_PCT:
                             w_status = f"📏 Широкий стоп ({sl_d*100:.2f}% > {config.STOP_LOSS_MAX_PCT*100:.1f}%)"
                         else:
-                            w_status = "⏳ Ждем выравнивания EMA / RSI"
+                            w_status = "⏳ Ждем выравнивания EMA / Anti-Rug"
                     else:
                         w_status = f"⏳ Поджатие: {dist_near:.2f}% до пробоя (RVOL {surge:.1f}x)"
 
-                    watch_activity = round(surge * (1.0 / max(dist_near, 0.15)) + abs(pct_5m), 3)
+                    watch_activity = round(surge * (1.0 / max(dist_near, 0.15)) + abs(alpha_5m), 3)
                     return {
                         "kind": "watch",
                         "data": {
                             **t,
                             **analysis,
+                            "alpha_5m": alpha_5m,
+                            "alpha_15m": alpha_15m,
                             "candidate_side": watch_side,
                             "dist_to_breakout_pct": dist_near,
                             "radar_status": w_status,
@@ -246,6 +269,8 @@ class MarketScanner:
                 chosen = {
                     **t,
                     **analysis,
+                    "alpha_5m": alpha_5m,
+                    "alpha_15m": alpha_15m,
                     "candidate_side": side,
                     "dist_to_breakout_pct": dist_used,
                     "btc_regime": btc_regime.get("status_str", "Neutral")
@@ -257,16 +282,15 @@ class MarketScanner:
                 chosen["ml_reason"] = ml_res.get("reason", "")
                 chosen["ml_approved"] = ml_res.get("ml_approved", False)
 
-                min_ml = float(getattr(config, "ML_MIN_FILTER_PROB", 0.42))
-                if ml_res.get("ml_active") and chosen["ml_prob"] < min_ml:
+                min_ml = float(getattr(config, "ML_MIN_FILTER_PROB", 0.0))
+                if min_ml > 0 and ml_res.get("ml_active") and chosen["ml_prob"] < min_ml:
                     portfolio.funnel_stats["gate_failed"] = portfolio.funnel_stats.get("gate_failed", 0) + 1
                     chosen["radar_status"] = f"🧠 Отсев ML ({chosen['ml_prob']*100:.0f}% < {min_ml*100:.0f}%)"
-                    chosen["watch_activity"] = round(surge * 3.0 + abs(pct_5m), 3)
+                    chosen["watch_activity"] = round(surge * 3.0 + abs(alpha_5m), 3)
                     return {"kind": "watch", "data": chosen}
 
-                ml_mult = (0.5 + chosen["ml_prob"]) if ml_res.get("ml_active") else 1.0
-                chosen["score"] = round(abs(pct_5m) * surge * clv_used * ml_mult, 3)
-                chosen["radar_status"] = f"🚀 ПРОБОЙ [{brk_type}] (Передан в Groq AI)"
+                chosen["score"] = round(abs(alpha_5m) * surge * clv_used, 3)
+                chosen["radar_status"] = f"🚀 ALPHA ПРОБОЙ [{brk_type}] (RS {alpha_5m:+.1f}%)"
                 return {"kind": "candidate", "data": chosen}
 
         tasks = [check_ticker(t) for t in tickers]

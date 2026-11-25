@@ -191,20 +191,20 @@ with st.sidebar:
     if "Стандарт" in strategy_mode:
         default_lev = 12
         config.RISK_PER_TRADE_PCT = 0.025
-        config.MIN_5M_VOLUME_SURGE_RATIO = 2.00
-        config.MIN_CLOSE_STRENGTH = 0.68
+        config.MIN_5M_VOLUME_SURGE_RATIO = 1.80
+        config.MIN_CLOSE_STRENGTH = 0.66
         config.DAILY_LOSS_LIMIT = 99
     elif "Высокий" in strategy_mode:
         default_lev = 18
         config.RISK_PER_TRADE_PCT = 0.035
-        config.MIN_5M_VOLUME_SURGE_RATIO = 2.00
-        config.MIN_CLOSE_STRENGTH = 0.68
+        config.MIN_5M_VOLUME_SURGE_RATIO = 1.80
+        config.MIN_CLOSE_STRENGTH = 0.66
         config.DAILY_LOSS_LIMIT = 99
     else:
         default_lev = 15
         config.RISK_PER_TRADE_PCT = 0.030
-        config.MIN_5M_VOLUME_SURGE_RATIO = 2.00
-        config.MIN_CLOSE_STRENGTH = 0.68
+        config.MIN_5M_VOLUME_SURGE_RATIO = 1.80
+        config.MIN_CLOSE_STRENGTH = 0.66
         config.DAILY_LOSS_LIMIT = 99
 
     lev_options = [10, 12, 15, 18, 20, 25]
@@ -226,7 +226,7 @@ with st.sidebar:
 
     est_risk_usd = round(max(10.0, portfolio.get_portfolio_summary()["equity"]) * config.RISK_PER_TRADE_PCT, 2)
     st.text(f"Плечо входов: {portfolio.current_leverage}x | Риск 1R: ${est_risk_usd:.2f} ({config.RISK_PER_TRADE_PCT*100:.1f}%)")
-    st.text(f"Вход: 6H/3H Сжатие + RugShort + RVOL ≥ {config.MIN_5M_VOLUME_SURGE_RATIO:.2f}x")
+    st.text(f"Вход: Alpha RS vs BTC + 3H/80м Сжатие + RVOL ≥ {config.MIN_5M_VOLUME_SURGE_RATIO:.2f}x")
     st.text(f"Anti-Rug Выход: 60% на {config.TARGET_1_R}R + 40% Parabolic Trail")
     st.text(f"Защита просадки: Half-Kelly при DD ≥ {int(config.DD_GUARD_THRESHOLD*100)}%")
     st.text(f"Лимит стопов: Макс {config.DAILY_LOSS_LIMIT} в день ({portfolio.daily_losses_count}/{config.DAILY_LOSS_LIMIT})")

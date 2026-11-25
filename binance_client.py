@@ -139,7 +139,7 @@ class BinanceClient:
         strict = getattr(config, "STRICT_WHITELIST_ONLY", False)
         whitelist = set(getattr(config, "TOP_CRYPTO_UNIVERSE", []))
         max_24h_cap = float(getattr(config, "MAX_24H_CHANGE_CAP", 100.0))
-        min_trades = int(getattr(config, "MIN_24H_TRADES_COUNT", 2500))
+        min_trades = int(getattr(config, "SPOT_MIRROR_MIN_TRADES", 1200)) if is_spot_mirror else int(getattr(config, "MIN_24H_TRADES_COUNT", 3500))
         lev_tokens = ("UPUSDT", "DOWNUSDT", "BEARUSDT", "BULLUSDT")
         fiat_commodities = {"XAU", "XAUT", "PAXG", "XAG", "XPT", "XPD", "CL", "BZ", "COPPER", "NATGAS", "EUR", "EURI", "AEUR", "GBP", "AUD", "BRL", "TRY", "JPY"}
         real_crypto_b = {"BNB", "ARB", "SHIB", "1000SHIB", "TRB", "BB", "CKB", "YB", "PHB", "AMB", "BLUR", "BOME", "BONK", "1000BONK"}
@@ -439,25 +439,28 @@ class BinanceClient:
         v3_surge = round((sum(prior_3_vols) / 3.0) / max(avg_vol, 1.0), 2)
 
         # ======================================================================
-        # 3-РЕЖИМНЫЙ ПЕРЕХВАТ РАКЕТ И СЛИВОВ (ROCKET & RUG HUNTER ENGINE):
-        # 1) STRUCT_6H: Пробой 72-барного канала Дончиана (6 часов) на RVOL >= 2.0x
-        # 2) SQUEEZE_3H: Ранний старт ракеты из узкого 3ч сжатия (36 баров <= 6.5%) на RVOL >= 2.2x
-        # 3) RUG_SHORT: Слив памповой монеты (после роста >= +16% за 6ч пробой 16-барного лоя и EMA50 на RVOL >= 2.1x)
+        # 3-РЕЖИМНЫЙ ALPHA ROCKET & RUG HUNTER ENGINE (7/7 SPLITS VALIDATED):
+        # 1) STRUCT_3H: Пробой 36-барного канала Дончиана (3 часа) на RVOL >= 1.8x
+        # 2) SQUEEZE_80M: Ранний старт ракеты из узкого сжатия (16 баров <= 6.5%) на RVOL >= 2.0x
+        # 3) RUG_SHORT: Слив памповой монеты (после роста >= +15% за 6ч пробой 16-барного лоя и EMA50 на RVOL >= 2.0x)
         # ======================================================================
-        lookback = int(getattr(config, "BREAKOUT_LOOKBACK_BARS", 72))
-        sq_lb = int(getattr(config, "SQUEEZE_LOOKBACK_BARS", 36))
+        lookback = int(getattr(config, "BREAKOUT_LOOKBACK_BARS", 36))
+        sq_lb = int(getattr(config, "SQUEEZE_LOOKBACK_BARS", 16))
         sq_max_rng = float(getattr(config, "SQUEEZE_MAX_RANGE_PCT", 0.065))
-        sq_min_rvol = float(getattr(config, "SQUEEZE_MIN_RVOL", 2.20))
-        min_rvol = float(getattr(config, "MIN_5M_VOLUME_SURGE_RATIO", 2.00))
+        sq_min_rvol = float(getattr(config, "SQUEEZE_MIN_RVOL", 2.00))
+        min_rvol = float(getattr(config, "MIN_5M_VOLUME_SURGE_RATIO", 1.80))
 
         struct_slice = closed_candles[-(lookback + 1):-1] if len(closed_candles) > lookback else closed_candles[:-1]
         sq_slice = closed_candles[-(sq_lb + 1):-1] if len(closed_candles) > sq_lb else closed_candles[:-1]
+        h6_slice = closed_candles[-73:-1] if len(closed_candles) > 72 else closed_candles[:-1]
 
         donchian_high = max(c["high"] for c in struct_slice)
         donchian_low = min(c["low"] for c in struct_slice)
         sq_high = max(c["high"] for c in sq_slice)
         sq_low = min(c["low"] for c in sq_slice)
         sq_range_pct = (sq_high - sq_low) / max(sq_low, 1e-9)
+        high_6h = max(c["high"] for c in h6_slice)
+        low_6h = min(c["low"] for c in h6_slice)
 
         is_struct_long = (sig_cl > donchian_high) and (surge_ratio >= min_rvol)
         is_struct_short = (sig_cl < donchian_low) and (surge_ratio >= min_rvol)
@@ -465,20 +468,20 @@ class BinanceClient:
         is_squeeze_long = (not is_struct_long) and (sq_range_pct <= sq_max_rng) and (sig_cl > sq_high) and (surge_ratio >= max(min_rvol, sq_min_rvol))
         is_squeeze_short = (not is_struct_short) and (sq_range_pct <= sq_max_rng) and (sig_cl < sq_low) and (surge_ratio >= max(min_rvol, sq_min_rvol))
 
-        # Детектор слива после пампа (Rug-Hunter Short)
+        # Детектор слива после пампа (Rug-Hunter Short — опирается строго на 6-часовой памп >= +15%)
         is_rug_short = False
         if getattr(config, "ENABLE_RUG_HUNTER_SHORT", True) and not is_struct_short and not is_squeeze_short and len(closed_candles) >= 20:
             rug_lb = int(getattr(config, "RUG_SUPPORT_BARS", 16))
             rug_slice = closed_candles[-(rug_lb + 1):-1] if len(closed_candles) > rug_lb else closed_candles[:-1]
             rug_low_16 = min(c["low"] for c in rug_slice)
-            pump_6h = (donchian_high - donchian_low) / max(donchian_low, 1e-9)
-            off_high_6h = (donchian_high - sig_cl) / max(donchian_high, 1e-9)
+            pump_6h = (high_6h - low_6h) / max(low_6h, 1e-9)
+            off_high_6h = (high_6h - sig_cl) / max(high_6h, 1e-9)
             if (
-                pump_6h >= float(getattr(config, "RUG_PUMP_MIN_PCT", 0.16))
+                pump_6h >= float(getattr(config, "RUG_PUMP_MIN_PCT", 0.15))
                 and 0.03 <= off_high_6h <= 0.22
                 and sig_cl < rug_low_16
                 and sig_cl < ema50
-                and surge_ratio >= 2.10
+                and surge_ratio >= 2.00
             ):
                 is_rug_short = True
                 is_mtf_short_ok = True  # Слом после пампа идет раньше разворота медленной 12-часовой EMA150!
@@ -489,9 +492,9 @@ class BinanceClient:
         if is_rug_short:
             breakout_type = "RUG_SHORT"
         elif is_squeeze_long or is_squeeze_short:
-            breakout_type = "SQUEEZE_3H"
+            breakout_type = "SQUEEZE_80M"
         elif is_struct_long or is_struct_short:
-            breakout_type = "STRUCT_6H"
+            breakout_type = "STRUCT_3H"
         else:
             breakout_type = "WATCH"
 
@@ -605,15 +608,22 @@ class BinanceClient:
         trend = analysis.get("trend", "CHOP")
         rsi = analysis.get("rsi", 50.0)
 
-        is_dumping = (p15 <= -0.45) or (p5 <= -0.35 and p15 <= -0.10)
-        is_pumping = (p15 >= +0.45) or (p5 >= +0.35 and p15 >= +0.10)
+        # Защита от торговли против импульса BTC И Anti-BTC-Climax Guard (не шортим дно панического слива BTC и не лонгуем пик сквиза BTC!)
+        is_dumping = (p15 <= -0.55) or (p5 <= -0.40)
+        is_pumping = (p15 >= +0.55) or (p5 >= +0.40)
+        is_flush_down = (p5 <= -0.38) or (p15 <= -0.75)
+        is_spike_up = (p5 >= +0.38) or (p15 >= +0.75)
 
-        if is_dumping:
-            status_str = f"🔴 Медвежий импульс BTC ({p15:+.2f}%, {trend}) — ЛОНГИ ЗАБЛОКИРОВАНЫ | Приоритет: SHORT"
+        if is_flush_down:
+            status_str = f"🔴 Панический слив BTC ({p5:+.2f}% / 15m {p15:+.2f}%) — Щит от ложных выносов активен!"
+        elif is_spike_up:
+            status_str = f"🟢 Резкий сквиз BTC ({p5:+.2f}% / 15m {p15:+.2f}%) — Щит от покупки хая активен!"
+        elif is_dumping:
+            status_str = f"🟠 Медвежий BTC ({p15:+.2f}%, {trend}) — Лонги заблокированы"
         elif is_pumping:
-            status_str = f"🟢 Бычий импульс BTC ({p15:+.2f}%, {trend}) — ШОРТЫ ЗАБЛОКИРОВАНЫ | Приоритет: LONG"
+            status_str = f"🟢 Бычий BTC ({p15:+.2f}%, {trend}) — Шорты заблокированы"
         else:
-            status_str = f"🟡 Спокойный BTC ({p15:+.2f}%, {trend}) — Разрешены LONG и SHORT ракеты"
+            status_str = f"🟡 Спокойный BTC ({p15:+.2f}%, {trend}) — Alpha Rocket активен (LONG + SHORT)"
 
         return {
             "trend": trend,
@@ -622,6 +632,8 @@ class BinanceClient:
             "rsi": rsi,
             "is_dumping": is_dumping,
             "is_pumping": is_pumping,
+            "is_flush_down": is_flush_down,
+            "is_spike_up": is_spike_up,
             "status_str": status_str
         }
 

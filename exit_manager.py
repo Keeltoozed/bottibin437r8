@@ -149,12 +149,12 @@ class ExitManager:
                         # Чем выше взлетает ракета (+2.2R -> +3.5R -> +6.0R+), тем плотнее подтягивается стоп под максимум,
                         # забирая сверхприбыль до резкого слива!
                         if pos["tp1_hit"]:
-                            if mfe_r >= 6.0:
+                            if mfe_r >= 5.5:
                                 trail_sl = highest - max(0.95 * atr_pct * highest, 0.55 * risk_dist)
-                            elif mfe_r >= 3.5:
+                            elif mfe_r >= 3.2:
                                 trail_sl = highest - max(1.25 * atr_pct * highest, 0.75 * risk_dist)
-                            elif mfe_r >= 2.2:
-                                trail_sl = max(entry + 1.15 * risk_dist, highest - max(1.65 * atr_pct * highest, 0.95 * risk_dist))
+                            elif mfe_r >= 2.1:
+                                trail_sl = max(entry + 1.10 * risk_dist, highest - max(1.60 * atr_pct * highest, 0.90 * risk_dist))
                             else:
                                 trail_sl = pos["wick_sl"]
                             trailing_sl_price = config.round_price(trail_sl)
@@ -215,12 +215,12 @@ class ExitManager:
 
                         # Tier 2: Прогрессивный Anti-Bounce Parabolic Ratchet для 40% безрискового шорт-ранера!
                         if pos["tp1_hit"]:
-                            if mfe_r >= 6.0:
+                            if mfe_r >= 5.5:
                                 trail_sl = lowest + max(0.95 * atr_pct * lowest, 0.55 * risk_dist)
-                            elif mfe_r >= 3.5:
+                            elif mfe_r >= 3.2:
                                 trail_sl = lowest + max(1.25 * atr_pct * lowest, 0.75 * risk_dist)
-                            elif mfe_r >= 2.2:
-                                trail_sl = min(entry - 1.15 * risk_dist, lowest + max(1.65 * atr_pct * lowest, 0.95 * risk_dist))
+                            elif mfe_r >= 2.1:
+                                trail_sl = min(entry - 1.10 * risk_dist, lowest + max(1.60 * atr_pct * lowest, 0.90 * risk_dist))
                             else:
                                 trail_sl = pos["wick_sl"]
                             trailing_sl_price = config.round_price(trail_sl)

@@ -40,8 +40,8 @@ INITIAL_BALANCE = float(os.getenv("INITIAL_BALANCE", "20.0"))
 # 3.0% от текущего эквити (~$0.60 на $20, $1.50 на $50, $3.00 на $100) с автоматическим снижением до 1.8% при просадке > 15%.
 RISK_PER_TRADE_PCT = float(os.getenv("RISK_PER_TRADE_PCT", "0.030"))
 CONVICTION_RISK_MULT = float(os.getenv("CONVICTION_RISK_MULT", "1.00"))
-DD_GUARD_THRESHOLD = float(os.getenv("DD_GUARD_THRESHOLD", "0.15"))
-DD_GUARD_RISK_MULT = float(os.getenv("DD_GUARD_RISK_MULT", "0.60"))
+DD_GUARD_THRESHOLD = float(os.getenv("DD_GUARD_THRESHOLD", "0.18"))
+DD_GUARD_RISK_MULT = float(os.getenv("DD_GUARD_RISK_MULT", "0.75"))
 TRADE_AMOUNT_USDT = float(os.getenv("TRADE_AMOUNT_USDT", "4.0"))
 MAX_CONCURRENT_POSITIONS = min(int(os.getenv("MAX_POSITIONS", "2")), 3)
 LEVERAGE = int(os.getenv("LEVERAGE", "15"))
@@ -56,45 +56,50 @@ CONSECUTIVE_LOSS_PAUSE_SECONDS = int(os.getenv("CONSECUTIVE_LOSS_PAUSE_SECONDS",
 MAX_DAILY_LOSS_USD = float(os.getenv("MAX_DAILY_LOSS_USD", "999.00"))
 
 # ==============================================================================
-# 4. 6H STRUCTURAL + 3H SQUEEZE + ANTI-RUG ROCKET ENGINE (7/7 SPLITS VALIDATED)
+# 4. ALPHA ROCKET ENGINE (RS vs BTC + 3H/80M SQUEEZE + RUG-SHORT — 7/7 SPLITS!)
 # ==============================================================================
-BREAKOUT_LOOKBACK_BARS = int(os.getenv("BREAKOUT_LOOKBACK_BARS", "72"))   # Пробой 6-часовой структуры (72 x 5m свечей)
-SQUEEZE_LOOKBACK_BARS = int(os.getenv("SQUEEZE_LOOKBACK_BARS", "36"))     # Ранний старт ракеты из узкого 3ч сжатия (<= 6.5%)
+BREAKOUT_LOOKBACK_BARS = int(os.getenv("BREAKOUT_LOOKBACK_BARS", "36"))   # Пробой 3-часовой структуры (36 x 5m баров — ранний вход в ракету!)
+SQUEEZE_LOOKBACK_BARS = int(os.getenv("SQUEEZE_LOOKBACK_BARS", "16"))     # Быстрый старт из 80-мин сжатия (диапазон <= 6.5%)
 SQUEEZE_MAX_RANGE_PCT = float(os.getenv("SQUEEZE_MAX_RANGE_PCT", "0.065"))
-SQUEEZE_MIN_RVOL = float(os.getenv("SQUEEZE_MIN_RVOL", "2.20"))
-ENABLE_RUG_HUNTER_SHORT = os.getenv("ENABLE_RUG_HUNTER_SHORT", "true").lower() == "true"  # Перехват сливов после пампа >= +16%
-RUG_PUMP_MIN_PCT = float(os.getenv("RUG_PUMP_MIN_PCT", "0.16"))
+SQUEEZE_MIN_RVOL = float(os.getenv("SQUEEZE_MIN_RVOL", "2.00"))
+ENABLE_RUG_HUNTER_SHORT = os.getenv("ENABLE_RUG_HUNTER_SHORT", "true").lower() == "true"  # Перехват сливов после пампа >= +15%
+RUG_PUMP_MIN_PCT = float(os.getenv("RUG_PUMP_MIN_PCT", "0.15"))
 RUG_SUPPORT_BARS = int(os.getenv("RUG_SUPPORT_BARS", "16"))
 
-FAST_IGNITION_LOOKBACK_BARS = int(os.getenv("FAST_IGNITION_LOOKBACK_BARS", "72"))
+# ФИЛЬТР ОТНОСИТЕЛЬНОЙ СИЛЫ ПРОТИВ BTC (IDIOSYNCRATIC ALPHA vs BETA):
+# Монета обязана двигаться САМА значительно сильнее BTC — полностью отсекает ложные синхронные проливы типа 14:35 UTC!
+MIN_ALPHA_5M_PCT = float(os.getenv("MIN_ALPHA_5M_PCT", "0.80"))    # |coin_5m - btc_5m| >= 0.80%
+MIN_ALPHA_15M_PCT = float(os.getenv("MIN_ALPHA_15M_PCT", "1.00"))  # |coin_15m - btc_15m| >= 1.00%
+
+FAST_IGNITION_LOOKBACK_BARS = int(os.getenv("FAST_IGNITION_LOOKBACK_BARS", "36"))
 FAST_IGNITION_SURGE = float(os.getenv("FAST_IGNITION_SURGE", "99.0"))
-CONTINUATION_LOOKBACK_BARS = int(os.getenv("CONTINUATION_LOOKBACK_BARS", "72"))
+CONTINUATION_LOOKBACK_BARS = int(os.getenv("CONTINUATION_LOOKBACK_BARS", "36"))
 ENABLE_FLAG_CONTINUATION = os.getenv("ENABLE_FLAG_CONTINUATION", "false").lower() == "true"
 ENABLE_LIVE_INTRABAR_IGNITION = os.getenv("ENABLE_LIVE_INTRABAR_IGNITION", "false").lower() == "true"
 
-MIN_5M_VOLUME_SURGE_RATIO = float(os.getenv("MIN_5M_VOLUME_SURGE_RATIO", "2.00"))  # Взрывной RVOL >= 2.00x к 20-свечной средней
+MIN_5M_VOLUME_SURGE_RATIO = float(os.getenv("MIN_5M_VOLUME_SURGE_RATIO", "1.80"))  # Всплеск RVOL >= 1.80x к 20-свечной средней
 MIN_VOLUME_SURGE = MIN_5M_VOLUME_SURGE_RATIO
-MIN_5M_PRICE_IMPULSE_PCT = float(os.getenv("MIN_5M_PRICE_IMPULSE_PCT", "0.60"))    # Чистый импульс >= 0.60% (и >= 0.90 * ATR14)
+MIN_5M_PRICE_IMPULSE_PCT = float(os.getenv("MIN_5M_PRICE_IMPULSE_PCT", "0.55"))    # Чистый импульс >= 0.55% (и >= 0.85 * ATR14)
 MIN_IMPULSE_PCT = MIN_5M_PRICE_IMPULSE_PCT
-MIN_ATR_PCT = float(os.getenv("MIN_ATR_PCT", "0.0035"))                           # Минимум 0.35% 5m ATR (отсев штиля и комиссионной пилы)
+MIN_ATR_PCT = float(os.getenv("MIN_ATR_PCT", "0.0025"))                           # Минимум 0.25% 5m ATR (работает и на fapi, и на vision)
 
-MIN_CLOSE_STRENGTH = float(os.getenv("MIN_CLOSE_STRENGTH", "0.68"))
+MIN_CLOSE_STRENGTH = float(os.getenv("MIN_CLOSE_STRENGTH", "0.66"))
 WICK_REJECTION_MIN = float(os.getenv("WICK_REJECTION_MIN", "0.0"))
-WICK_EXHAUSTION_MAX = float(os.getenv("WICK_EXHAUSTION_MAX", "0.25"))              # Встречный фитиль истощения <= 25%
+WICK_EXHAUSTION_MAX = float(os.getenv("WICK_EXHAUSTION_MAX", "0.26"))              # Встречный фитиль истощения <= 26%
 
 # ANTI-RUG TOP GUARD (защита от покупки хая параболы прямо перед дампом!):
-MAX_EMA21_EXTENSION_PCT = float(os.getenv("MAX_EMA21_EXTENSION_PCT", "0.045"))     # Не выше 4.5% от EMA21 на сигнальной свече
-MAX_PRE_BREAKOUT_EXT_PCT = float(os.getenv("MAX_PRE_BREAKOUT_EXT_PCT", "0.026"))   # За 15 мин (3 бара) до пробоя монета обязана быть в сжатии <= 2.6% от EMA21!
-MAX_3H_CLIMAX_RETURN_PCT = float(os.getenv("MAX_3H_CLIMAX_RETURN_PCT", "0.18"))    # Блок входа в выдохшуюся параболу (> +18% за 3 часа)
-MAX_LIVE_DRIFT_PCT = float(os.getenv("MAX_LIVE_DRIFT_PCT", "0.014"))
+MAX_EMA21_EXTENSION_PCT = float(os.getenv("MAX_EMA21_EXTENSION_PCT", "0.048"))     # Не выше 4.8% от EMA21 на сигнальной свече
+MAX_PRE_BREAKOUT_EXT_PCT = float(os.getenv("MAX_PRE_BREAKOUT_EXT_PCT", "0.028"))   # За 15 мин (3 бара) до пробоя монета была в базе <= 2.8% от EMA21!
+MAX_3H_CLIMAX_RETURN_PCT = float(os.getenv("MAX_3H_CLIMAX_RETURN_PCT", "0.20"))    # Блок входа в выдохшуюся параболу (> +20% за 3 часа)
+MAX_LIVE_DRIFT_PCT = float(os.getenv("MAX_LIVE_DRIFT_PCT", "0.018"))
 
 # Волатильно-адаптивные границы стопа (позволяют ракетам дышать; маржа автоматически уменьшается под 3% риска):
 STOP_LOSS_MIN_PCT = float(os.getenv("STOP_LOSS_MIN_PCT", "0.0080"))  # 0.80% мин стоп (исключает выбивание шумом и комиссиями)
-STOP_LOSS_MAX_PCT = float(os.getenv("STOP_LOSS_MAX_PCT", "0.0350"))  # 3.50% макс стоп (для волатильных ракет вроде GUA/EVAA)
+STOP_LOSS_MAX_PCT = float(os.getenv("STOP_LOSS_MAX_PCT", "0.0360"))  # 3.60% макс стоп (для волатильных ракет)
 MAX_ALLOWED_SL_PCT = STOP_LOSS_MAX_PCT
-SL_ATR_MULT = float(os.getenv("SL_ATR_MULT", "1.60"))                # Структурный стоп не ближе 1.60 * ATR14
+SL_ATR_MULT = float(os.getenv("SL_ATR_MULT", "1.55"))                # Структурный стоп не ближе 1.55 * ATR14
 SIZING_SL_FLOOR_PCT = float(os.getenv("SIZING_SL_FLOOR_PCT", "0.0080"))
-MIN_MARGIN_USDT = float(os.getenv("MIN_MARGIN_USDT", "1.00"))        # Позволяет открывать волатильные ракеты от $1 маржи с честным 3% риском
+MIN_MARGIN_USDT = float(os.getenv("MIN_MARGIN_USDT", "0.50"))        # Позволяет открывать волатильные ракеты с широким SL (3%) даже при малом депозите $15-$20!
 MIN_MARGIN_EQUITY_PCT = float(os.getenv("MIN_MARGIN_EQUITY_PCT", "0.05"))
 MAX_MARGIN_EQUITY_PCT = float(os.getenv("MAX_MARGIN_EQUITY_PCT", "0.25"))
 WICK_BUFFER_PCT = float(os.getenv("WICK_BUFFER_PCT", "0.0015"))
@@ -127,12 +132,14 @@ TAKER_FEE_PCT = float(os.getenv("TAKER_FEE_PCT", "0.0006"))
 # ==============================================================================
 # 6. MARKET SCANNER & DYNAMIC LIQUID FUTURES UNIVERSE ($15M+ 24H VOL — БЕЗ ШОР)
 # ==============================================================================
-MIN_24H_VOLUME_USDT = float(os.getenv("MIN_24H_VOLUME_USDT", "15000000"))                 # От $15M USDT на fapi: охватывает ~90+ живых ракет (GUA, EVAA, LISTA...)
-SPOT_MIRROR_MIN_VOL_USDT = float(os.getenv("SPOT_MIRROR_MIN_VOL_USDT", "1200000"))        # $1.2M Spot USDT на vision
+MIN_24H_VOLUME_USDT = float(os.getenv("MIN_24H_VOLUME_USDT", "15000000"))                 # От $15M USDT на fapi
+SPOT_MIRROR_MIN_VOL_USDT = float(os.getenv("SPOT_MIRROR_MIN_VOL_USDT", "1200000"))        # $1.2M Spot USDT на vision (Render)
 SCAN_TICKERS_LIMIT = min(int(os.getenv("SCAN_TICKERS_LIMIT", "150")), 200)                # Проверяем все ликвидные пары целиком
 MIN_24H_TRADES_COUNT = int(os.getenv("MIN_24H_TRADES_COUNT", "3500"))
-MIN_AVG_5M_QUOTE_VOL = float(os.getenv("MIN_AVG_5M_QUOTE_VOL", "15000.0"))                # Минимум $15K/5m свеча
-MIN_V3_VOLUME_PERSISTENCE = float(os.getenv("MIN_V3_VOLUME_PERSISTENCE", "1.15"))         # Кумулятивный приток объема за 3 свечи >= 1.15x
+SPOT_MIRROR_MIN_TRADES = int(os.getenv("SPOT_MIRROR_MIN_TRADES", "1200"))                 # Адаптация числа сделок под Spot vision
+MIN_AVG_5M_QUOTE_VOL = float(os.getenv("MIN_AVG_5M_QUOTE_VOL", "15000.0"))                # $15K/5m свеча на фьючерсах fapi
+SPOT_MIRROR_MIN_AVG_5M_VOL = float(os.getenv("SPOT_MIRROR_MIN_AVG_5M_VOL", "1500.0"))     # $1.5K/5m свеча на Spot vision (фикс тишины на Render!)
+MIN_V3_VOLUME_PERSISTENCE = float(os.getenv("MIN_V3_VOLUME_PERSISTENCE", "1.10"))         # Кумулятивный приток объема за 3 свечи >= 1.10x
 ENABLE_MTF_15M_FILTER = os.getenv("ENABLE_MTF_15M_FILTER", "true").lower() == "true"      # Строгая 15m лента EMA9 > EMA21 > EMA50
 MAX_24H_CHANGE_CAP = float(os.getenv("MAX_24H_CHANGE_CAP", "100.0"))
 STRICT_WHITELIST_ONLY = os.getenv("STRICT_WHITELIST_ONLY", "false").lower() == "true"     # FALSE: динамический поиск настоящих ракет по всему рынку!
@@ -220,7 +227,7 @@ EXCLUDED_TICKERS = TRADFI_EXCLUSION_SET | {
     "INITUSDT", "CRVUSDT", "MEGAUSDT", "AVAUSDT", "SOLVUSDT", "BIRBUSDT",
     "COCOSUSDT", "RNDRUSDT", "GALUSDT", "POLYUSDT"
 }
-MAX_SPREAD_PCT = float(os.getenv("MAX_SPREAD_PCT", "0.0022"))  # 0.22% max spread (учитывает тик-шаг на Spot/Vision зеркале)
+MAX_SPREAD_PCT = float(os.getenv("MAX_SPREAD_PCT", "0.0030"))  # 0.30% max spread (учитывает тик-шаг дешевых мемов на Spot/Vision зеркале)
 SCAN_INTERVAL_SECONDS = int(os.getenv("SCAN_INTERVAL_SECONDS", "12"))
 PAIR_COOLDOWN_MINUTES = int(os.getenv("PAIR_COOLDOWN_MINUTES", "10"))
 
