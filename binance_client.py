@@ -14,20 +14,37 @@ class BinanceClient:
       - Структурный расчет пробоев Дончиана (20 баров), силы закрытия свечи (CLV), RVOL и честных стопов по ATR/фитилям.
     """
     def __init__(self):
+        # 5-уровневый отказоустойчивый пул крипто-фьючерсов (защита от shared-IP банов Render HTTP 418/429):
+        # fapi (Binance Futures) -> bybit (120 req/s, 516 крипто-перпов) -> gate (900 req/s, 1000+ перпов)
+        # -> bitget (чистые крипто-перпы isRwa=NO) -> vision (Binance Spot резерв)
         self.mirrors = [
             {"name": "fapi", "base": "https://fapi.binance.com", "ticker24": "/fapi/v1/ticker/24hr", "klines": "/fapi/v1/klines", "book": "/fapi/v1/ticker/bookTicker", "price": "/fapi/v1/ticker/price", "info": "/fapi/v1/exchangeInfo"},
+            {"name": "bybit", "base": "https://api.bybit.com", "ticker24": "/v5/market/tickers", "klines": "/v5/market/kline", "book": "/v5/market/tickers", "price": "/v5/market/tickers", "info": "/v5/market/instruments-info"},
+            {"name": "gate", "base": "https://api.gateio.ws", "ticker24": "/api/v4/futures/usdt/tickers", "klines": "/api/v4/futures/usdt/candlesticks", "book": "/api/v4/futures/usdt/tickers", "price": "/api/v4/futures/usdt/tickers", "info": "/api/v4/futures/usdt/contracts"},
             {"name": "bitget", "base": "https://api.bitget.com", "ticker24": "/api/v2/mix/market/tickers", "klines": "/api/v2/mix/market/candles", "book": "/api/v2/mix/market/tickers", "price": "/api/v2/mix/market/ticker", "info": "/api/v2/mix/market/contracts"},
-            {"name": "vision", "base": "https://data-api.binance.vision", "ticker24": "/api/v3/ticker/24hr", "klines": "/api/v3/klines", "book": "/api/v3/ticker/bookTicker", "price": "/api/v3/ticker/price", "info": "/api/v3/exchangeInfo"},
-            {"name": "spot", "base": "https://api.binance.com", "ticker24": "/api/v3/ticker/24hr", "klines": "/api/v3/klines", "book": "/api/v3/ticker/bookTicker", "price": "/api/v3/ticker/price", "info": "/api/v3/exchangeInfo"}
+            {"name": "vision", "base": "https://data-api.binance.vision", "ticker24": "/api/v3/ticker/24hr", "klines": "/api/v3/klines", "book": "/api/v3/ticker/bookTicker", "price": "/api/v3/ticker/price", "info": "/api/v3/exchangeInfo"}
         ]
         self.active_mirror_idx = 0
         self._mirror_cooldowns: Dict[int, float] = {}
+        self._mirror_ban_type: Dict[int, str] = {}   # "hard" (418/451/403) vs "soft" (429)
+        self._last_err_log: Dict[str, float] = {}
+        # Персональный rate-pacer для каждого зеркала (полностью исключает всплески HTTP 429 на shared IP Render!)
+        self._mirror_min_interval: Dict[str, float] = {
+            "fapi": 0.14,    # ~7 req/s
+            "bybit": 0.08,   # ~12 req/s (лимит Bybit 120 req/s)
+            "gate": 0.07,    # ~14 req/s (лимит Gate 900 req/s)
+            "bitget": 0.26,  # ~3.8 req/s (лимит Bitget 20 req/s на общий IP)
+            "vision": 0.18,  # ~5.5 req/s
+        }
+        self._mirror_next_allowed: Dict[str, float] = {}
+        self._rate_locks: Dict[str, asyncio.Lock] = {}
         self._session: Optional[aiohttp.ClientSession] = None
         self._book_tickers_cache: Dict[str, Tuple[float, float]] = {}
         self._book_tickers_cache_time: float = 0.0
         self._ticker24_cache: Tuple[str, float, List[Dict[str, Any]]] = ("", 0.0, [])
         self._candles_cache: Dict[Tuple[str, str, int, int], Dict[str, Any]] = {}
         self._valid_crypto_perps: Dict[str, Tuple[float, Set[str]]] = {}
+        self._new_crypto_perps: Dict[str, Set[str]] = {}
 
     @property
     def active_mirror_name(self) -> str:
@@ -39,16 +56,157 @@ class BinanceClient:
     def is_spot_mirror(self) -> bool:
         return self.active_mirror_name in ("vision", "spot")
 
+    async def _acquire_rate_slot(self, m_name: str):
+        """Плавный rate-limiter по каждому зеркалу — исключает burst-волны HTTP 429."""
+        lock = self._rate_locks.get(m_name)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._rate_locks[m_name] = lock
+        async with lock:
+            gap = self._mirror_min_interval.get(m_name, 0.12)
+            now_m = time.monotonic()
+            wait_s = self._mirror_next_allowed.get(m_name, 0.0) - now_m
+            if wait_s > 0:
+                await asyncio.sleep(wait_s)
+            self._mirror_next_allowed[m_name] = time.monotonic() + gap
+
+    def _log_once(self, key: str, msg: str, ttl: float = 30.0):
+        now = time.time()
+        if (now - self._last_err_log.get(key, 0.0)) >= ttl:
+            self._last_err_log[key] = now
+            print(msg, flush=True)
+
     async def get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
-            timeout = aiohttp.ClientTimeout(total=10)
-            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+            timeout = aiohttp.ClientTimeout(total=12)
+            headers = {"Accept": "application/json"}
             self._session = aiohttp.ClientSession(timeout=timeout, headers=headers)
         return self._session
 
     async def close(self):
         if self._session and not self._session.closed:
             await self._session.close()
+
+    def _normalize_bybit_response(self, route_key: str, raw: Any) -> Optional[Any]:
+        """Нормализует ответы Bybit v5 Linear Perpetual в единый формат Binance."""
+        if not isinstance(raw, dict) or raw.get("retCode") != 0:
+            return None
+        items = raw.get("result", {}).get("list")
+        if items is None:
+            return None
+        now_ms = int(raw.get("time") or time.time() * 1000)
+
+        if route_key == "ticker24":
+            out = []
+            for x in items:
+                try:
+                    sym = x.get("symbol", "")
+                    if not sym.endswith("USDT"):
+                        continue
+                    lp = float(x.get("lastPrice", 0) or 0)
+                    if lp <= 0:
+                        continue
+                    prev1h = float(x.get("prevPrice1h", 0) or 0)
+                    pct_1h = round((lp - prev1h) / prev1h * 100.0, 2) if prev1h > 0 else 0.0
+                    out.append({
+                        "symbol": sym,
+                        "lastPrice": str(lp),
+                        "quoteVolume": str(x.get("turnover24h") or 0),
+                        "priceChangePercent": str(round(float(x.get("price24hPcnt", 0) or 0) * 100.0, 4)),
+                        "pct_1h_hint": pct_1h,
+                        "highPrice": str(x.get("highPrice24h") or lp),
+                        "lowPrice": str(x.get("lowPrice24h") or lp),
+                        "bidPrice": str(x.get("bid1Price") or lp),
+                        "askPrice": str(x.get("ask1Price") or lp),
+                        "closeTime": now_ms,
+                        "count": 10000
+                    })
+                except (ValueError, TypeError):
+                    continue
+            return out
+
+        if route_key == "klines":
+            # Bybit: [startTime, open, high, low, close, volume, turnover] (newest first)
+            out = []
+            for c in items:
+                if isinstance(c, list) and len(c) >= 7:
+                    out.append([int(c[0]), c[1], c[2], c[3], c[4], c[5], int(c[0]), c[6]])
+            out.sort(key=lambda r: r[0])
+            return out
+
+        if route_key == "book":
+            out = []
+            for x in items:
+                sym = x.get("symbol", "")
+                if sym.endswith("USDT") and x.get("bid1Price") and x.get("ask1Price"):
+                    out.append({"symbol": sym, "bidPrice": x["bid1Price"], "askPrice": x["ask1Price"]})
+            return out
+
+        if route_key == "price":
+            if isinstance(items, list) and items:
+                return {"price": items[0].get("lastPrice", "0")}
+            return None
+
+        return items
+
+    def _normalize_gate_response(self, route_key: str, raw: Any) -> Optional[Any]:
+        """Нормализует ответы Gate.io v4 USDT Perpetual в единый формат Binance."""
+        if not isinstance(raw, list):
+            return None
+        now_ms = int(time.time() * 1000)
+
+        if route_key == "ticker24":
+            out = []
+            for x in raw:
+                try:
+                    contract = x.get("contract", "")
+                    if not contract.endswith("_USDT"):
+                        continue
+                    sym = contract[:-5] + "USDT"
+                    lp = float(x.get("last", 0) or 0)
+                    if lp <= 0:
+                        continue
+                    out.append({
+                        "symbol": sym,
+                        "lastPrice": str(lp),
+                        "quoteVolume": str(x.get("volume_24h_settle") or x.get("volume_24h_quote") or 0),
+                        "priceChangePercent": str(x.get("change_percentage") or 0),
+                        "highPrice": str(x.get("high_24h") or lp),
+                        "lowPrice": str(x.get("low_24h") or lp),
+                        "bidPrice": str(x.get("highest_bid") or lp),
+                        "askPrice": str(x.get("lowest_ask") or lp),
+                        "closeTime": now_ms,
+                        "count": 10000
+                    })
+                except (ValueError, TypeError):
+                    continue
+            return out
+
+        if route_key == "klines":
+            # Gate: {'t': sec, 'o', 'h', 'l', 'c', 'v', 'sum': quoteVol}
+            out = []
+            for c in raw:
+                if isinstance(c, dict) and "t" in c and "c" in c:
+                    ts_ms = int(c["t"]) * 1000
+                    qvol = c.get("sum") if c.get("sum") is not None else c.get("v", 0)
+                    out.append([ts_ms, c.get("o", 0), c.get("h", 0), c.get("l", 0), c.get("c", 0), c.get("v", 0), ts_ms, qvol])
+            out.sort(key=lambda r: r[0])
+            return out
+
+        if route_key == "book":
+            out = []
+            for x in raw:
+                contract = x.get("contract", "")
+                if contract.endswith("_USDT") and x.get("highest_bid") and x.get("lowest_ask"):
+                    out.append({"symbol": contract[:-5] + "USDT", "bidPrice": x["highest_bid"], "askPrice": x["lowest_ask"]})
+            return out
+
+        if route_key == "price":
+            if raw and isinstance(raw[0], dict):
+                return {"price": raw[0].get("last", "0")}
+            return None
+
+        return raw
 
     def _normalize_bitget_response(self, route_key: str, raw: Any) -> Optional[Any]:
         """Нормализует ответы Bitget USDT-FUTURES v2 в единый формат Binance (100% совместимость со всем кодом)."""
@@ -115,7 +273,8 @@ class BinanceClient:
         session = await self.get_session()
         now = time.time()
 
-        # Формируем порядок зеркал: сначала активное (если не на кулдауне), затем остальные здоровые зеркала
+        # Формируем порядок зеркал: активное первым, далее остальные ЗДОРОВЫЕ зеркала.
+        # НИКОГДА не лезем в зеркала с активным жестким баном HTTP 418/451!
         all_indices = list(range(len(self.mirrors)))
         if self.active_mirror_idx in all_indices:
             all_indices.remove(self.active_mirror_idx)
@@ -123,66 +282,132 @@ class BinanceClient:
 
         indices = [i for i in all_indices if now >= self._mirror_cooldowns.get(i, 0.0)]
         if not indices:
-            # Если все зеркала вдруг на кулдауне — пробуем то, чей кулдаун истечет раньше всего
-            indices = sorted(all_indices, key=lambda i: self._mirror_cooldowns.get(i, 0.0))[:2]
+            # Пробуем ТОЛЬКО мягкие 429-зеркала (не 418/451!)
+            soft_candidates = [i for i in all_indices if self._mirror_ban_type.get(i) != "hard"]
+            if soft_candidates:
+                indices = sorted(soft_candidates, key=lambda i: self._mirror_cooldowns.get(i, 0.0))[:1]
+            else:
+                return None
 
         for idx in indices:
+            # Перепроверяем кулдаун прямо перед запросом (защита от 6 параллельных задач при одновременном 418/429)
+            if time.time() < self._mirror_cooldowns.get(idx, 0.0):
+                continue
+
             mirror = self.mirrors[idx]
             m_name = mirror["name"]
             url = f"{mirror['base']}{mirror[route_key]}"
             req_params: Dict[str, Any] = dict(params) if params else {}
 
-            if m_name == "bitget":
+            if m_name == "bybit":
+                req_params["category"] = "linear"
+                if route_key == "klines":
+                    iv = str(req_params.pop("interval", "5m"))
+                    req_params["interval"] = iv[:-1] if iv.endswith("m") else iv
+                    if "limit" in req_params:
+                        req_params["limit"] = str(min(int(req_params["limit"]), 200))
+            elif m_name == "gate":
+                if "symbol" in req_params:
+                    s_val = str(req_params.pop("symbol"))
+                    req_params["contract"] = (s_val[:-4] + "_USDT") if (s_val.endswith("USDT") and "_" not in s_val) else s_val
+                if route_key == "klines":
+                    if "limit" in req_params:
+                        req_params["limit"] = str(min(int(req_params["limit"]), 200))
+            elif m_name == "bitget":
                 req_params["productType"] = "USDT-FUTURES"
                 if route_key == "klines":
                     req_params["granularity"] = req_params.pop("interval", "5m")
                     if "limit" in req_params:
                         req_params["limit"] = str(min(int(req_params["limit"]), 200))
 
+            # Плавное ограничение частоты запросов для данного зеркала
+            await self._acquire_rate_slot(m_name)
+            if time.time() < self._mirror_cooldowns.get(idx, 0.0):
+                continue
+
             try:
                 async with session.get(url, params=req_params) as resp:
                     if resp.status == 200:
                         raw = await resp.json()
-                        if m_name == "bitget":
+                        if m_name == "bybit":
+                            rc = raw.get("retCode", -1) if isinstance(raw, dict) else -1
+                            if rc == 10001:  # Тикер не найден на Bybit
+                                return None
+                            if rc == 10006:  # Bybit rate limit
+                                self._mirror_min_interval[m_name] = min(0.50, self._mirror_min_interval.get(m_name, 0.08) * 1.5)
+                                self._mirror_cooldowns[idx] = time.time() + 15.0
+                                self._mirror_ban_type[idx] = "soft"
+                                self._log_once(f"429_{m_name}", f"🚫 [Market API] {m_name} rate-limit (retCode 10006, пауза 15с) → переход на резерв!", ttl=25.0)
+                                continue
+                            raw = self._normalize_bybit_response(route_key, raw)
+                            if raw is None:
+                                continue
+                        elif m_name == "gate":
+                            raw = self._normalize_gate_response(route_key, raw)
+                            if raw is None:
+                                continue
+                        elif m_name == "bitget":
                             if isinstance(raw, dict) and str(raw.get("code", "")) in ("40034", "400172", "40007"):
                                 return None
                             raw = self._normalize_bitget_response(route_key, raw)
                             if raw is None:
                                 continue
+
                         if self.active_mirror_idx != idx:
                             print(f"🌐 [Market API] Успешное подключение через зеркало {m_name} ({mirror['base']})", flush=True)
                             self.active_mirror_idx = idx
                         return raw
                     elif resp.status == 400:
-                        # Тикер отсутствует на данном зеркале — не ломаем активное зеркало
                         return None
-                    elif resp.status in (418, 429):
+                    elif resp.status == 418:
                         retry_after = 0.0
                         try:
                             retry_after = float(resp.headers.get("Retry-After", 0) or 0)
                         except ValueError:
                             retry_after = 0.0
-                        cd = max(retry_after, 300.0 if resp.status == 418 else 120.0)
+                        cd = max(retry_after, 600.0)
                         self._mirror_cooldowns[idx] = time.time() + cd
-                        print(f"🚫 [Market API] {m_name} вернул HTTP {resp.status} (shared-IP лимит, пауза {int(cd)}с) → мгновенный переход на резерв!", flush=True)
+                        self._mirror_ban_type[idx] = "hard"
+                        self._log_once(f"418_{m_name}", f"🚫 [Market API] {m_name} вернул HTTP 418 (shared-IP бан {int(cd)}с) → мгновенный переход на резерв!", ttl=60.0)
+                        continue
+                    elif resp.status == 429:
+                        retry_after = 0.0
+                        try:
+                            retry_after = float(resp.headers.get("Retry-After", 0) or 0)
+                        except ValueError:
+                            retry_after = 0.0
+                        # Самоадаптация скорости: при 429 замедляем pacer и даем короткую паузу (20с), не 120с
+                        self._mirror_min_interval[m_name] = min(0.65, self._mirror_min_interval.get(m_name, 0.15) * 1.45)
+                        cd = max(retry_after, 20.0)
+                        self._mirror_cooldowns[idx] = time.time() + cd
+                        self._mirror_ban_type[idx] = "soft"
+                        self._log_once(f"429_{m_name}", f"⚠️ [Market API] {m_name} вернул HTTP 429 (пауза {int(cd)}с, темп снижен до {1.0/self._mirror_min_interval[m_name]:.1f} req/s) → резерв!", ttl=25.0)
                         continue
                     elif resp.status in (451, 403):
                         self._mirror_cooldowns[idx] = time.time() + 1800.0
-                        print(f"⚠️ [Market API] {m_name} вернул HTTP {resp.status} (гео-ограничение, пауза 30м) → переход на резерв!", flush=True)
+                        self._mirror_ban_type[idx] = "hard"
+                        self._log_once(f"451_{m_name}", f"⚠️ [Market API] {m_name} вернул HTTP {resp.status} (гео-ограничение, пауза 30м) → переход на резерв!", ttl=60.0)
                         continue
                     else:
                         if self.active_mirror_idx == idx:
-                            print(f"⚠️ [Market API] {m_name} вернул HTTP {resp.status} на {route_key}, пробуем резерв...", flush=True)
+                            self._log_once(f"http_{m_name}_{resp.status}", f"⚠️ [Market API] {m_name} вернул HTTP {resp.status} на {route_key}, пробуем резерв...", ttl=30.0)
             except Exception as e:
                 if self.active_mirror_idx == idx:
-                    print(f"⚠️ [Market API] Ошибка сети на {m_name} ({type(e).__name__}), пробуем резерв...", flush=True)
+                    self._log_once(f"exc_{m_name}", f"⚠️ [Market API] Ошибка сети на {m_name} ({type(e).__name__}), пробуем резерв...", ttl=30.0)
         return None
 
     async def fetch_valid_crypto_perps(self) -> Set[str]:
-        """Возвращает официальный список чистых крипто-фьючерсов (fapi: underlyingType=COIN; bitget: isRwa=NO), исключая все TradFi акции/сырье."""
+        """
+        Возвращает официальный список чистых крипто-фьючерсов для активного зеркала
+        (fapi: underlyingType=COIN; bybit: symbolType in ('','innovation') & marketRegion=='';
+         bitget: isRwa=NO; gate: active USDT contracts), а также отмечает НОВЫЕ ЛИСТИНГИ (<= 45 дней)!
+        """
         now = time.time()
+        now_ms = int(now * 1000)
+        new_cutoff_ms = now_ms - 45 * 86400 * 1000
+        new_cutoff_sec = int(now) - 45 * 86400
         m_name = self.active_mirror_name
-        if m_name not in ("fapi", "bitget"):
+        if m_name not in ("fapi", "bybit", "bitget", "gate"):
             return set()
         cached_ts, cached_set = self._valid_crypto_perps.get(m_name, (0.0, set()))
         if cached_set and (now - cached_ts) < 3600.0:
@@ -191,43 +416,108 @@ class BinanceClient:
             return cached_set
         try:
             session = await self.get_session()
+            base_url = self.mirrors[self.active_mirror_idx]["base"]
             if m_name == "fapi":
-                url = f"{self.mirrors[self.active_mirror_idx]['base']}/fapi/v1/exchangeInfo"
-                async with session.get(url) as resp:
+                async with session.get(f"{base_url}/fapi/v1/exchangeInfo") as resp:
                     if resp.status == 200:
                         info = await resp.json()
-                        perps = {
-                            s["symbol"] for s in info.get("symbols", [])
-                            if s.get("status") == "TRADING"
-                            and s.get("contractType") == "PERPETUAL"
-                            and s.get("underlyingType") == "COIN"
-                            and s.get("quoteAsset") == "USDT"
-                        }
+                        perps, new_set = set(), set()
+                        for s in info.get("symbols", []):
+                            if (
+                                s.get("status") == "TRADING"
+                                and s.get("contractType") == "PERPETUAL"
+                                and s.get("underlyingType") == "COIN"
+                                and s.get("quoteAsset") == "USDT"
+                            ):
+                                sym = s["symbol"]
+                                perps.add(sym)
+                                if int(s.get("onboardDate", 0) or 0) >= new_cutoff_ms:
+                                    new_set.add(sym)
                         if len(perps) >= 100:
                             self._valid_crypto_perps[m_name] = (now, perps)
+                            self._new_crypto_perps[m_name] = new_set
                             return perps
                     elif resp.status in (418, 429):
-                        self._mirror_cooldowns[self.active_mirror_idx] = now + (300.0 if resp.status == 418 else 120.0)
+                        cd = 600.0 if resp.status == 418 else 30.0
+                        self._mirror_cooldowns[self.active_mirror_idx] = now + cd
+                        self._mirror_ban_type[self.active_mirror_idx] = "hard" if resp.status == 418 else "soft"
                     elif resp.status in (451, 403):
                         self._mirror_cooldowns[self.active_mirror_idx] = now + 1800.0
+                        self._mirror_ban_type[self.active_mirror_idx] = "hard"
+            elif m_name == "bybit":
+                async with session.get(f"{base_url}/v5/market/instruments-info", params={"category": "linear", "limit": "1000"}) as resp:
+                    if resp.status == 200:
+                        info = await resp.json()
+                        if isinstance(info, dict) and info.get("retCode") == 0:
+                            perps, new_set = set(), set()
+                            for s in info.get("result", {}).get("list", []):
+                                if (
+                                    s.get("contractType") == "LinearPerpetual"
+                                    and s.get("status") == "Trading"
+                                    and s.get("quoteCoin") == "USDT"
+                                    and s.get("symbolType", "") in ("", "innovation")
+                                    and not s.get("marketRegion")
+                                    and not s.get("underlyingTicker")
+                                    and not s.get("isPreListing")
+                                ):
+                                    sym = s["symbol"]
+                                    perps.add(sym)
+                                    if s.get("symbolType") == "innovation" or int(s.get("launchTime", 0) or 0) >= new_cutoff_ms:
+                                        new_set.add(sym)
+                            if len(perps) >= 100:
+                                self._valid_crypto_perps[m_name] = (now, perps)
+                                self._new_crypto_perps[m_name] = new_set
+                                return perps
+                    elif resp.status in (451, 403):
+                        self._mirror_cooldowns[self.active_mirror_idx] = now + 1800.0
+                        self._mirror_ban_type[self.active_mirror_idx] = "hard"
             elif m_name == "bitget":
-                url = f"{self.mirrors[self.active_mirror_idx]['base']}/api/v2/mix/market/contracts"
-                async with session.get(url, params={"productType": "USDT-FUTURES"}) as resp:
+                async with session.get(f"{base_url}/api/v2/mix/market/contracts", params={"productType": "USDT-FUTURES"}) as resp:
                     if resp.status == 200:
                         info = await resp.json()
                         if isinstance(info, dict) and info.get("code") == "00000":
-                            perps = {
-                                s["symbol"] for s in info.get("data", [])
-                                if s.get("symbolStatus") == "normal"
-                                and s.get("symbolType") == "perpetual"
-                                and str(s.get("isRwa", "NO")).upper() == "NO"
-                                and s.get("quoteCoin") == "USDT"
-                            }
+                            perps, new_set = set(), set()
+                            for s in info.get("data", []):
+                                if (
+                                    s.get("symbolStatus") == "normal"
+                                    and s.get("symbolType") == "perpetual"
+                                    and str(s.get("isRwa", "NO")).upper() == "NO"
+                                    and s.get("quoteCoin") == "USDT"
+                                ):
+                                    sym = s["symbol"]
+                                    perps.add(sym)
+                                    ot = int(s.get("openTime") or s.get("launchTime") or 0)
+                                    if ot >= new_cutoff_ms:
+                                        new_set.add(sym)
                             if len(perps) >= 100:
                                 self._valid_crypto_perps[m_name] = (now, perps)
+                                self._new_crypto_perps[m_name] = new_set
                                 return perps
                     elif resp.status in (418, 429):
-                        self._mirror_cooldowns[self.active_mirror_idx] = now + 120.0
+                        self._mirror_cooldowns[self.active_mirror_idx] = now + 20.0
+                        self._mirror_ban_type[self.active_mirror_idx] = "soft"
+            elif m_name == "gate":
+                async with session.get(f"{base_url}/api/v4/futures/usdt/contracts") as resp:
+                    if resp.status == 200:
+                        info = await resp.json()
+                        if isinstance(info, list):
+                            perps, new_set = set(), set()
+                            for s in info:
+                                name = s.get("name", "")
+                                if (
+                                    name.endswith("_USDT")
+                                    and s.get("status") == "trading"
+                                    and not s.get("in_delisting")
+                                    and not s.get("is_pre_market")
+                                ):
+                                    sym = name[:-5] + "USDT"
+                                    perps.add(sym)
+                                    if int(s.get("create_time", 0) or 0) >= new_cutoff_sec:
+                                        new_set.add(sym)
+                            if len(perps) >= 100:
+                                self._valid_crypto_perps[m_name] = (now, perps)
+                                self._new_crypto_perps[m_name] = new_set
+                                return perps
         except Exception:
             pass
         return cached_set
@@ -262,33 +552,38 @@ class BinanceClient:
         if not data or not isinstance(data, list):
             return []
 
-        # Адаптация порога ликвидности под активное зеркало:
-        # fapi — Binance Futures ($15M); bitget — Bitget USDT-Futures ($1.8M, чистый крипто isRwa=NO); vision/spot — спот ($1.2M)
+        # Адаптация порога ликвидности под активное зеркало + авто-добор до 160-200 живых крипто-пар (включая НОВЫЕ ЛИСТИНГИ!):
+        # Даже если на Render осталась старая переменная окружения MIN_24H_VOLUME_USDT=20M, радар сам добирает полный пул чистых крипто-пар.
         is_spot_mirror = self.is_spot_mirror
         m_name = self.active_mirror_name
-        if is_spot_mirror and min_vol_usdt >= 1_500_000.0:
-            spot_floor = float(getattr(config, "SPOT_MIRROR_MIN_VOL_USDT", 350_000.0))
-            effective_min_vol = max(spot_floor, min_vol_usdt * 0.07)
-        elif m_name == "bitget" and min_vol_usdt >= 3_000_000.0:
-            bitget_floor = float(getattr(config, "BITGET_MIRROR_MIN_VOL_USDT", 1_000_000.0))
-            effective_min_vol = max(bitget_floor, min_vol_usdt * 0.08)
+        if m_name == "fapi":
+            base_min_vol = min(min_vol_usdt, 3_500_000.0)
+            hard_floor_vol = 1_000_000.0
+            new_listing_floor = 400_000.0
+        elif m_name in ("bybit", "gate", "bitget"):
+            base_min_vol = float(getattr(config, "ALT_FUTURES_MIN_VOL_USDT", 600_000.0))
+            hard_floor_vol = 250_000.0
+            new_listing_floor = 150_000.0
         else:
-            effective_min_vol = min_vol_usdt
+            base_min_vol = float(getattr(config, "SPOT_MIRROR_MIN_VOL_USDT", 500_000.0))
+            hard_floor_vol = 200_000.0
+            new_listing_floor = 120_000.0
 
-        valid_crypto_perps = await self.fetch_valid_crypto_perps() if m_name in ("fapi", "bitget") else set()
+        valid_crypto_perps = await self.fetch_valid_crypto_perps() if m_name in ("fapi", "bybit", "bitget", "gate") else set()
+        new_crypto_perps = self._new_crypto_perps.get(m_name, set())
         excluded = getattr(config, "EXCLUDED_TICKERS", set())
         stock_roots = getattr(config, "STOCK_TICKER_ROOTS", set())
         strict = getattr(config, "STRICT_WHITELIST_ONLY", False)
         whitelist = set(getattr(config, "TOP_CRYPTO_UNIVERSE", []))
-        max_24h_cap = float(getattr(config, "MAX_24H_CHANGE_CAP", 100.0))
-        min_trades = int(getattr(config, "SPOT_MIRROR_MIN_TRADES", 1200)) if is_spot_mirror else int(getattr(config, "MIN_24H_TRADES_COUNT", 3500))
+        max_24h_cap = float(getattr(config, "MAX_24H_CHANGE_CAP", 120.0))
+        min_trades = int(getattr(config, "SPOT_MIRROR_MIN_TRADES", 800)) if is_spot_mirror else int(getattr(config, "MIN_24H_TRADES_COUNT", 1500))
         lev_tokens = ("UPUSDT", "DOWNUSDT", "BEARUSDT", "BULLUSDT")
         fiat_commodities = {"XAU", "XAUT", "PAXG", "XAG", "XPT", "XPD", "CL", "BZ", "COPPER", "NATGAS", "EUR", "EURI", "AEUR", "GBP", "AUD", "BRL", "TRY", "JPY"}
         real_crypto_b = {"BNB", "ARB", "SHIB", "1000SHIB", "TRB", "BB", "CKB", "YB", "PHB", "AMB", "BLUR", "BOME", "BONK", "1000BONK"}
         now_ms = int(time.time() * 1000)
 
         fresh_books: Dict[str, Tuple[float, float]] = {}
-        valid_tickers = []
+        all_clean_tickers = []
         for item in data:
             if not isinstance(item, dict):
                 continue
@@ -305,25 +600,24 @@ class BinanceClient:
             base = sym[:-4]
             if base in fiat_commodities:
                 continue
-            # Все токенизированные акции и TradFi отсекаются как по exchangeInfo, так и по корням:
-            if base in stock_roots or (is_spot_mirror and base.endswith("B") and base not in real_crypto_b and base[:-1] in stock_roots):
+            if base in stock_roots or base.endswith("STOCK") or (is_spot_mirror and base.endswith("B") and base not in real_crypto_b and base[:-1] in stock_roots):
                 continue
             if strict and sym not in whitelist:
                 continue
 
             try:
-                # Защита от делистнутых/архивных пар на data-api.binance.vision (closeTime старше 5 минут)
                 close_time_ms = int(item.get("closeTime", 0) or 0)
                 if close_time_ms > 0 and (now_ms - close_time_ms) > 300_000:
                     continue
 
-                # Фильтр минимального количества сделок за 24ч (отсев монет-зомби с искусственным объемом)
+                is_new_pair = sym in new_crypto_perps
                 cnt = int(item.get("count", 0) or 0)
-                if cnt > 0 and cnt < min_trades:
+                if (not is_new_pair) and cnt > 0 and cnt < min_trades:
                     continue
 
                 vol = float(item.get("quoteVolume", 0) or 0)
-                if vol < effective_min_vol:
+                min_needed_vol = new_listing_floor if is_new_pair else hard_floor_vol
+                if vol < min_needed_vol:
                     continue
                 last_p = float(item.get("lastPrice", 0) or 0)
                 if last_p <= 0:
@@ -332,11 +626,10 @@ class BinanceClient:
                 high_p = max(float(item.get("highPrice", 0) or 0), last_p)
                 low_p = min(float(item.get("lowPrice", 0) or last_p), last_p)
 
-                # Автоматический детектор привязанных к $1.00 стейблкоинов (USD1, RLUSD, RWUSD, USDE, U и др.)
+                # Автоматический детектор стейблкоинов ($0.97..$1.03 с узким диапазоном)
                 if 0.97 <= last_p <= 1.03 and low_p > 0 and ((high_p - low_p) / low_p) < 0.012:
                     continue
 
-                # Попутно кешируем свежие bid/ask из ticker24 (экономит 100+ запросов к стакану!)
                 bid_p = float(item.get("bidPrice", 0) or 0)
                 ask_p = float(item.get("askPrice", 0) or 0)
                 if bid_p > 0 and ask_p >= bid_p:
@@ -344,10 +637,11 @@ class BinanceClient:
 
                 dist_to_high = (high_p - last_p) / max(high_p, 1e-9)
                 dist_to_low = (last_p - low_p) / max(last_p, 1e-9)
-                # Индекс ракетной активности: сочетает силу суточного тренда и близость к пробою экстремума
                 rocket_heat = abs(pct) / max(min(dist_to_high, dist_to_low) * 100.0 + 0.5, 0.5)
+                if is_new_pair:
+                    rocket_heat *= 1.35  # Приоритет свежим листингам и новым ракетам
 
-                valid_tickers.append({
+                all_clean_tickers.append({
                     "symbol": sym,
                     "price": last_p,
                     "volume_24h": vol,
@@ -356,7 +650,8 @@ class BinanceClient:
                     "low_24h": low_p,
                     "dist_to_high_24h": round(dist_to_high, 4),
                     "dist_to_low_24h": round(dist_to_low, 4),
-                    "rocket_heat": round(rocket_heat, 3)
+                    "rocket_heat": round(rocket_heat, 3),
+                    "is_new_listing": is_new_pair
                 })
             except (ValueError, TypeError):
                 continue
@@ -365,48 +660,65 @@ class BinanceClient:
             self._book_tickers_cache.update(fresh_books)
             self._book_tickers_cache_time = time.time()
 
-        if not valid_tickers:
+        if not all_clean_tickers:
             return []
+
+        # Приоритетно берем пары >= base_min_vol (и ВСЕ новые листинги >= new_listing_floor);
+        # если их меньше целевого лимита (например ночью в тихий рынок), мягко добираем из clean_tickers >= hard_floor_vol!
+        valid_tickers = [x for x in all_clean_tickers if x["volume_24h"] >= base_min_vol or x["is_new_listing"]]
+        target_fill = min(limit, 180)
+        if len(valid_tickers) < target_fill:
+            seen_syms = {x["symbol"] for x in valid_tickers}
+            extras = [x for x in all_clean_tickers if x["symbol"] not in seen_syms]
+            extras.sort(key=lambda x: (-x["rocket_heat"], -x["volume_24h"]))
+            valid_tickers.extend(extras[:(target_fill - len(valid_tickers))])
 
         # 1. Горячие LONG ракеты (активный рост + поджатие к хаям)
         breakout_long_pool = [
             x for x in valid_tickers
-            if 0.8 <= x["price_change_24h_pct"] <= max_24h_cap and x["dist_to_high_24h"] <= 0.065
+            if 0.6 <= x["price_change_24h_pct"] <= max_24h_cap and x["dist_to_high_24h"] <= 0.08
         ]
         breakout_long_pool.sort(key=lambda x: (-x["rocket_heat"], x["dist_to_high_24h"], -x["volume_24h"]))
 
         # 2. Горячие SHORT пробои (активный слив + поджатие к лоям)
         breakdown_short_pool = [
             x for x in valid_tickers
-            if -max_24h_cap <= x["price_change_24h_pct"] <= -0.8 and x["dist_to_low_24h"] <= 0.065
+            if -max_24h_cap <= x["price_change_24h_pct"] <= -0.6 and x["dist_to_low_24h"] <= 0.08
         ]
         breakdown_short_pool.sort(key=lambda x: (-x["rocket_heat"], x["dist_to_low_24h"], -x["volume_24h"]))
 
-        # 3. Топ волатильных лидеров дня (все монеты с сильным движением за 24ч независимо от локального отката)
+        # 3. Новые крипто-листинги и взрывные монеты дня (ловит свежие ракеты до раздутия 24ч объема!)
+        new_listing_pool = [x for x in valid_tickers if x["is_new_listing"] and abs(x["price_change_24h_pct"]) <= max_24h_cap]
+        new_listing_pool.sort(key=lambda x: (-x["rocket_heat"], -x["volume_24h"]))
+
+        # 4. Топ волатильных лидеров дня
         top_movers = sorted(valid_tickers, key=lambda x: abs(x["price_change_24h_pct"]), reverse=True)
 
-        # 4. Топ ликвидности и элитный юниверс
+        # 5. Топ ликвидности и элитный юниверс
         by_volume = sorted(valid_tickers, key=lambda x: (1 if x["symbol"] in whitelist else 0, x["volume_24h"]), reverse=True)
 
         combined_dict: Dict[str, Dict[str, Any]] = {}
 
-        # 30% квоты: горячие LONG ракеты у хаев
-        q_long = max(25, int(limit * 0.30))
-        for item in breakout_long_pool[:q_long]:
+        # 25% квоты: горячие LONG ракеты у хаев
+        for item in breakout_long_pool[:max(35, int(limit * 0.25))]:
             combined_dict[item["symbol"]] = item
 
-        # 25% квоты: горячие SHORT пробои у лоев
-        q_short = max(20, int(limit * 0.25))
-        for item in breakdown_short_pool[:q_short]:
+        # 20% квоты: горячие SHORT пробои у лоев
+        for item in breakdown_short_pool[:max(30, int(limit * 0.20))]:
             combined_dict[item["symbol"]] = item
 
-        # 20% квоты: главные ракеты дня (включая фазы булл-флага / отката к EMA9 перед второй волной)
-        q_movers = max(20, int(limit * 0.20))
-        for item in top_movers[:q_movers]:
+        # 20% квоты: НОВЫЕ ЛИСТИНГИ / innovation-монеты
+        for item in new_listing_pool[:max(30, int(limit * 0.20))]:
+            combined_dict[item["symbol"]] = item
+
+        # 20% квоты: главные волатильные лидеры дня
+        for item in top_movers[:max(30, int(limit * 0.20))]:
+            if len(combined_dict) >= limit:
+                break
             if abs(item["price_change_24h_pct"]) <= max_24h_cap:
                 combined_dict[item["symbol"]] = item
 
-        # 25% квоты + добор: лидеры ликвидности и элитный юниверс
+        # Добор до полного limit (180-200 пар): лидеры ликвидности + активные монеты
         for item in by_volume:
             if len(combined_dict) >= limit:
                 break

@@ -30,4 +30,6 @@ services:
       - key: MAX_POSITIONS
         value: "2"
       - key: MIN_24H_VOLUME_USDT
-        value: "15000000"
+        value: "3000000"
+      - key: SCAN_TICKERS_LIMIT
+        value: "180"

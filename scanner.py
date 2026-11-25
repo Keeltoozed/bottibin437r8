@@ -150,22 +150,23 @@ class MarketScanner:
                 avg_5m_qvol = float(analysis.get("avg_5m_quote_vol", 0.0) or 0.0)
                 v3_surge = float(analysis.get("v3_surge", 1.0) or 1.0)
                 # Адаптация порога 5m объема под активное зеркало:
-                # fapi ($15K/5m), bitget ($2K/5m + >=$5K пробойная свеча), vision/spot ($600/5m + >=$2.5K пробойная свеча).
+                # fapi ($5K/5m база + >=$15K пробой), bybit/gate/bitget ($1K/5m + >=$4K), vision ($600/5m + >=$2.5K).
                 is_spot_mirror = binance_client.is_spot_mirror
-                is_bitget_mirror = (binance_client.active_mirror_name == "bitget")
+                m_name_now = binance_client.active_mirror_name
+                is_alt_futures = m_name_now in ("bybit", "gate", "bitget")
                 if is_spot_mirror:
                     min_avg_vol = float(getattr(config, "SPOT_MIRROR_MIN_AVG_5M_VOL", 600.0))
-                elif is_bitget_mirror:
-                    min_avg_vol = float(getattr(config, "BITGET_MIRROR_MIN_AVG_5M_VOL", 2000.0))
+                elif is_alt_futures:
+                    min_avg_vol = float(getattr(config, "ALT_FUTURES_MIN_AVG_5M_VOL", 1000.0))
                 else:
-                    min_avg_vol = float(getattr(config, "MIN_AVG_5M_QUOTE_VOL", 15000.0))
+                    min_avg_vol = float(getattr(config, "MIN_AVG_5M_QUOTE_VOL", 5000.0))
                 last_5m_qvol = float(analysis.get("last_quote_volume", 0.0) or 0.0)
                 if is_spot_mirror:
                     vol_floor_ok = (avg_5m_qvol >= min_avg_vol) and (last_5m_qvol >= 2500.0)
-                elif is_bitget_mirror:
-                    vol_floor_ok = (avg_5m_qvol >= min_avg_vol) and (last_5m_qvol >= 5000.0)
+                elif is_alt_futures:
+                    vol_floor_ok = (avg_5m_qvol >= min_avg_vol) and (last_5m_qvol >= 4000.0)
                 else:
-                    vol_floor_ok = (avg_5m_qvol >= min_avg_vol)
+                    vol_floor_ok = (avg_5m_qvol >= min_avg_vol) and (last_5m_qvol >= 15000.0)
                 min_v3 = float(getattr(config, "MIN_V3_VOLUME_PERSISTENCE", 1.10))
                 is_mtf_long = analysis.get("is_mtf_long_ok", False) if getattr(config, "ENABLE_MTF_15M_FILTER", True) else True
                 is_mtf_short = analysis.get("is_mtf_short_ok", False) if getattr(config, "ENABLE_MTF_15M_FILTER", True) else True

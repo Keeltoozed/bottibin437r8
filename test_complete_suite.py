@@ -19,7 +19,7 @@ async def run_suite():
     obsidian_vault.enabled = False
 
     # 1. ТЕСТ CLOSED-CANDLE ML ENGINE (ЗАЩИТА ОТ 3-СЕКУНДНОЙ ПУСТОЙ СВЕЧИ)
-    print("\n[ТЕСТ 1/6] Проверка Dual Quant ML Engine и защиты от незакрытой свечи...")
+    print("\n[ТЕСТ 1/8] Проверка Dual Quant ML Engine и защиты от незакрытой свечи...")
     assert ml_engine.model_long is not None or ml_engine.model is not None, "LONG модель не загружена"
     assert ml_engine.model_short is not None, "SHORT модель не загружена"
 
@@ -52,8 +52,8 @@ async def run_suite():
     assert extracted_rvol > 2.5, f"Ожидался RVOL закрытой свечи > 2.5x, получено {extracted_rvol:.2f}x (баг незакрытой свечи!)"
     print(f"  ✓ ML оценивает закрытый сигнальный бар (RVOL={extracted_rvol:.2f}x), игнорируя пустую живую свечу!")
 
-    # 2. ТЕСТ СТРУКТУРНОГО АНАЛИЗА BINANCE И РАДАРА 100 ПАР
-    print("\n[ТЕСТ 2/6] Проверка подключения к Binance, BTC-щита и радара пробоев...")
+    # 2. ТЕСТ СТРУКТУРНОГО АНАЛИЗА BINANCE И РАДАРА 180 ПАР
+    print("\n[ТЕСТ 2/8] Проверка подключения к Binance, BTC-щита и радара пробоев...")
     btc_reg = await binance_client.fetch_btc_regime()
     print(f"  ✓ Статус Bitcoin: {btc_reg['status_str']}")
     tickers = await binance_client.fetch_top_tickers(min_vol_usdt=config.MIN_24H_VOLUME_USDT, limit=config.SCAN_TICKERS_LIMIT)
@@ -63,7 +63,7 @@ async def run_suite():
     print(f"  ✓ Радар отобрал {len(tickers)} ликвидных пар; структурный разбор SOLUSDT корректен (CLV={sol_analysis['close_strength_long']})")
 
     # 3. ТЕСТ ANTI-RUG ROCKET HARVEST (60% В КЭШ НА 1.65R + 40% БЕЗРИСКОВЫЙ MOONBAG + СВОБОДНЫЙ СЛОТ)
-    print("\n[ТЕСТ 3/7] Проверка Anti-Rug выхода (60% на 1.65R + 40% Parabolic Trail + безрисковый слот)...")
+    print("\n[ТЕСТ 3/8] Проверка Anti-Rug выхода (60% на 1.65R + 40% Parabolic Trail + безрисковый слот)...")
     portfolio.open_positions.clear()
     portfolio.trade_history.clear()
     portfolio.symbol_lockouts.clear()
@@ -108,14 +108,14 @@ async def run_suite():
     assert portfolio.cash > 23.0, f"Баланс должен мощно вырасти на большой ракете, получено ${portfolio.cash:.2f}"
 
     # 4. ТЕСТ TIME-STOP БЕЗ ЛОЖНОЙ БЛОКИРОВКИ CIRCUIT BREAKER
-    print("\n[ТЕСТ 4/6] Проверка мягкого Time-Stop (не замораживает бота на околонулевом выходе)...")
+    print("\n[ТЕСТ 4/8] Проверка мягкого Time-Stop (не замораживает бота на околонулевом выходе)...")
     portfolio.open_position("SUIUSDT", "LONG", 2.0, 3.0, 1.97, 2.045, 2.09, "Test TimeStop", 12)
     portfolio.close_position("SUIUSDT", 1.999, "⏱️ Time-Stop (35м без импульса)", partial_pct=1.0)
     assert portfolio.daily_losses_count == 0, "Околонулевой скретч по Time-Stop не должен тратить дневной лимит стопов!"
     print(f"  ✓ Time-Stop закрыл вялую сделку (${portfolio.trade_history[-1]['realized_pnl']:+.2f}) без срабатывания аварийного лимита стопов.")
 
     # 5. ТЕСТ РЕЖИМА НЕПРЕРЫВНОЙ ТОРГОВЛИ БЕЗ ЗАМОРОЗОК (CIRCUIT BREAKER = FALSE)
-    print("\n[ТЕСТ 5/6] Проверка непрерывной торговли без заморозок (Circuit Breaker отключен)...")
+    print("\n[ТЕСТ 5/8] Проверка непрерывной торговли без заморозок (Circuit Breaker отключен)...")
     portfolio.consecutive_losses = 0
     portfolio.pause_until = 0.0
     portfolio.open_position(" LOSS1USDT", "LONG", 1.0, 4.0, 0.988, 1.018, 1.036, "SL1", 15)
@@ -128,7 +128,7 @@ async def run_suite():
     print("  ✓ Бот успешно торгует непрерывно: после 2 стопов заморозка НЕ активируется (пауза 0 сек)!")
 
     # 6. ТЕСТ СОГЛАСОВАННОСТИ GROQ ENGINE С RSI 78 НА ПРОБОЕ
-    print("\n[ТЕСТ 6/6] Проверка одобрения пробоя с RSI=79 и Marubozu-свечой (нижний фитиль 0%)...")
+    print("\n[ТЕСТ 6/8] Проверка одобрения пробоя с RSI=79 и Marubozu-свечой (нижний фитиль 0%)...")
     brk_ctx = {
         "symbol": "ENAUSDT", "candidate_side": "LONG", "current_price": 1.05,
         "volume_surge_ratio": 2.9, "upper_wick_pct": 0.05, "lower_wick_pct": 0.00,
@@ -155,37 +155,55 @@ async def run_suite():
     assert not bad_syms, f"В радар попали мусорные пары/акции/стейблы: {bad_syms}"
     print(f"  ✓ Зеркало vision отобрало {len(vision_tickers)} чистых крипто-пар (акции *BUSDT, стейблкоины и делисты отсечены)!")
 
-    # 8. ТЕСТ ANTI-418 FAILOVER НА BITGET USDT-FUTURES + 5M CANDLE-BOUNDARY GUARD
-    print("\n[ТЕСТ 8/8] Проверка мгновенного failover на Bitget USDT-FUTURES при HTTP 418 и защиты от rate-limit...")
+    # 8. ТЕСТ ANTI-418 FAILOVER НА BYBIT / GATE / BITGET FUTURES + 180 ПАР + НОВЫЕ ЛИСТИНГИ + 5M GUARD
+    print("\n[ТЕСТ 8/8] Проверка мгновенного failover (fapi 418 -> bybit -> gate -> bitget), 180 пар, новых листингов и защиты от 429...")
     from scanner import market_scanner
     binance_client.active_mirror_idx = 0  # fapi
-    binance_client._mirror_cooldowns[0] = time.time() + 300.0  # Симулируем HTTP 418 shared-IP бан на fapi!
+    binance_client._mirror_cooldowns[0] = time.time() + 160000.0  # Симулируем 45-часовой HTTP 418 shared-IP бан Render на fapi!
+    binance_client._mirror_ban_type[0] = "hard"
     binance_client._ticker24_cache = ("", 0.0, [])
     binance_client._book_tickers_cache = {}
     binance_client._book_tickers_cache_time = 0.0
 
-    bg_tickers = await binance_client.fetch_top_tickers(min_vol_usdt=config.MIN_24H_VOLUME_USDT, limit=config.SCAN_TICKERS_LIMIT)
-    assert binance_client.active_mirror_name == "bitget", f"При бане fapi (418) должен включиться bitget, получено {binance_client.active_mirror_name}"
-    assert len(bg_tickers) >= 75, f"Bitget Futures должен вернуть >= 75 чистых крипто-пар, получено {len(bg_tickers)}"
-    bg_bad = [t["symbol"] for t in bg_tickers if t["symbol"] in ("NVDAUSDT", "TSLAUSDT", "SOXLUSDT", "XAUUSDT", "PAXGUSDT", "AAPL")]
-    assert not bg_bad, f"В радар Bitget попали RWA/акции/золото: {bg_bad}"
-    bg_btc = await binance_client.fetch_btc_regime()
-    bg_sol = await binance_client.fetch_candles_analysis("SOLUSDT", interval="5m", limit=200)
-    bg_price = await binance_client.fetch_price("SOLUSDT")
-    _, _, bg_spread = await binance_client.fetch_orderbook_spread("SOLUSDT")
-    assert bg_sol is not None and bg_sol["current_price"] > 0 and bg_price and bg_price > 0 and bg_spread < 0.01
-    print(f"  ✓ Failover fapi(418) -> bitget сработал мгновенно: {len(bg_tickers)} чистых крипто-фьючерсов, SOL=${bg_price:.2f} (spread {bg_spread*100:.3f}%), BTC: {bg_btc['pct_15m']:+.2f}%")
+    bybit_tickers = await binance_client.fetch_top_tickers(min_vol_usdt=config.MIN_24H_VOLUME_USDT, limit=config.SCAN_TICKERS_LIMIT)
+    assert binance_client.active_mirror_name == "bybit", f"При бане fapi (418) должен включиться bybit, получено {binance_client.active_mirror_name}"
+    assert len(bybit_tickers) >= 150, f"Bybit Futures должен вернуть >= 150 чистых крипто-пар, получено {len(bybit_tickers)}"
+    bb_bad = [t["symbol"] for t in bybit_tickers if t["symbol"] in ("NVDAUSDT", "TSLAUSDT", "SOXLUSDT", "XAUUSDT", "PAXGUSDT", "AAPLUSDT", "TGTSTOCKUSDT")]
+    assert not bb_bad, f"В радар Bybit попали RWA/акции/золото: {bb_bad}"
+    bb_new = sum(1 for t in bybit_tickers if t.get("is_new_listing"))
+    bb_btc = await binance_client.fetch_btc_regime()
+    bb_sol = await binance_client.fetch_candles_analysis("SOLUSDT", interval="5m", limit=200)
+    bb_price = await binance_client.fetch_price("SOLUSDT")
+    _, _, bb_spread = await binance_client.fetch_orderbook_spread("SOLUSDT")
+    assert bb_sol is not None and bb_sol["current_price"] > 0 and bb_price and bb_price > 0 and bb_spread < 0.01
+    print(f"  ✓ Failover fapi(418) -> bybit сработал мгновенно: {len(bybit_tickers)} чистых крипто-фьючерсов (вкл. {bb_new} новых/innovation), SOL=${bb_price:.2f} (spread {bb_spread*100:.3f}%), BTC: {bb_btc['pct_15m']:+.2f}%")
+
+    # Проверяем также Gate.io (если и Bybit вдруг недоступен) и Bitget!
+    bybit_idx = next(i for i, m in enumerate(binance_client.mirrors) if m["name"] == "bybit")
+    binance_client._mirror_cooldowns[bybit_idx] = time.time() + 1800.0
+    binance_client._mirror_ban_type[bybit_idx] = "hard"
+    binance_client._ticker24_cache = ("", 0.0, [])
+    binance_client._book_tickers_cache = {}
+    binance_client._book_tickers_cache_time = 0.0
+    gate_tickers = await binance_client.fetch_top_tickers(min_vol_usdt=config.MIN_24H_VOLUME_USDT, limit=config.SCAN_TICKERS_LIMIT)
+    assert binance_client.active_mirror_name == "gate", f"При бане fapi+bybit должен включиться gate, получено {binance_client.active_mirror_name}"
+    assert len(gate_tickers) >= 140, f"Gate Futures должен вернуть >= 140 чистых крипто-пар, получено {len(gate_tickers)}"
+    gate_sol = await binance_client.fetch_candles_analysis("SOLUSDT", interval="5m", limit=200)
+    gate_price = await binance_client.fetch_price("SOLUSDT")
+    assert gate_sol is not None and gate_sol["current_price"] > 0 and gate_price and gate_price > 0
+    print(f"  ✓ Failover -> gate (900 req/s) сработал мгновенно: {len(gate_tickers)} чистых крипто-фьючерсов, SOL=${gate_price:.2f}")
 
     # Проверяем 5m candle-boundary guard (защита от 12-секундного спама на Render)
     market_scanner._last_scanned_bar = int(time.time()) // 300
-    portfolio.last_universe_count = len(bg_tickers)
+    portfolio.last_universe_count = len(bybit_tickers)
     before_u = portfolio.funnel_stats["universe"]
     skipped = await market_scanner.scan_market_once(force=False)
     assert skipped == [] and portfolio.funnel_stats["universe"] == before_u, "Повторный вызов внутри той же 5m свечи должен пропускаться без API-запросов!"
     print("  ✓ 5m Candle-Boundary Guard работает: повторный вызов внутри текущей 5m свечи = 0 лишних запросов (экономия веса 35x)!")
 
-    # Снимаем тестовый кулдаун
+    # Снимаем тестовые кулдауны
     binance_client._mirror_cooldowns.clear()
+    binance_client._mirror_ban_type.clear()
     binance_client.active_mirror_idx = 0
 
     await binance_client.close()
