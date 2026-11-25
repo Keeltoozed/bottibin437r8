@@ -130,9 +130,11 @@ class MarketScanner:
                 min_atr_pct = float(getattr(config, "MIN_ATR_PCT", 0.0025))
                 avg_5m_qvol = float(analysis.get("avg_5m_quote_vol", 0.0) or 0.0)
                 v3_surge = float(analysis.get("v3_surge", 1.0) or 1.0)
-                # КРИТИЧЕСКИЙ ФИКС RENDER (VISION SPOT MIRROR): спотовый 5m объем в 10 раз меньше фьючерсного!
+                # КРИТИЧЕСКИЙ ФИКС RENDER (VISION SPOT MIRROR): спотовый 5m объем в 10-20 раз меньше фьючерсного (особенно до старта ракеты вроде MANTRA)!
                 is_spot_mirror = (binance_client.active_mirror_name != "fapi")
-                min_avg_vol = float(getattr(config, "SPOT_MIRROR_MIN_AVG_5M_VOL", 1500.0)) if is_spot_mirror else float(getattr(config, "MIN_AVG_5M_QUOTE_VOL", 15000.0))
+                min_avg_vol = float(getattr(config, "SPOT_MIRROR_MIN_AVG_5M_VOL", 600.0)) if is_spot_mirror else float(getattr(config, "MIN_AVG_5M_QUOTE_VOL", 15000.0))
+                last_5m_qvol = float(analysis.get("last_quote_volume", 0.0) or 0.0)
+                vol_floor_ok = (avg_5m_qvol >= min_avg_vol) and ((not is_spot_mirror) or (last_5m_qvol >= 2500.0))
                 min_v3 = float(getattr(config, "MIN_V3_VOLUME_PERSISTENCE", 1.10))
                 is_mtf_long = analysis.get("is_mtf_long_ok", False) if getattr(config, "ENABLE_MTF_15M_FILTER", True) else True
                 is_mtf_short = analysis.get("is_mtf_short_ok", False) if getattr(config, "ENABLE_MTF_15M_FILTER", True) else True
@@ -167,7 +169,7 @@ class MarketScanner:
                     anti_rug_long and
                     atr_pct >= min_atr_pct and
                     vol_confirmed and
-                    avg_5m_qvol >= min_avg_vol and
+                    vol_floor_ok and
                     is_mtf_long and
                     is_macro_long and
                     pct_5m >= min_req_impulse and
@@ -190,7 +192,7 @@ class MarketScanner:
                     anti_rug_short and
                     atr_pct >= min_atr_pct and
                     vol_confirmed and
-                    avg_5m_qvol >= min_avg_vol and
+                    vol_floor_ok and
                     is_mtf_short and
                     is_macro_short and
                     pct_5m <= -min_req_impulse and
@@ -248,7 +250,7 @@ class MarketScanner:
                     else:
                         w_status = f"⏳ Поджатие: {dist_near:.2f}% до пробоя (RVOL {surge:.1f}x)"
 
-                    watch_activity = round(surge * (1.0 / max(dist_near, 0.15)) + abs(alpha_5m), 3)
+                    watch_activity = round((abs(alpha_5m) + abs(pct_5m) * 0.5) * min(surge, 8.0) * (1.0 / max(dist_near, 0.20)), 3) if vol_floor_ok else 0.0
                     return {
                         "kind": "watch",
                         "data": {
