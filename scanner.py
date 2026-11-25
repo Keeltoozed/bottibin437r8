@@ -449,6 +449,7 @@ class MarketScanner:
 
                 max_total_slots = config.MAX_CONCURRENT_POSITIONS + int(getattr(config, "MAX_RISK_FREE_RUNNERS", 2))
                 if len(at_risk_positions) < config.MAX_CONCURRENT_POSITIONS and len(portfolio.open_positions) < max_total_slots and actual_margin >= min_mg and portfolio.cash >= actual_margin:
+                    brk_type = ctx.get("breakout_type", "STRUCT_3H")
                     opened = portfolio.open_position(
                         symbol=sym,
                         side=cand_side,
