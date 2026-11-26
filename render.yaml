@@ -24,7 +24,7 @@ services:
       - key: SIZING_MODE
         value: "equal_margin"
       - key: FIXED_MARGIN_PCT
-        value: "0.040"
+        value: "0.030"
       - key: MAX_ENTRY_5M_SPIKE_PCT
         value: "3.50"
       - key: SL_ATR_MULT
@@ -32,7 +32,7 @@ services:
       - key: STOP_LOSS_MIN_PCT
         value: "0.0110"
       - key: STOP_LOSS_MAX_PCT
-        value: "0.0550"
+        value: "0.0450"
       - key: LEVERAGE
         value: "50"
       - key: RISK_PER_TRADE_PCT

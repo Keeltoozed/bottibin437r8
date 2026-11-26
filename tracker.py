@@ -331,7 +331,9 @@ class PortfolioTracker:
 
         realized_pnl = round(gross_pnl - fees_and_slippage, 4)
         return_to_cash = round(closed_margin + realized_pnl, 4)
-        self.cash += max(return_to_cash, 0.0)
+        # Честный Cross Margin учет: если убыток по широкому стопу превысил залог сделки (напр. -$4.50 при марже $3.00),
+        # разница (-$1.50) честно списывается со свободного кэша портфеля, 1-в-1 как на фьючерсах Binance/Bybit!
+        self.cash = round(max(0.0, self.cash + return_to_cash), 4)
 
         # Накапливаем финансовый итог внутри позиции
         pos["realized_pnl_accum"] = pos.get("realized_pnl_accum", 0.0) + realized_pnl

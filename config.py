@@ -38,7 +38,7 @@ INITIAL_BALANCE = float(os.getenv("INITIAL_BALANCE", "100.0"))
 
 # Режим сайзинга: equal_margin ("как они" — равный залог маржи на каждую сделку!) или risk_parity
 SIZING_MODE = os.getenv("SIZING_MODE", "equal_margin")
-FIXED_MARGIN_PCT = float(os.getenv("FIXED_MARGIN_PCT", "0.040"))  # 4.0% от эквити ($4.00 маржа / $200.00 позиция @ 50x при $100!)
+FIXED_MARGIN_PCT = float(os.getenv("FIXED_MARGIN_PCT", "0.030"))  # 3.0% от эквити ($3.00 маржа / $150.00 позиция @ 50x Cross при $100!)
 
 # Параметры Risk-Parity (используются только при SIZING_MODE=risk_parity) и защиты от просадки:
 RISK_PER_TRADE_PCT = float(os.getenv("RISK_PER_TRADE_PCT", "0.055"))
@@ -97,9 +97,9 @@ MAX_PRE_BREAKOUT_EXT_PCT = float(os.getenv("MAX_PRE_BREAKOUT_EXT_PCT", "0.028"))
 MAX_3H_CLIMAX_RETURN_PCT = float(os.getenv("MAX_3H_CLIMAX_RETURN_PCT", "0.20"))    # Блок входа в выдохшуюся параболу (> +20% за 3 часа)
 MAX_LIVE_DRIFT_PCT = float(os.getenv("MAX_LIVE_DRIFT_PCT", "0.018"))
 
-# Волатильно-адаптивные границы стопа (простор под Big-Runner удержание: мин 1.1%, макс 5.5%, ATR x1.75 — не сносит шумом!):
+# Волатильно-адаптивные границы стопа (простор под Big-Runner удержание: мин 1.1%, макс 4.5%, ATR x1.75 — не сносит шумом!):
 STOP_LOSS_MIN_PCT = float(os.getenv("STOP_LOSS_MIN_PCT", "0.0110"))  # 1.10% мин стоп (защита от шумовых сбивов)
-STOP_LOSS_MAX_PCT = float(os.getenv("STOP_LOSS_MAX_PCT", "0.0550"))  # 5.50% макс стоп (как на волатильных сигналах 3.7-5.5%)
+STOP_LOSS_MAX_PCT = float(os.getenv("STOP_LOSS_MAX_PCT", "0.0450"))  # 4.50% макс стоп (контроль риска на Cross Margin!)
 MAX_ALLOWED_SL_PCT = STOP_LOSS_MAX_PCT
 SL_ATR_MULT = float(os.getenv("SL_ATR_MULT", "1.75"))                # Структурный стоп не ближе 1.75 * ATR14
 SIZING_SL_FLOOR_PCT = float(os.getenv("SIZING_SL_FLOOR_PCT", "0.0110"))

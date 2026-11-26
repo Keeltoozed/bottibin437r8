@@ -135,23 +135,33 @@ async def run_suite():
     print(f"  ✓ Большая ракета схвачена 3-шаговым выходом 1 сделкой: PnL ${rec['realized_pnl']:+.2f} ({rec['roi_pct']:+.1f}%) | {rec['reason']}")
     assert portfolio.cash > 118.0, f"Баланс $100 должен мощно вырасти на большой ракете, получено ${portfolio.cash:.2f}"
 
-    # 3B. ТЕСТ EQUAL MARGIN (4.0% = $4.00) + ANTI-SPIKE + ЧЕСТНЫЙ НЕРЕАЛИЗОВАННЫЙ PNL + ШИРОКИЙ BIG-RUNNER TRAIL
-    assert config.SIZING_MODE == "equal_margin" and abs(config.FIXED_MARGIN_PCT - 0.040) < 1e-6
+    # 3B. ТЕСТ ЧЕСТНОГО CROSS MARGIN (3.0% = $3.00 / $150 @ 50x) + ПОЛНОЕ СПИСАНИЕ СТОПА > МАРЖИ + LIVE PNL
+    assert config.SIZING_MODE == "equal_margin" and abs(config.FIXED_MARGIN_PCT - 0.030) < 1e-6
     assert abs(config.MAX_ENTRY_5M_SPIKE_PCT - 3.50) < 1e-6
     from exit_manager import exit_manager
     saved_cash = portfolio.cash
     portfolio.cash = 100.0
     portfolio.open_positions.clear()
     eq_m = round((portfolio.cash) * config.FIXED_MARGIN_PCT, 2)
-    assert eq_m == 4.00, f"Equal margin от $100 должен быть ровно $4.00, получено {eq_m}"
+    assert eq_m == 3.00, f"Equal margin от $100 должен быть ровно $3.00, получено {eq_m}"
     portfolio.open_position("POPCATUSDT", "LONG", 0.02775, eq_m, 0.027198, 0.028661, 0.029197, "EqualMargin Test", leverage=50)
     portfolio.update_position_prices({"POPCATUSDT": 0.02775 * 1.0010})  # +0.10% (+5.0% грязными @ 50x - 2.5% комиссия входа = +2.5%!)
     pop_pos = portfolio.open_positions["POPCATUSDT"]
-    assert pop_pos["margin_usdt"] == 4.00 and pop_pos["pnl_pct"] > 2.0, f"При +0.10% на 50x нереализованный PnL должен быть зеленым (>+2%), получено {pop_pos['pnl_pct']}%"
+    assert pop_pos["margin_usdt"] == 3.00 and pop_pos["pnl_pct"] > 2.0, f"При +0.10% на 50x нереализованный PnL должен быть зеленым (>+2%), получено {pop_pos['pnl_pct']}%"
     assert exit_manager._compute_big_runner_trail("LONG", 1.028, 1.00, 0.015, 0.006, 2.3, 1.006) == 1.006, "До 3.1R трейл не должен душить позицию!"
     portfolio.open_positions.clear()
+
+    # Проверяем честное Cross-Margin списание при стопе -3.0% на 50x ($3 маржа -> -$4.50 убытка - $0.177 комиссии = -$4.677, т.е. с кэша $100 списывается > $3.00!)
+    portfolio.cash = 100.0
+    portfolio.open_position("CROSSSLUSDT", "LONG", 1.00, 3.00, 0.97, 1.05, 1.10, "Honest Cross SL Test", leverage=50)
+    portfolio.close_position("CROSSSLUSDT", 0.97, "🛑 Structural Stop (-3%)", partial_pct=1.0)
+    assert abs(portfolio.cash - 95.3227) < 0.02, f"На честном Cross Margin стоп -3% при $150 объеме обязан оставить ~$95.32 (а не $97.00!), получено ${portfolio.cash:.4f}"
+    portfolio.trade_history.pop()
+    portfolio.symbol_lockouts.pop("CROSSSLUSDT", None)
+    portfolio.daily_losses_count = max(0, portfolio.daily_losses_count - 1)
+    portfolio.consecutive_losses = 0
     portfolio.cash = saved_cash
-    print(f"  ✓ Equal Margin ($4.00 / $200 @ 50x), честный live PnL (+0.10% -> +{pop_pos['pnl_pct']:.2f}%) и широкий Big-Runner Trail (>=3.1R) подтверждены!")
+    print(f"  ✓ Честный Cross Margin ($3.00 / $150 @ 50x, стоп -3% списывает полные -$4.68 без читов) и live PnL (+{pop_pos['pnl_pct']:.2f}%) подтверждены!")
 
     # 4. ТЕСТ TIME-STOP БЕЗ ЛОЖНОЙ БЛОКИРОВКИ CIRCUIT BREAKER
     print("\n[ТЕСТ 4/8] Проверка мягкого Time-Stop (не замораживает бота на околонулевом выходе)...")
@@ -224,20 +234,44 @@ async def run_suite():
     assert bb_sol is not None and bb_sol["current_price"] > 0 and bb_price and bb_price > 0 and bb_spread < 0.01
     print(f"  ✓ Failover fapi(418) -> bybit сработал мгновенно: {len(bybit_tickers)} чистых крипто-фьючерсов (вкл. {bb_new} новых/innovation), SOL=${bb_price:.2f} (spread {bb_spread*100:.3f}%), BTC: {bb_btc['pct_15m']:+.2f}%")
 
-    # Проверяем также Gate.io (если и Bybit вдруг недоступен) и Bitget!
+    # Проверяем цепочку резервов: Bitget (500+ перпов) -> OKX (топ-2 ликвидности + кросс-цена AKT) -> Gate (350+ перпов вместо 158!)
     bybit_idx = next(i for i, m in enumerate(binance_client.mirrors) if m["name"] == "bybit")
     binance_client._mirror_cooldowns[bybit_idx] = time.time() + 1800.0
     binance_client._mirror_ban_type[bybit_idx] = "hard"
     binance_client._ticker24_cache = ("", 0.0, [])
     binance_client._book_tickers_cache = {}
     binance_client._book_tickers_cache_time = 0.0
+
+    bg_tickers = await binance_client.fetch_top_tickers(min_vol_usdt=config.MIN_24H_VOLUME_USDT, limit=config.SCAN_TICKERS_LIMIT)
+    assert binance_client.active_mirror_name == "bitget", f"При бане fapi+bybit должен включиться bitget, получено {binance_client.active_mirror_name}"
+    assert binance_client.last_full_market_count >= 330 and len(bg_tickers) >= 220, f"Bitget должен мониторить >= 330 чистых крипто-пар и вернуть 240, получено market={binance_client.last_full_market_count}, top={len(bg_tickers)}"
+    bg_sol = await binance_client.fetch_candles_analysis("SOLUSDT", interval="5m", limit=200)
+    assert bg_sol is not None and bg_sol["current_price"] > 0 and bg_sol["volume_surge_ratio"] > 0.05
+    print(f"  ✓ Failover -> bitget сработал мгновенно: мониторинг {binance_client.last_full_market_count} пар (в разборе {len(bg_tickers)}), SOL=${bg_sol['current_price']:.2f} (RVOL={bg_sol['volume_surge_ratio']}x)")
+
+    bg_idx = next(i for i, m in enumerate(binance_client.mirrors) if m["name"] == "bitget")
+    binance_client._mirror_cooldowns[bg_idx] = time.time() + 1800.0
+    binance_client._mirror_ban_type[bg_idx] = "hard"
+    binance_client._ticker24_cache = ("", 0.0, [])
+    okx_tickers = await binance_client.fetch_top_tickers(min_vol_usdt=config.MIN_24H_VOLUME_USDT, limit=config.SCAN_TICKERS_LIMIT)
+    assert binance_client.active_mirror_name == "okx", f"При бане bitget должен включиться okx, получено {binance_client.active_mirror_name}"
+    assert binance_client.last_full_market_count >= 230 and len(okx_tickers) >= 220, f"OKX должен вернуть >= 230 чистых крипто-пар, получено market={binance_client.last_full_market_count}, top={len(okx_tickers)}"
+    okx_sol = await binance_client.fetch_candles_analysis("SOLUSDT", interval="5m", limit=200)
+    akt_cross_p = await binance_client.fetch_price("AKTUSDT")
+    assert okx_sol is not None and okx_sol["current_price"] > 0 and akt_cross_p is not None and akt_cross_p > 0
+    print(f"  ✓ Failover -> okx (instCategory=1) сработал: мониторинг {binance_client.last_full_market_count} пар (разбор {len(okx_tickers)}), кросс-цена AKT=${akt_cross_p:.4f}")
+
+    okx_idx = next(i for i, m in enumerate(binance_client.mirrors) if m["name"] == "okx")
+    binance_client._mirror_cooldowns[okx_idx] = time.time() + 1800.0
+    binance_client._mirror_ban_type[okx_idx] = "hard"
+    binance_client._ticker24_cache = ("", 0.0, [])
     gate_tickers = await binance_client.fetch_top_tickers(min_vol_usdt=config.MIN_24H_VOLUME_USDT, limit=config.SCAN_TICKERS_LIMIT)
-    assert binance_client.active_mirror_name == "gate", f"При бане fapi+bybit должен включиться gate, получено {binance_client.active_mirror_name}"
-    assert len(gate_tickers) >= 140, f"Gate Futures должен вернуть >= 140 чистых крипто-пар, получено {len(gate_tickers)}"
+    assert binance_client.active_mirror_name == "gate", f"При бане okx должен включиться gate, получено {binance_client.active_mirror_name}"
+    assert binance_client.last_full_market_count >= 290 and len(gate_tickers) >= 220, f"Gate Futures должен мониторить >= 290 пар и вернуть 240 (вместо старых 158!), получено market={binance_client.last_full_market_count}, top={len(gate_tickers)}"
     gate_sol = await binance_client.fetch_candles_analysis("SOLUSDT", interval="5m", limit=200)
-    gate_price = await binance_client.fetch_price("SOLUSDT")
-    assert gate_sol is not None and gate_sol["current_price"] > 0 and gate_price and gate_price > 0
-    print(f"  ✓ Failover -> gate (900 req/s) сработал мгновенно: {len(gate_tickers)} чистых крипто-фьючерсов, SOL=${gate_price:.2f}")
+    gate_akt_p = await binance_client.fetch_price("AKTUSDT")
+    assert gate_sol is not None and gate_sol["current_price"] > 0 and gate_akt_p and gate_akt_p > 0
+    print(f"  ✓ Failover -> gate (900 req/s) сработал: мониторинг {binance_client.last_full_market_count} пар (разбор {len(gate_tickers)}), живой mid AKT=${gate_akt_p:.4f}")
 
     # Проверяем 5m candle-boundary guard (защита от 12-секундного спама на Render)
     market_scanner._last_scanned_bar = int(time.time()) // 300

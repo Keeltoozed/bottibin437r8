@@ -171,7 +171,7 @@ class MarketScanner:
                 # fapi ($5K/5m база + >=$15K пробой), bybit/gate/bitget ($1K/5m + >=$4K), vision ($600/5m + >=$2.5K).
                 is_spot_mirror = binance_client.is_spot_mirror
                 m_name_now = binance_client.active_mirror_name
-                is_alt_futures = m_name_now in ("bybit", "gate", "bitget")
+                is_alt_futures = m_name_now in ("bybit", "bitget", "okx", "gate")
                 if is_spot_mirror:
                     min_avg_vol = float(getattr(config, "SPOT_MIRROR_MIN_AVG_5M_VOL", 600.0))
                 elif is_alt_futures:
@@ -179,10 +179,11 @@ class MarketScanner:
                 else:
                     min_avg_vol = float(getattr(config, "MIN_AVG_5M_QUOTE_VOL", 5000.0))
                 last_5m_qvol = float(analysis.get("last_quote_volume", 0.0) or 0.0)
+                vol_24h_pair = float(t.get("volume_24h", 0.0) or 0.0)
                 if is_spot_mirror:
                     vol_floor_ok = (avg_5m_qvol >= min_avg_vol) and (last_5m_qvol >= 2000.0)
                 elif is_alt_futures:
-                    vol_floor_ok = (avg_5m_qvol >= min_avg_vol) and (last_5m_qvol >= 2500.0)
+                    vol_floor_ok = (vol_24h_pair >= 120000.0) and (avg_5m_qvol >= min_avg_vol) and (last_5m_qvol >= 2500.0)
                 else:
                     vol_floor_ok = (avg_5m_qvol >= min_avg_vol) and (last_5m_qvol >= 8000.0)
                 min_v3 = float(getattr(config, "MIN_V3_VOLUME_PERSISTENCE", 1.10))
@@ -544,21 +545,21 @@ class MarketScanner:
                     raw_margin = target_notional / lev_to_use
                     actual_margin = round(min(raw_margin, max_mg, portfolio.cash * 0.65), 2)
 
-                # УМНАЯ ЗАЩИТА ОТ КОРРЕЛЯЦИОННОГО РИСКА:
-                # 1. Безрисковые ранеры (tp1_hit=True) НЕ учитываются — никогда не блокируют новые входы!
-                # 2. Разные стороны (LONG + SHORT) всегда разрешены независимо друг от друга.
-                # 3. Дополнительные однонаправленные входы (до MAX_CONCURRENT_POSITIONS=4) разрешены при подтвержденном тренде BTC!
+                # OPEN-ALPHA CORRELATION GUARD (КАК В КАНАЛЕ: ДО 8 СЛОТОВ ПАРАЛЛЕЛЬНО ДАЖЕ В БОКОВИКЕ CHOP!):
+                # 1. Безрисковые ранеры (tp1_hit=True) НЕ учитываются — не занимают слоты!
+                # 2. Независимые альт-ракеты (Alpha RS vs BTC) свободно заполняют до 8 слотов параллельно даже в CHOP!
+                # 3. Блокируем доп. входы ТОЛЬКО если сам Bitcoin активно падает/сквизит против позиции (15m >= 0.40% или 5m >= 0.30%).
                 at_risk_positions = [p for p in portfolio.open_positions.values() if not p.get("tp1_hit", False)]
                 if len(at_risk_positions) >= 1:
                     same_side_positions = [p for p in at_risk_positions if p.get("side") == cand_side]
                     if same_side_positions:
-                        btc_trend = btc_regime.get("trend", "CHOP")
                         btc_5m = float(btc_regime.get("pct_5m", 0.0) or 0.0)
-                        if cand_side == "SHORT" and (btc_trend != "BEARISH" or btc_5m > 0.0):
-                            print(f"⚠️ [CORRELATION GUARD] Доп. позиция SHORT по {sym} отклонена: BTC ({btc_trend}, {btc_5m:+.2f}%) не подтверждает шорты!", flush=True)
+                        btc_15m = float(btc_regime.get("pct_15m", 0.0) or 0.0)
+                        if cand_side == "SHORT" and (btc_15m >= 0.40 or btc_5m >= 0.30):
+                            print(f"⚠️ [CORRELATION GUARD] Доп. SHORT по {sym} отклонен: BTC растет ({btc_5m:+.2f}% / 15m {btc_15m:+.2f}%)!", flush=True)
                             continue
-                        elif cand_side == "LONG" and (btc_trend != "BULLISH" or btc_5m < 0.0):
-                            print(f"⚠️ [CORRELATION GUARD] Доп. позиция LONG по {sym} отклонена: BTC ({btc_trend}, {btc_5m:+.2f}%) не подтверждает лонги!", flush=True)
+                        elif cand_side == "LONG" and (btc_15m <= -0.40 or btc_5m <= -0.30):
+                            print(f"⚠️ [CORRELATION GUARD] Доп. LONG по {sym} отклонен: BTC снижается ({btc_5m:+.2f}% / 15m {btc_15m:+.2f}%)!", flush=True)
                             continue
 
                 max_total_slots = config.MAX_CONCURRENT_POSITIONS + int(getattr(config, "MAX_RISK_FREE_RUNNERS", 2))

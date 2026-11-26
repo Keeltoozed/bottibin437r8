@@ -77,12 +77,12 @@ async def start_autonomous_bot():
     print("=" * 70, flush=True)
     print("🚀 BINANCE AUTONOMOUS GROQ TRADER (STRUCTURAL ROCKET HUNTER 200+ UNIVERSE)", flush=True)
     print(f"💰 Стартовый банкролл: ${portfolio.cash:.2f} USDT", flush=True)
-    mg_pct = getattr(config, "FIXED_MARGIN_PCT", 0.040) * 100.0
-    est_mg = portfolio.cash * getattr(config, "FIXED_MARGIN_PCT", 0.040)
+    mg_pct = getattr(config, "FIXED_MARGIN_PCT", 0.030) * 100.0
+    est_mg = portfolio.cash * getattr(config, "FIXED_MARGIN_PCT", 0.030)
     leverage_val = getattr(config, "LEVERAGE", 50)
     groq_model = getattr(config, "GROQ_PRIMARY_MODEL", "openai/gpt-oss-120b")
     paper_mode = getattr(config, "PAPER_TRADING", True)
-    print(f"🎯 Equal Margin: {mg_pct:.1f}% (~${est_mg:.2f} маржа / ~${est_mg*leverage_val:.0f} позиция @ {leverage_val}x) | Слотов: {config.MAX_CONCURRENT_POSITIONS}", flush=True)
+    print(f"🎯 Cross Equal Margin: {mg_pct:.1f}% (~${est_mg:.2f} маржа / ~${est_mg*leverage_val:.0f} позиция @ {leverage_val}x Cross) | Слотов: {config.MAX_CONCURRENT_POSITIONS}", flush=True)
     print(f"📡 Радар рынка: до {config.SCAN_TICKERS_LIMIT} пар (24h Volume + 15m MTF Guard + RVOL >= {config.MIN_5M_VOLUME_SURGE_RATIO}x)", flush=True)
     print(f"🤖 Groq Модель: {groq_model}", flush=True)
     print(f"🧪 Режим: {'PAPER TRADING (Симуляция на реальных котировках)' if paper_mode else 'LIVE TRADING'}", flush=True)

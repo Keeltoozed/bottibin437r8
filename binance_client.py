@@ -14,14 +14,15 @@ class BinanceClient:
       - Структурный расчет пробоев Дончиана (20 баров), силы закрытия свечи (CLV), RVOL и честных стопов по ATR/фитилям.
     """
     def __init__(self):
-        # 5-уровневый отказоустойчивый пул крипто-фьючерсов (защита от shared-IP банов Render HTTP 418/429):
-        # fapi (Binance Futures) -> bybit (120 req/s, 516 крипто-перпов) -> gate (900 req/s, 1000+ перпов)
-        # -> bitget (чистые крипто-перпы isRwa=NO) -> vision (Binance Spot резерв)
+        # 6-уровневый отказоустойчивый пул крипто-фьючерсов (защита от shared-IP банов Render HTTP 418/403/429):
+        # fapi (Binance 500 перпов) -> bybit (430+ перпов) -> bitget (550+ перпов isRwa=NO)
+        # -> okx (289 топ-ликвидных SWAP instCategory=1) -> gate (400+ перпов, 900 req/s) -> vision (Spot резерв)
         self.mirrors = [
             {"name": "fapi", "base": "https://fapi.binance.com", "ticker24": "/fapi/v1/ticker/24hr", "klines": "/fapi/v1/klines", "book": "/fapi/v1/ticker/bookTicker", "price": "/fapi/v1/ticker/price", "info": "/fapi/v1/exchangeInfo"},
             {"name": "bybit", "base": "https://api.bybit.com", "ticker24": "/v5/market/tickers", "klines": "/v5/market/kline", "book": "/v5/market/tickers", "price": "/v5/market/tickers", "info": "/v5/market/instruments-info"},
-            {"name": "gate", "base": "https://api.gateio.ws", "ticker24": "/api/v4/futures/usdt/tickers", "klines": "/api/v4/futures/usdt/candlesticks", "book": "/api/v4/futures/usdt/tickers", "price": "/api/v4/futures/usdt/tickers", "info": "/api/v4/futures/usdt/contracts"},
             {"name": "bitget", "base": "https://api.bitget.com", "ticker24": "/api/v2/mix/market/tickers", "klines": "/api/v2/mix/market/candles", "book": "/api/v2/mix/market/tickers", "price": "/api/v2/mix/market/ticker", "info": "/api/v2/mix/market/contracts"},
+            {"name": "okx", "base": "https://www.okx.com", "ticker24": "/api/v5/market/tickers", "klines": "/api/v5/market/candles", "book": "/api/v5/market/tickers", "price": "/api/v5/market/ticker", "info": "/api/v5/public/instruments"},
+            {"name": "gate", "base": "https://api.gateio.ws", "ticker24": "/api/v4/futures/usdt/tickers", "klines": "/api/v4/futures/usdt/candlesticks", "book": "/api/v4/futures/usdt/tickers", "price": "/api/v4/futures/usdt/tickers", "info": "/api/v4/futures/usdt/contracts"},
             {"name": "vision", "base": "https://data-api.binance.vision", "ticker24": "/api/v3/ticker/24hr", "klines": "/api/v3/klines", "book": "/api/v3/ticker/bookTicker", "price": "/api/v3/ticker/price", "info": "/api/v3/exchangeInfo"}
         ]
         self.active_mirror_idx = 0
@@ -31,9 +32,10 @@ class BinanceClient:
         # Персональный rate-pacer для каждого зеркала (полностью исключает всплески HTTP 429 на shared IP Render!)
         self._mirror_min_interval: Dict[str, float] = {
             "fapi": 0.14,    # ~7 req/s
-            "bybit": 0.14,   # ~7 req/s (исключает retCode 10006 даже при плотных сканах 180 пар)
+            "bybit": 0.14,   # ~7 req/s
+            "bitget": 0.11,  # ~9 req/s (лимит Bitget 20 req/s)
+            "okx": 0.11,     # ~9 req/s (лимит OKX 20 req/2s)
             "gate": 0.08,    # ~12 req/s (лимит Gate 900 req/s)
-            "bitget": 0.26,  # ~3.8 req/s (лимит Bitget 20 req/s на общий IP)
             "vision": 0.18,  # ~5.5 req/s
         }
         self._mirror_next_allowed: Dict[str, float] = {}
@@ -146,7 +148,86 @@ class BinanceClient:
 
         if route_key == "price":
             if isinstance(items, list) and items:
-                return {"price": items[0].get("lastPrice", "0")}
+                x0 = items[0]
+                return {"price": str(self._pick_live_price(x0.get("lastPrice"), x0.get("bid1Price"), x0.get("ask1Price"), x0.get("markPrice")))}
+            return None
+
+        return items
+
+    @staticmethod
+    def _pick_live_price(last_raw: Any, bid_raw: Any = None, ask_raw: Any = None, mark_raw: Any = None) -> float:
+        """Возвращает живую цену (mid стакана при узком спреде или mark_price), исключая замирание старого last!"""
+        def _f(v: Any) -> float:
+            try:
+                return float(v or 0)
+            except (ValueError, TypeError):
+                return 0.0
+        lp, bp, ap, mp = _f(last_raw), _f(bid_raw), _f(ask_raw), _f(mark_raw)
+        if bp > 0 and ap >= bp and ((ap - bp) / bp) <= 0.012:
+            return round((bp + ap) * 0.5, 10)
+        if mp > 0:
+            return mp
+        return lp
+
+    def _normalize_okx_response(self, route_key: str, raw: Any) -> Optional[Any]:
+        """Нормализует ответы OKX v5 USDT-SWAP в единый формат Binance."""
+        if not isinstance(raw, dict) or str(raw.get("code", "")) != "0":
+            return None
+        items = raw.get("data")
+        if not isinstance(items, list):
+            return None
+        now_ms = int(time.time() * 1000)
+
+        if route_key == "ticker24":
+            out = []
+            for x in items:
+                try:
+                    inst_id = x.get("instId", "")
+                    if not inst_id.endswith("-USDT-SWAP"):
+                        continue
+                    sym = inst_id[:-10] + "USDT"
+                    lp = float(x.get("last", 0) or 0)
+                    if lp <= 0:
+                        continue
+                    o24 = float(x.get("open24h", 0) or lp)
+                    pct = round((lp - o24) / o24 * 100.0, 4) if o24 > 0 else 0.0
+                    qvol = float(x.get("volCcy24h", 0) or 0) * lp
+                    out.append({
+                        "symbol": sym,
+                        "lastPrice": str(lp),
+                        "quoteVolume": str(qvol),
+                        "priceChangePercent": str(pct),
+                        "highPrice": str(x.get("high24h") or lp),
+                        "lowPrice": str(x.get("low24h") or lp),
+                        "bidPrice": str(x.get("bidPx") or lp),
+                        "askPrice": str(x.get("askPx") or lp),
+                        "closeTime": int(x.get("ts") or now_ms),
+                        "count": 10000
+                    })
+                except (ValueError, TypeError):
+                    continue
+            return out
+
+        if route_key == "klines":
+            out = []
+            for c in items:
+                if isinstance(c, list) and len(c) >= 8:
+                    out.append([int(c[0]), c[1], c[2], c[3], c[4], c[5], int(c[0]), c[7]])
+            out.sort(key=lambda r: r[0])
+            return out
+
+        if route_key == "book":
+            out = []
+            for x in items:
+                inst_id = x.get("instId", "")
+                if inst_id.endswith("-USDT-SWAP") and x.get("bidPx") and x.get("askPx"):
+                    out.append({"symbol": inst_id[:-10] + "USDT", "bidPrice": x["bidPx"], "askPrice": x["askPx"]})
+            return out
+
+        if route_key == "price":
+            if items and isinstance(items[0], dict):
+                x0 = items[0]
+                return {"price": str(self._pick_live_price(x0.get("last"), x0.get("bidPx"), x0.get("askPx"), None))}
             return None
 
         return items
@@ -205,7 +286,8 @@ class BinanceClient:
 
         if route_key == "price":
             if raw and isinstance(raw[0], dict):
-                return {"price": raw[0].get("last", "0")}
+                x0 = raw[0]
+                return {"price": str(self._pick_live_price(x0.get("last"), x0.get("highest_bid"), x0.get("lowest_ask"), x0.get("mark_price")))}
             return None
 
         return raw
@@ -264,9 +346,10 @@ class BinanceClient:
 
         if route_key == "price":
             if isinstance(items, list) and items:
-                return {"price": items[0].get("lastPr", "0")}
+                x0 = items[0]
+                return {"price": str(self._pick_live_price(x0.get("lastPr"), x0.get("bidPr"), x0.get("askPr"), x0.get("markPrice")))}
             if isinstance(items, dict):
-                return {"price": items.get("lastPr", "0")}
+                return {"price": str(self._pick_live_price(items.get("lastPr"), items.get("bidPr"), items.get("askPr"), items.get("markPrice")))}
             return None
 
         return items
@@ -321,6 +404,16 @@ class BinanceClient:
                     req_params["granularity"] = req_params.pop("interval", "5m")
                     if "limit" in req_params:
                         req_params["limit"] = str(min(int(req_params["limit"]), 200))
+            elif m_name == "okx":
+                if route_key in ("ticker24", "book", "info"):
+                    req_params["instType"] = "SWAP"
+                if "symbol" in req_params:
+                    s_val = str(req_params.pop("symbol"))
+                    req_params["instId"] = (s_val[:-4] + "-USDT-SWAP") if (s_val.endswith("USDT") and "-" not in s_val) else s_val
+                if route_key == "klines":
+                    req_params["bar"] = req_params.pop("interval", "5m")
+                    if "limit" in req_params:
+                        req_params["limit"] = str(min(int(req_params["limit"]), 300))
 
             # Плавное ограничение частоты запросов для данного зеркала
             await self._acquire_rate_slot(m_name)
@@ -352,6 +445,12 @@ class BinanceClient:
                             if isinstance(raw, dict) and str(raw.get("code", "")) in ("40034", "400172", "40007"):
                                 return None
                             raw = self._normalize_bitget_response(route_key, raw)
+                            if raw is None:
+                                continue
+                        elif m_name == "okx":
+                            if isinstance(raw, dict) and str(raw.get("code", "")) in ("51001", "51000"):
+                                return None
+                            raw = self._normalize_okx_response(route_key, raw)
                             if raw is None:
                                 continue
 
@@ -409,7 +508,7 @@ class BinanceClient:
         new_cutoff_ms = now_ms - 45 * 86400 * 1000
         new_cutoff_sec = int(now) - 45 * 86400
         m_name = self.active_mirror_name
-        if m_name not in ("fapi", "bybit", "bitget", "gate"):
+        if m_name not in ("fapi", "bybit", "bitget", "okx", "gate"):
             return set()
         cached_ts, cached_set = self._valid_crypto_perps.get(m_name, (0.0, set()))
         if cached_set and (now - cached_ts) < 3600.0:
@@ -498,8 +597,29 @@ class BinanceClient:
                     elif resp.status in (418, 429):
                         self._mirror_cooldowns[self.active_mirror_idx] = now + 20.0
                         self._mirror_ban_type[self.active_mirror_idx] = "soft"
+            elif m_name == "okx":
+                async with session.get(f"{base_url}/api/v5/public/instruments", params={"instType": "SWAP"}) as resp:
+                    if resp.status == 200:
+                        info = await resp.json()
+                        if isinstance(info, dict) and str(info.get("code", "")) == "0":
+                            perps, new_set = set(), set()
+                            for s in info.get("data", []):
+                                inst_id = s.get("instId", "")
+                                if (
+                                    inst_id.endswith("-USDT-SWAP")
+                                    and s.get("state") == "live"
+                                    and str(s.get("instCategory", "1")) == "1"
+                                ):
+                                    sym = inst_id[:-10] + "USDT"
+                                    perps.add(sym)
+                                    if int(s.get("listTime") or 0) >= new_cutoff_ms:
+                                        new_set.add(sym)
+                            if len(perps) >= 100:
+                                self._valid_crypto_perps[m_name] = (now, perps)
+                                self._new_crypto_perps[m_name] = new_set
+                                return perps
             elif m_name == "gate":
-                async with session.get(f"{base_url}/api/v4/futures/usdt/contracts") as resp:
+                async with session.get(f"{base_url}/api/v4/futures/usdt/contracts", timeout=aiohttp.ClientTimeout(total=6)) as resp:
                     if resp.status == 200:
                         info = await resp.json()
                         if isinstance(info, list):
@@ -525,13 +645,31 @@ class BinanceClient:
         return cached_set
 
     async def fetch_price(self, symbol: str) -> Optional[float]:
-        """Быстрое получение текущей рыночной цены монеты."""
+        """Быстрое получение живой рыночной цены (mid стакана / mark) с кросс-зеркальной подстраховкой."""
         data = await self._request_with_fallback("price", params={"symbol": symbol})
         if data and isinstance(data, dict):
             try:
-                return float(data.get("price", 0) or 0)
+                p = float(data.get("price", 0) or 0)
+                if p > 0:
+                    return p
             except (ValueError, TypeError):
                 pass
+        saved_idx = self.active_mirror_idx
+        now = time.time()
+        for alt_idx in range(len(self.mirrors)):
+            if alt_idx == saved_idx or now < self._mirror_cooldowns.get(alt_idx, 0.0):
+                continue
+            try:
+                self.active_mirror_idx = alt_idx
+                alt_data = await self._request_with_fallback("price", params={"symbol": symbol})
+                if alt_data and isinstance(alt_data, dict):
+                    p = float(alt_data.get("price", 0) or 0)
+                    if p > 0:
+                        return p
+            except Exception:
+                pass
+            finally:
+                self.active_mirror_idx = saved_idx
         return None
 
     async def fetch_top_tickers(self, min_vol_usdt: float = config.MIN_24H_VOLUME_USDT, limit: int = config.SCAN_TICKERS_LIMIT) -> List[Dict[str, Any]]:
@@ -561,16 +699,16 @@ class BinanceClient:
             base_min_vol = min(min_vol_usdt, 1_500_000.0)
             hard_floor_vol = 400_000.0
             new_listing_floor = 120_000.0
-        elif m_name in ("bybit", "gate", "bitget"):
+        elif m_name in ("bybit", "bitget", "okx", "gate"):
             base_min_vol = float(getattr(config, "ALT_FUTURES_MIN_VOL_USDT", 350_000.0))
-            hard_floor_vol = 200_000.0
-            new_listing_floor = 80_000.0
+            hard_floor_vol = 45_000.0
+            new_listing_floor = 20_000.0
         else:
             base_min_vol = float(getattr(config, "SPOT_MIRROR_MIN_VOL_USDT", 350_000.0))
             hard_floor_vol = 150_000.0
             new_listing_floor = 80_000.0
 
-        valid_crypto_perps = await self.fetch_valid_crypto_perps() if m_name in ("fapi", "bybit", "bitget", "gate") else set()
+        valid_crypto_perps = await self.fetch_valid_crypto_perps() if m_name in ("fapi", "bybit", "bitget", "okx", "gate") else set()
         new_crypto_perps = self._new_crypto_perps.get(m_name, set())
         excluded = getattr(config, "EXCLUDED_TICKERS", set())
         stock_roots = getattr(config, "STOCK_TICKER_ROOTS", set())

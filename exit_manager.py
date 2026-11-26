@@ -86,6 +86,14 @@ class ExitManager:
 
                 if price_map:
                     portfolio.update_position_prices(price_map)
+                    # Честная проверка порога Cross-Margin ликвидации аккаунта (0.5% Maintenance Margin от суммарного номинала):
+                    tot_notional = sum(float(p.get("margin_usdt", 0.0)) * float(p.get("leverage", 1)) for p in portfolio.open_positions.values())
+                    cur_eq_chk = portfolio.get_portfolio_summary()["equity"]
+                    if tot_notional > 0 and cur_eq_chk <= tot_notional * 0.005:
+                        print(f"💥 [CROSS LIQUIDATION] Equity (${cur_eq_chk:.2f}) упал ниже поддерживающей маржи (${tot_notional*0.005:.2f})!", flush=True)
+                        for l_sym, l_pos in list(portfolio.open_positions.items()):
+                            portfolio.close_position(l_sym, l_pos.get("current_price", l_pos["entry_price"]), reason="💥 Cross-Margin Liquidation", partial_pct=1.0)
+                        continue
 
                 now = time.time()
                 should_log = (now - self._last_log_time) >= 15.0

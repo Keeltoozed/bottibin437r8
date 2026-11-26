@@ -210,7 +210,7 @@ def simulate_strategy(
                     fee = pos["mg"] * lev * cost
                     total_comm += fee
                     pnl = pos["mg"] * ((pos["sl"] - entry) / entry) * lev - fee
-                    cash += max(pos["mg"] + pnl, 0.0)
+                    cash = max(0.0, cash + pos["mg"] + pnl)
                     pos["realized"] += pnl
                     trades_pnl.append(pos["realized"])
                     trades_r.append(pos["realized"] / pos["risk_usd"])
@@ -228,7 +228,7 @@ def simulate_strategy(
                         fee = pos["mg"] * lev * cost
                         total_comm += fee
                         pnl = pos["mg"] * ((cl - entry) / entry) * lev - fee
-                        cash += max(pos["mg"] + pnl, 0.0)
+                        cash = max(0.0, cash + pos["mg"] + pnl)
                         pos["realized"] += pnl
                         trades_pnl.append(pos["realized"])
                         trades_r.append(pos["realized"] / pos["risk_usd"])
@@ -240,7 +240,7 @@ def simulate_strategy(
                         fee = pos["mg"] * lev * cost
                         total_comm += fee
                         pnl = pos["mg"] * ((entry + tp1_r * rd - entry) / entry) * lev - fee
-                        cash += max(pos["mg"] + pnl, 0.0)
+                        cash = max(0.0, cash + pos["mg"] + pnl)
                         pos["realized"] += pnl
                         trades_pnl.append(pos["realized"])
                         trades_r.append(pos["realized"] / pos["risk_usd"])
@@ -286,7 +286,7 @@ def simulate_strategy(
                     fee = pos["mg"] * lev * cost
                     total_comm += fee
                     pnl = pos["mg"] * ((entry - pos["sl"]) / entry) * lev - fee
-                    cash += max(pos["mg"] + pnl, 0.0)
+                    cash = max(0.0, cash + pos["mg"] + pnl)
                     pos["realized"] += pnl
                     trades_pnl.append(pos["realized"])
                     trades_r.append(pos["realized"] / pos["risk_usd"])
@@ -304,7 +304,7 @@ def simulate_strategy(
                         fee = pos["mg"] * lev * cost
                         total_comm += fee
                         pnl = pos["mg"] * ((entry - cl) / entry) * lev - fee
-                        cash += max(pos["mg"] + pnl, 0.0)
+                        cash = max(0.0, cash + pos["mg"] + pnl)
                         pos["realized"] += pnl
                         trades_pnl.append(pos["realized"])
                         trades_r.append(pos["realized"] / pos["risk_usd"])
@@ -316,7 +316,7 @@ def simulate_strategy(
                         fee = pos["mg"] * lev * cost
                         total_comm += fee
                         pnl = pos["mg"] * ((tp1_r * rd) / entry) * lev - fee
-                        cash += max(pos["mg"] + pnl, 0.0)
+                        cash = max(0.0, cash + pos["mg"] + pnl)
                         pos["realized"] += pnl
                         trades_pnl.append(pos["realized"])
                         trades_r.append(pos["realized"] / pos["risk_usd"])
@@ -470,7 +470,7 @@ def simulate_strategy(
         fee = pos["mg"] * pos["lev"] * cost
         total_comm += fee
         pnl = pos["mg"] * raw * pos["lev"] - fee
-        cash += max(pos["mg"] + pnl, 0.0)
+        cash = max(0.0, cash + pos["mg"] + pnl)
         pos["realized"] += pnl
         trades_pnl.append(pos["realized"])
         trades_r.append(pos["realized"] / pos["risk_usd"])

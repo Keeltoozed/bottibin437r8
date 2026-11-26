@@ -198,28 +198,28 @@ with st.sidebar:
     _hdr_eq = max(10.0, _sb_summary["equity"])
     st.markdown(f"### 🚀 Equal Margin Cross (${_hdr_eq:.0f})")
 
-    # Режим риск-профиля (Cross-Margin 50x: одинаковая маржа 4.0% + широкое удержание Big-Runner до +700%+)
+    # Режим риск-профиля (Честный Cross-Margin 50x: 3.0% маржа = 1.5x плечо от депо, 0 ликвидаций на -2% + реинвест!)
     strategy_mode = st.radio(
         "Профиль риск-менеджмента (Cross Margin):",
         [
-            "🚀 Big-Runner Equal 50x (маржа 4.0%, 8 слотов + Trail @ 3.1R)",
-            "🔥 Safe Big-Runner 50x (маржа 3.5%, 8 слотов — DD 27.4%)",
-            "🛡️ Risk-Parity Проп (25x, риск 4.0%, 4 слота)"
+            "🚀 Big-Runner Cross 50x (маржа 3.0% = $150 объём, 8 слотов + Trail @ 3.1R)",
+            "🔥 Safe Cross 50x (маржа 2.5% = $125 объём, 8 слотов — мягкая просадка)",
+            "🛡️ Risk-Parity Проп (50x Cross, фикс-риск 4.0% на стоп, 6 слотов)"
         ],
         index=0
     )
     if "Risk-Parity" in strategy_mode:
-        default_lev = 25
+        default_lev = 50
         config.SIZING_MODE = "risk_parity"
         config.RISK_PER_TRADE_PCT = 0.040
-        config.MAX_CONCURRENT_POSITIONS = 4
+        config.MAX_CONCURRENT_POSITIONS = 6
         config.MIN_5M_VOLUME_SURGE_RATIO = 1.80
         config.MIN_CLOSE_STRENGTH = 0.66
         config.DAILY_LOSS_LIMIT = 99
-    elif "Safe Big-Runner" in strategy_mode:
+    elif "Safe Cross" in strategy_mode:
         default_lev = 50
         config.SIZING_MODE = "equal_margin"
-        config.FIXED_MARGIN_PCT = 0.035
+        config.FIXED_MARGIN_PCT = 0.025
         config.MAX_CONCURRENT_POSITIONS = 8
         config.MIN_5M_VOLUME_SURGE_RATIO = 1.80
         config.MIN_CLOSE_STRENGTH = 0.66
@@ -227,7 +227,7 @@ with st.sidebar:
     else:
         default_lev = 50
         config.SIZING_MODE = "equal_margin"
-        config.FIXED_MARGIN_PCT = 0.040
+        config.FIXED_MARGIN_PCT = 0.030
         config.MAX_CONCURRENT_POSITIONS = 8
         config.MIN_5M_VOLUME_SURGE_RATIO = 1.80
         config.MIN_CLOSE_STRENGTH = 0.66
@@ -263,7 +263,8 @@ with st.sidebar:
     st.text(f"Anti-Rug Выход: Динамический TP1/TP2 + Parabolic Trail")
     st.text(f"Защита просадки: Half-Kelly при DD ≥ {int(config.DD_GUARD_THRESHOLD*100)}%")
     st.text(f"Лимит стопов: Макс {config.DAILY_LOSS_LIMIT} в день ({portfolio.daily_losses_count}/{config.DAILY_LOSS_LIMIT})")
-    st.text(f"Радар рынка: 🚀 {config.SCAN_TICKERS_LIMIT} пар + новые листинги (MTF)")
+    _full_mkt = max(getattr(binance_client, "last_full_market_count", 0), getattr(portfolio, "last_universe_count", 0), config.SCAN_TICKERS_LIMIT)
+    st.text(f"Радар рынка: 🚀 {_full_mkt} пар → {config.SCAN_TICKERS_LIMIT} в разборе")
     st.text(f"Модель Groq: {config.GROQ_PRIMARY_MODEL}")
     has_key = bool(config.GROQ_API_KEY)
     st.text(f"ИИ Статус: {'🟢 Активен (Groq Cloud)' if has_key else '🟡 Резервный (Institutional)'}")
@@ -368,6 +369,8 @@ tab_pos, tab_radar, tab_funnel, tab_history, tab_shadow, tab_timemachine, tab_br
 # ------------------------------------------------------------------------------
 with tab_pos:
     st.subheader("🟢 Активные сделки в сопровождении")
+    if not auto_refresh:
+        st.caption("ℹ️ Автообновление UI (внизу левого меню) выключено — включите галочку «🔄 Автообновление UI (4 сек)», чтобы цены и PnL менялись сами в реальном времени.")
     if not portfolio.open_positions:
         st.info("В данный момент нет открытых сделок. Автономный сканер ищет сетапы (LONG и SHORT)...")
     else:
@@ -385,10 +388,11 @@ with tab_pos:
                     ep_pos = pos.get('entry_price', 0.0) or 0.0
                     mg_pos = pos.get('margin_usdt', 0.0) or 0.0
                     init_mg = pos.get('initial_margin_usdt', mg_pos) or mg_pos
+                    notional_pos = mg_pos * float(pos.get('leverage', config.LEVERAGE))
                     if init_mg > mg_pos + 0.05:
-                        st.caption(f"Вход: {fmt_price(ep_pos)} • В сделке: ${mg_pos:.2f} (исходная: ${init_mg:.2f})")
+                        st.caption(f"Вход: {fmt_price(ep_pos)} • В сделке: ${mg_pos:.2f} (исходная: ${init_mg:.2f}) • Объём {pos['leverage']}x: ${notional_pos:.0f} Cross")
                     else:
-                        st.caption(f"Вход: {fmt_price(ep_pos)} • Маржа: ${mg_pos:.2f}")
+                        st.caption(f"Вход: {fmt_price(ep_pos)} • Маржа: ${mg_pos:.2f} • Объём {pos['leverage']}x: ${notional_pos:.0f} Cross")
                 with col_b:
                     cp_pos = pos.get('current_price', 0.0) or 0.0
                     st.metric("Текущая цена", fmt_price(cp_pos))
@@ -656,9 +660,9 @@ with tab_timemachine:
             pre = precompute_indicators(cdata)
 
             configs = [
-                ("🚀 Big-Runner Equal 50x ($100, маржа 4.0% + Anti-Spike + Trail @ 3.1R)", dict(leverage=50, equal_margin_pct=0.040, max_spike_5m=3.50, big_runner_mode=True, tp1_r=1.72, tp1_share=0.35)),
-                ("🔥 Safe Big-Runner 50x ($100, маржа 3.5% + Anti-Spike + Trail @ 3.1R)", dict(leverage=50, equal_margin_pct=0.035, max_spike_5m=3.50, big_runner_mode=True, tp1_r=1.72, tp1_share=0.35)),
-                ("🎯 Anti-Rug Fixed Target (100% на 1.70R до слива)", dict(leverage=50, risk_pct=0.050, tp1_r=1.70, tp1_share=1.00)),
+                ("🚀 Big-Runner Cross 50x ($100, маржа 3.0% = $150 объём + Честный Cross)", dict(leverage=50, equal_margin_pct=0.030, max_spike_5m=3.50, big_runner_mode=True, tp1_r=1.72, tp1_share=0.35)),
+                ("🔥 Safe Cross 50x ($100, маржа 2.5% = $125 объём + Честный Cross)", dict(leverage=50, equal_margin_pct=0.025, max_spike_5m=3.50, big_runner_mode=True, tp1_r=1.72, tp1_share=0.35)),
+                ("🎯 Anti-Rug Fixed Target (100% на 1.70R до слива)", dict(leverage=50, risk_pct=0.040, tp1_r=1.70, tp1_share=1.00)),
                 ("❌ Старый 12-барный скальпер (Early BE + 35м Time-Stop)", dict(leverage=12, legacy_churn_mode=True)),
             ]
 
