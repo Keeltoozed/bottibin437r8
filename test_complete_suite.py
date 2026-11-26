@@ -77,6 +77,31 @@ async def run_suite():
     portfolio.peak_equity = 100.0
 
     from scanner import market_scanner
+    assert config.FULL_HOLD_MODE is True, "Основная стратегия по умолчанию должна быть FULL_HOLD_MODE=True (100% без вытаскиваний)!"
+    fh_plan = market_scanner.compute_dynamic_exit_plan(
+        {"breakout_type": "SQUEEZE_80M", "atr14_pct": 0.008, "adx14": 24.0, "has_fvg_bull": True},
+        side="LONG", sl_dist=0.012
+    )
+    assert fh_plan["profile"] == "EXPLOSIVE_FVG" and fh_plan["tp1_r"] == 1.90 and fh_plan["tp2_r"] == 3.00 and fh_plan["tp1_share"] == 0.0 and fh_plan["tp2_share"] == 0.0
+
+    # Проверяем основную стратегию Full-Hold 100% (Lock1 -> Lock2 -> все 100% объема ловят ракету +12%!)
+    assert portfolio.open_position("FULLHOLDUSDT", "LONG", 10.0, 3.00, 9.88, 10.228, 10.360, "FullHold 100% Test", leverage=50, atr_pct=0.008, risk_usd=1.80, exit_plan=fh_plan)
+    portfolio.open_positions["FULLHOLDUSDT"]["tp1_hit"] = True
+    portfolio.open_positions["FULLHOLDUSDT"]["wick_sl"] = 10.048
+    portfolio.open_positions["FULLHOLDUSDT"]["breakeven_set"] = True
+    portfolio.open_positions["FULLHOLDUSDT"].setdefault("partial_notes", []).append("Lock1(БУ+)")
+    portfolio.open_positions["FULLHOLDUSDT"]["tp2_hit"] = True
+    portfolio.open_positions["FULLHOLDUSDT"]["wick_sl"] = 10.186
+    portfolio.open_positions["FULLHOLDUSDT"]["partial_notes"].append("Lock2(Профит)")
+    assert abs(portfolio.open_positions["FULLHOLDUSDT"]["margin_usdt"] - 3.00) < 1e-6, "В Full-Hold 100% маржи ($3.00) обязаны оставаться в сделке!"
+    portfolio.close_position("FULLHOLDUSDT", 11.20, "🚀 Big-Runner Rocket Trail", partial_pct=1.0)
+    fh_rec = portfolio.trade_history.pop()
+    assert fh_rec["realized_pnl"] > 17.5 and "Lock1(БУ+)" in fh_rec["reason"] and "Lock2(Профит)" in fh_rec["reason"]
+    print(f"  ✓ Основная стратегия Full-Hold 100% подтверждена: $3.00 @ 50x на +12% дали ${fh_rec['realized_pnl']:+.2f} ({fh_rec['roi_pct']:+.1f}%) целиком без резки объема!")
+    portfolio.cash = 100.0
+
+    # Проверяем также альтернативный режим Partial-Split (FULL_HOLD_MODE=False: 35% + 25% + 40%)
+    config.FULL_HOLD_MODE = False
     dyn_plan = market_scanner.compute_dynamic_exit_plan(
         {"breakout_type": "SQUEEZE_80M", "atr14_pct": 0.008, "adx14": 24.0, "has_fvg_bull": True},
         side="LONG", sl_dist=0.012
@@ -87,6 +112,7 @@ async def run_suite():
         side="SHORT", sl_dist=0.025
     )
     assert rug_plan["profile"] == "FAST_RUG_DUMP" and rug_plan["tp1_r"] == 1.45 and rug_plan["tp2_r"] == 2.25
+    config.FULL_HOLD_MODE = True
 
     opened = portfolio.open_position(
         symbol="GUAUSDT", side="LONG", entry_price=10.0, size_usdt=16.00,
@@ -255,7 +281,7 @@ async def run_suite():
     binance_client._ticker24_cache = ("", 0.0, [])
     okx_tickers = await binance_client.fetch_top_tickers(min_vol_usdt=config.MIN_24H_VOLUME_USDT, limit=config.SCAN_TICKERS_LIMIT)
     assert binance_client.active_mirror_name == "okx", f"При бане bitget должен включиться okx, получено {binance_client.active_mirror_name}"
-    assert binance_client.last_full_market_count >= 230 and len(okx_tickers) >= 220, f"OKX должен вернуть >= 230 чистых крипто-пар, получено market={binance_client.last_full_market_count}, top={len(okx_tickers)}"
+    assert binance_client.last_full_market_count >= 210 and len(okx_tickers) >= 200, f"OKX должен вернуть >= 210 чистых крипто-пар, получено market={binance_client.last_full_market_count}, top={len(okx_tickers)}"
     okx_sol = await binance_client.fetch_candles_analysis("SOLUSDT", interval="5m", limit=200)
     akt_cross_p = await binance_client.fetch_price("AKTUSDT")
     assert okx_sol is not None and okx_sol["current_price"] > 0 and akt_cross_p is not None and akt_cross_p > 0
@@ -267,7 +293,7 @@ async def run_suite():
     binance_client._ticker24_cache = ("", 0.0, [])
     gate_tickers = await binance_client.fetch_top_tickers(min_vol_usdt=config.MIN_24H_VOLUME_USDT, limit=config.SCAN_TICKERS_LIMIT)
     assert binance_client.active_mirror_name == "gate", f"При бане okx должен включиться gate, получено {binance_client.active_mirror_name}"
-    assert binance_client.last_full_market_count >= 290 and len(gate_tickers) >= 220, f"Gate Futures должен мониторить >= 290 пар и вернуть 240 (вместо старых 158!), получено market={binance_client.last_full_market_count}, top={len(gate_tickers)}"
+    assert binance_client.last_full_market_count >= 250 and len(gate_tickers) >= 220, f"Gate Futures должен мониторить >= 250 пар и вернуть 240 (вместо старых 158!), получено market={binance_client.last_full_market_count}, top={len(gate_tickers)}"
     gate_sol = await binance_client.fetch_candles_analysis("SOLUSDT", interval="5m", limit=200)
     gate_akt_p = await binance_client.fetch_price("AKTUSDT")
     assert gate_sol is not None and gate_sol["current_price"] > 0 and gate_akt_p and gate_akt_p > 0

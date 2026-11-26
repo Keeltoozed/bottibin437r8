@@ -119,9 +119,11 @@ EARLY_BE_TRIGGER_PCT = float(os.getenv("EARLY_BE_TRIGGER_PCT", "9.99"))   # От
 EARLY_BE_TRIGGER_R = float(os.getenv("EARLY_BE_TRIGGER_R", "99.0"))
 EARLY_BE_LOCK_PCT = float(os.getenv("EARLY_BE_LOCK_PCT", "0.0022"))
 
-TARGET_1_R = float(os.getenv("TARGET_1_R", "1.90"))          # Дальний TP1 (+1.90R): 35% в кэш, не режем ракету рано!
-TARGET_2_R = float(os.getenv("TARGET_2_R", "8.00"))          # Верхний ориентир супер-ракеты (+350%..+700%+ @ 50x)
-TP1_PARTIAL_PCT = float(os.getenv("TP1_PARTIAL_PCT", "0.35")) # 35% в кэш на TP1 + 25% на TP2 -> 40% летит в Big-Runner Moonbag!
+# Режим удержания позиции: FULL_HOLD_MODE=True (100% объема едет без вытаскиваний долей, TP1/TP2 двигают замок SL в плюс -> PF 2.13!)
+FULL_HOLD_MODE = os.getenv("FULL_HOLD_MODE", "true").lower() == "true"
+TARGET_1_R = float(os.getenv("TARGET_1_R", "1.90"))          # Ступень 1 (+1.90R): перенос стопа в гарантированный плюс +0.40R!
+TARGET_2_R = float(os.getenv("TARGET_2_R", "8.00"))          # Верхний ориентир супер-ракеты (+400%..+3000% @ 50x)
+TP1_PARTIAL_PCT = float(os.getenv("TP1_PARTIAL_PCT", "0.00")) # 0% в Full-Hold (все 100% маржи ловят ракету целиком!)
 POST_TP1_LOCK_R = float(os.getenv("POST_TP1_LOCK_R", "0.40"))
 MAX_RISK_FREE_RUNNERS = int(os.getenv("MAX_RISK_FREE_RUNNERS", "4"))  # Безрисковые ранеры (после TP1) не блокируют слоты для новых ракет!
 TP2_PARTIAL_OF_REMAINING = 1.00

@@ -167,31 +167,39 @@ class ExitManager:
                                 pos["breakeven_set"] = True
                                 portfolio.save()
 
-                        # Stage 1 (TP1): динамическая фиксация части в кэш + замок остатка в плюс
+                        # Stage 1 (TP1 / Lock1): перенос SL в плюс (100% безрисковая в Full-Hold или фиксация доли в Partial)
                         if not pos["tp1_hit"] and cur_price >= tp1:
                             pos["tp1_hit"] = True
                             pos["wick_sl"] = config.round_price(max(pos["wick_sl"], entry + tp1_lock * risk_dist))
                             pos["breakeven_set"] = True
-                            part_label = int(round(tp1_share * 100))
-                            portfolio.close_position(
-                                sym, cur_price,
-                                reason=f"🎯 TP1 {tp1_r_val:.2f}R (+{pos['pnl_pct']:.1f}%): {part_label}% в кэш",
-                                partial_pct=tp1_share
-                            )
-                            continue
+                            if tp1_share > 0.001:
+                                part_label = int(round(tp1_share * 100))
+                                portfolio.close_position(
+                                    sym, cur_price,
+                                    reason=f"🎯 TP1 {tp1_r_val:.2f}R (+{pos['pnl_pct']:.1f}%): {part_label}% в кэш",
+                                    partial_pct=tp1_share
+                                )
+                                continue
+                            pos.setdefault("partial_notes", []).append("Lock1(БУ+)")
+                            portfolio.save()
+                            print(f"🛡️ [STEP-LOCK 1] {sym}: пробит {tp1_r_val:.2f}R ({pos['pnl_pct']:+.1f}%) | 100% объема в ракете, SL в плюс {pos['wick_sl']}!", flush=True)
 
-                        # Stage 2 (TP2): вторая динамическая фиксация (доля от остатка так, чтобы закрыть tp2_share от старта!)
-                        if pos["tp1_hit"] and not pos.get("tp2_hit", False) and tp2_share > 0 and cur_price >= tp2:
+                        # Stage 2 (TP2 / Lock2): вторая ступень замка профита (+1.1R..+1.55R) на все 100% (или добор кэша в Partial)
+                        if pos["tp1_hit"] and not pos.get("tp2_hit", False) and cur_price >= tp2:
                             pos["tp2_hit"] = True
                             pos["wick_sl"] = config.round_price(max(pos["wick_sl"], entry + tp2_lock * risk_dist))
-                            rem_frac = min(0.95, tp2_share / max(1.0 - tp1_share, 0.05))
-                            tp2_label = int(round(tp2_share * 100))
-                            portfolio.close_position(
-                                sym, cur_price,
-                                reason=f"🚀 TP2 {tp2_r_val:.2f}R (+{pos['pnl_pct']:.1f}%): еще {tp2_label}% в кэш",
-                                partial_pct=rem_frac
-                            )
-                            continue
+                            if tp2_share > 0.001:
+                                rem_frac = min(0.95, tp2_share / max(1.0 - tp1_share, 0.05))
+                                tp2_label = int(round(tp2_share * 100))
+                                portfolio.close_position(
+                                    sym, cur_price,
+                                    reason=f"🚀 TP2 {tp2_r_val:.2f}R (+{pos['pnl_pct']:.1f}%): еще {tp2_label}% в кэш",
+                                    partial_pct=rem_frac
+                                )
+                                continue
+                            pos.setdefault("partial_notes", []).append("Lock2(Профит)")
+                            portfolio.save()
+                            print(f"🔒 [STEP-LOCK 2] {sym}: пробит {tp2_r_val:.2f}R ({pos['pnl_pct']:+.1f}%) | 100% объема в ракете, SL поднят до {pos['wick_sl']}!", flush=True)
 
                         # Stage 3 (Trail): Широкий Big-Runner Ratchet (включается только от +3.1R!)
                         if pos["tp1_hit"]:
@@ -247,31 +255,39 @@ class ExitManager:
                                 pos["breakeven_set"] = True
                                 portfolio.save()
 
-                        # Stage 1 (TP1): динамическая фиксация прибыли в кэш + замок остатка
+                        # Stage 1 (TP1 / Lock1): перенос SL в плюс (100% безрисковая в Full-Hold или фиксация доли в Partial)
                         if not pos["tp1_hit"] and cur_price <= tp1:
                             pos["tp1_hit"] = True
                             pos["wick_sl"] = config.round_price(min(pos["wick_sl"], entry - tp1_lock * risk_dist))
                             pos["breakeven_set"] = True
-                            part_label = int(round(tp1_share * 100))
-                            portfolio.close_position(
-                                sym, cur_price,
-                                reason=f"🎯 TP1 {tp1_r_val:.2f}R (+{pos['pnl_pct']:.1f}%): {part_label}% в кэш",
-                                partial_pct=tp1_share
-                            )
-                            continue
+                            if tp1_share > 0.001:
+                                part_label = int(round(tp1_share * 100))
+                                portfolio.close_position(
+                                    sym, cur_price,
+                                    reason=f"🎯 TP1 {tp1_r_val:.2f}R (+{pos['pnl_pct']:.1f}%): {part_label}% в кэш",
+                                    partial_pct=tp1_share
+                                )
+                                continue
+                            pos.setdefault("partial_notes", []).append("Lock1(БУ+)")
+                            portfolio.save()
+                            print(f"🛡️ [STEP-LOCK 1] {sym}: пробит {tp1_r_val:.2f}R ({pos['pnl_pct']:+.1f}%) | 100% объема в ракете, SL в плюс {pos['wick_sl']}!", flush=True)
 
-                        # Stage 2 (TP2): вторая динамическая фиксация перед трейлом остатка
-                        if pos["tp1_hit"] and not pos.get("tp2_hit", False) and tp2_share > 0 and cur_price <= tp2:
+                        # Stage 2 (TP2 / Lock2): вторая ступень замка профита на все 100% (или добор кэша в Partial)
+                        if pos["tp1_hit"] and not pos.get("tp2_hit", False) and cur_price <= tp2:
                             pos["tp2_hit"] = True
                             pos["wick_sl"] = config.round_price(min(pos["wick_sl"], entry - tp2_lock * risk_dist))
-                            rem_frac = min(0.95, tp2_share / max(1.0 - tp1_share, 0.05))
-                            tp2_label = int(round(tp2_share * 100))
-                            portfolio.close_position(
-                                sym, cur_price,
-                                reason=f"🚀 TP2 {tp2_r_val:.2f}R (+{pos['pnl_pct']:.1f}%): еще {tp2_label}% в кэш",
-                                partial_pct=rem_frac
-                            )
-                            continue
+                            if tp2_share > 0.001:
+                                rem_frac = min(0.95, tp2_share / max(1.0 - tp1_share, 0.05))
+                                tp2_label = int(round(tp2_share * 100))
+                                portfolio.close_position(
+                                    sym, cur_price,
+                                    reason=f"🚀 TP2 {tp2_r_val:.2f}R (+{pos['pnl_pct']:.1f}%): еще {tp2_label}% в кэш",
+                                    partial_pct=rem_frac
+                                )
+                                continue
+                            pos.setdefault("partial_notes", []).append("Lock2(Профит)")
+                            portfolio.save()
+                            print(f"🔒 [STEP-LOCK 2] {sym}: пробит {tp2_r_val:.2f}R ({pos['pnl_pct']:+.1f}%) | 100% объема в ракете, SL поднят до {pos['wick_sl']}!", flush=True)
 
                         # Stage 3 (Trail): Широкий Big-Runner Ratchet для шорт-ранера (от +3.1R!)
                         if pos["tp1_hit"]:

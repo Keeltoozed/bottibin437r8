@@ -35,20 +35,24 @@ class MarketScanner:
 
     @staticmethod
     def compute_dynamic_exit_plan(ctx: Dict[str, Any], side: str, sl_dist: float) -> Dict[str, Any]:
-        """Индивидуальный Big-Runner 3-Stage план (35% TP1 + 25% TP2 + 40% широкий Moonbag для +350%..+700%+)."""
+        """Индивидуальный план выхода: Full-Hold 100% (по умолчанию — без вытаскиваний, ступени замка SL + Trail, PF 2.13) или Partial-Split."""
         brk_type = ctx.get("breakout_type", "STRUCT_3H")
         atr_pct = float(ctx.get("atr14_pct", 0.006) or 0.006)
         adx14 = float(ctx.get("adx14", 20.0) or 20.0)
         has_fvg = bool(ctx.get("has_fvg_bull") if side == "LONG" else ctx.get("has_fvg_bear"))
+        full_hold = bool(getattr(config, "FULL_HOLD_MODE", True))
+        sh1 = 0.0 if full_hold else 0.35
+        sh2_rug = 0.0 if full_hold else 0.30
+        sh2_std = 0.0 if full_hold else 0.25
 
         if brk_type == "RUG_SHORT":
-            return {"profile": "FAST_RUG_DUMP", "tp1_r": 1.45, "tp1_share": 0.35, "tp1_lock_r": 0.25, "tp2_r": 2.25, "tp2_share": 0.30, "tp2_lock_r": 1.10}
+            return {"profile": "FAST_RUG_DUMP", "tp1_r": 1.45, "tp1_share": sh1, "tp1_lock_r": 0.25, "tp2_r": 2.25, "tp2_share": sh2_rug, "tp2_lock_r": 1.10}
         elif brk_type == "SQUEEZE_80M" or (has_fvg and adx14 >= 20.0):
-            return {"profile": "EXPLOSIVE_FVG", "tp1_r": 1.90, "tp1_share": 0.35, "tp1_lock_r": 0.40, "tp2_r": 3.00, "tp2_share": 0.25, "tp2_lock_r": 1.55}
+            return {"profile": "EXPLOSIVE_FVG", "tp1_r": 1.90, "tp1_share": sh1, "tp1_lock_r": 0.40, "tp2_r": 3.00, "tp2_share": sh2_std, "tp2_lock_r": 1.55}
         elif atr_pct >= 0.012 or sl_dist >= 0.030:
-            return {"profile": "HIGH_VOL_SWING", "tp1_r": 1.55, "tp1_share": 0.35, "tp1_lock_r": 0.30, "tp2_r": 2.30, "tp2_share": 0.25, "tp2_lock_r": 1.15}
+            return {"profile": "HIGH_VOL_SWING", "tp1_r": 1.55, "tp1_share": sh1, "tp1_lock_r": 0.30, "tp2_r": 2.30, "tp2_share": sh2_std, "tp2_lock_r": 1.15}
         else:
-            return {"profile": "STD_TREND_FIB", "tp1_r": 1.72, "tp1_share": 0.35, "tp1_lock_r": 0.35, "tp2_r": 2.60, "tp2_share": 0.25, "tp2_lock_r": 1.32}
+            return {"profile": "STD_TREND_FIB", "tp1_r": 1.72, "tp1_share": sh1, "tp1_lock_r": 0.35, "tp2_r": 2.60, "tp2_share": sh2_std, "tp2_lock_r": 1.32}
 
     async def scan_market_once(self, force: bool = False) -> List[Dict[str, Any]]:
         """Один параллельный проход сканирования рынка строго на закрытии 5m свечи (защита от HTTP 418/429)."""
@@ -582,11 +586,14 @@ class MarketScanner:
                     if opened:
                         self.cooldowns[sym] = now
                         trail_left = int(round((1.0 - exit_plan["tp1_share"] - exit_plan["tp2_share"]) * 100))
+                        if exit_plan["tp1_share"] <= 0.001:
+                            tp_info = f"Lock1(БУ+@{exit_plan['tp1_r']}R): {config.round_price(tp1_target)} | Lock2(+{exit_plan['tp2_lock_r']}R@{exit_plan['tp2_r']}R): {config.round_price(tp2_target)} | 100% Full-Hold Trail"
+                        else:
+                            tp_info = f"TP1({int(exit_plan['tp1_share']*100)}%@{exit_plan['tp1_r']}R): {config.round_price(tp1_target)} | TP2({int(exit_plan['tp2_share']*100)}%@{exit_plan['tp2_r']}R): {config.round_price(tp2_target)} | {trail_left}% Trail"
                         print(
                             f"🟢 [ROCKET OPEN] {cand_side} {sym} [{brk_type} | {exit_plan['profile']}] по {config.round_price(entry_p)} | "
                             f"Маржа: ${actual_margin:.2f} ({lev_to_use}x, Риск 1R: ${risk_usd:.2f}) | "
-                            f"SL: {config.round_price(exact_sl)} ({sl_dist_pct*100:.2f}%) | TP1({int(exit_plan['tp1_share']*100)}%@{exit_plan['tp1_r']}R): {config.round_price(tp1_target)} | "
-                            f"TP2({int(exit_plan['tp2_share']*100)}%@{exit_plan['tp2_r']}R): {config.round_price(tp2_target)} | {trail_left}% Anti-Rug Trail",
+                            f"SL: {config.round_price(exact_sl)} ({sl_dist_pct*100:.2f}%) | {tp_info}",
                             flush=True
                         )
                         if len(at_risk_positions) + 1 >= config.MAX_CONCURRENT_POSITIONS:

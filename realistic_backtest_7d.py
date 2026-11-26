@@ -11,6 +11,7 @@ realistic_backtest_7d.py
 """
 
 import time
+import datetime
 import requests
 import numpy as np
 import pandas as pd
@@ -171,15 +172,29 @@ def simulate_strategy(
     cash = initial_balance
     peak_eq = initial_balance
     max_dd = 0.0
-    cost = 0.0006
+    cost = 0.0009 if big_runner_mode else 0.0006
+    stop_cost = 0.0012 if big_runner_mode else 0.0006
     total_comm = 0.0
     open_pos: Dict[str, Dict[str, Any]] = {}
     trades_r: List[float] = []
     trades_pnl: List[float] = []
     lockouts: Dict[str, int] = {}
+    daily_map: Dict[str, Dict[str, Any]] = {}
     btc_d = ind.get("BTCUSDT")
 
     for t_now in ts_list:
+        ts_sec = int(t_now) // 1000 if t_now > 1e11 else int(t_now)
+        d_str = datetime.datetime.utcfromtimestamp(ts_sec).strftime("%Y-%m-%d")
+        if d_str not in daily_map:
+            cur_u = 0.0
+            for _s, _p in open_pos.items():
+                _ix = ind[_s]["time_idx"].get(t_now)
+                if _ix is not None:
+                    _cl = ind[_s]["c"][_ix]
+                    _rw = (_cl - _p["entry"]) / _p["entry"] if _p["side"] == "LONG" else (_p["entry"] - _cl) / _p["entry"]
+                    cur_u += _p["mg"] * _rw * _p["lev"]
+            start_e = cash + sum(_p["mg"] for _p in open_pos.values()) + cur_u
+            daily_map[d_str] = {"start_eq": start_e, "end_eq": start_e, "trades": 0, "wins": 0, "losses": 0}
         btc_dump = btc_pump = btc_flush = btc_spike = False
         bp5 = bp15 = 0.0
         if btc_d is not None:
@@ -201,19 +216,26 @@ def simulate_strategy(
             if idx is None:
                 continue
             pos["bars"] += 1
+            if big_runner_mode and pos["bars"] % 96 == 0:
+                f_fee = pos["mg"] * pos["lev"] * 0.0001
+                total_comm += f_fee
+                cash = max(0.0, cash - f_fee)
+                pos["realized"] -= f_fee
             h, l, cl = d["h"][idx], d["l"][idx], d["c"][idx]
             entry, side, lev, rd = pos["entry"], pos["side"], pos["lev"], pos["rd"]
             atr_p = d["atr_pct"][idx - 1]
 
             if side == "LONG":
                 if l <= pos["sl"]:
-                    fee = pos["mg"] * lev * cost
+                    fee = pos["mg"] * lev * stop_cost
                     total_comm += fee
                     pnl = pos["mg"] * ((pos["sl"] - entry) / entry) * lev - fee
                     cash = max(0.0, cash + pos["mg"] + pnl)
                     pos["realized"] += pnl
                     trades_pnl.append(pos["realized"])
                     trades_r.append(pos["realized"] / pos["risk_usd"])
+                    daily_map[d_str]["trades"] += 1
+                    daily_map[d_str]["wins" if pos["realized"] > 0 else "losses"] += 1
                     lockouts[sym] = idx + (18 if pos["realized"] < 0 else 2)
                     del open_pos[sym]
                     continue
@@ -259,6 +281,8 @@ def simulate_strategy(
                         pos["sl"] = max(pos["sl"], entry + 0.35 * rd)
 
                 if pos["tp1_hit"]:
+                    if big_runner_mode and tp1_share <= 0.001 and mfe_r >= 2.60:
+                        pos["sl"] = max(pos["sl"], entry + 1.32 * rd)
                     if big_runner_mode:
                         if mfe_r >= 6.6:
                             trail_p = pos["hi"] - max(1.69 * atr_p * pos["hi"], 0.81 * rd)
@@ -283,13 +307,15 @@ def simulate_strategy(
 
             else:
                 if h >= pos["sl"]:
-                    fee = pos["mg"] * lev * cost
+                    fee = pos["mg"] * lev * stop_cost
                     total_comm += fee
                     pnl = pos["mg"] * ((entry - pos["sl"]) / entry) * lev - fee
                     cash = max(0.0, cash + pos["mg"] + pnl)
                     pos["realized"] += pnl
                     trades_pnl.append(pos["realized"])
                     trades_r.append(pos["realized"] / pos["risk_usd"])
+                    daily_map[d_str]["trades"] += 1
+                    daily_map[d_str]["wins" if pos["realized"] > 0 else "losses"] += 1
                     lockouts[sym] = idx + (18 if pos["realized"] < 0 else 2)
                     del open_pos[sym]
                     continue
@@ -335,6 +361,8 @@ def simulate_strategy(
                         pos["sl"] = min(pos["sl"], entry - 0.35 * rd)
 
                 if pos["tp1_hit"]:
+                    if big_runner_mode and tp1_share <= 0.001 and mfe_r >= 2.60:
+                        pos["sl"] = min(pos["sl"], entry - 1.32 * rd)
                     if big_runner_mode:
                         if mfe_r >= 6.6:
                             trail_p = pos["lo"] + max(1.69 * atr_p * pos["lo"], 0.81 * rd)
@@ -358,12 +386,14 @@ def simulate_strategy(
                 unreal += pos["mg"] * ((entry - cl) / entry) * lev
 
         eq = cash + sum(p["mg"] for p in open_pos.values()) + unreal
+        daily_map[d_str]["end_eq"] = eq
         peak_eq = max(peak_eq, eq)
         max_dd = max(max_dd, (peak_eq - eq) / peak_eq if peak_eq > 0 else 0.0)
 
         at_risk = sum(1 for p in open_pos.values() if not p["tp1_hit"])
-        max_slots = 2 if legacy_churn_mode else 4
-        if at_risk < 2 and len(open_pos) < max_slots and cash >= 1.2:
+        max_at_risk = 2 if legacy_churn_mode else (8 if big_runner_mode else 2)
+        max_slots = 2 if legacy_churn_mode else (12 if big_runner_mode else 4)
+        if at_risk < max_at_risk and len(open_pos) < max_slots and cash >= 1.2:
             cands = []
             for sym, d in ind.items():
                 if sym == "BTCUSDT" or sym in open_pos:
@@ -445,7 +475,9 @@ def simulate_strategy(
                 cur_dd = (peak_eq - cur_eq) / peak_eq if peak_eq > 0 else 0.0
                 dd_mult = 0.75 if cur_dd >= 0.20 else 1.0
                 if equal_margin_pct > 0.0:
-                    mg = round(min(cur_eq * equal_margin_pct * dd_mult, cur_eq * 0.25, cash * 0.48), 2)
+                    # Реалистичный потолок стакана альта ($1,500 макс объем позиции), чтобы реинвест не рисовал нереальных заявок!
+                    max_liq_mg = 1500.0 / max(leverage, 1)
+                    mg = round(min(cur_eq * equal_margin_pct * dd_mult, max_liq_mg, cur_eq * 0.25, cash * 0.48), 2)
                     risk_usd = max(mg * leverage * sl_dist, 0.05)
                 else:
                     r_eff = risk_pct * dd_mult
@@ -481,6 +513,27 @@ def simulate_strategy(
     pf = round(sum(wins) / abs(sum(losses)), 2) if losses and sum(losses) != 0 else (99.0 if wins else 0.0)
     exp_r = round(sum(trades_r) / len(trades_r), 3) if trades_r else 0.0
 
+    daily_rows = []
+    win_days = 0
+    loss_days = 0
+    for dk in sorted(daily_map.keys()):
+        dm = daily_map[dk]
+        d_pnl = round(dm["end_eq"] - dm["start_eq"], 2)
+        d_pct = round((d_pnl / max(dm["start_eq"], 1.0)) * 100.0, 1)
+        if dm["trades"] > 0 or abs(d_pnl) >= 0.05:
+            if d_pnl >= 0:
+                win_days += 1
+            else:
+                loss_days += 1
+        daily_rows.append({
+            "Дата": dk,
+            "Итог дня": "✅ Плюс" if d_pnl >= 0 else "❌ Убыток",
+            "PnL за день ($)": f"${d_pnl:+.2f}",
+            "PnL за день (%)": f"{d_pct:+.1f}%",
+            "Закрыто сделок": f"{dm['trades']} (W:{dm['wins']} / L:{dm['losses']})",
+            "Эквити к концу дня": f"${dm['end_eq']:.2f}",
+        })
+
     return {
         "final_balance": round(cash, 2),
         "net_pnl": round(cash - initial_balance, 2),
@@ -491,6 +544,9 @@ def simulate_strategy(
         "profit_factor": pf,
         "expectancy_r": exp_r,
         "total_commission": round(total_comm, 2),
+        "winning_days": win_days,
+        "losing_days": loss_days,
+        "daily_breakdown": daily_rows,
     }
 
 

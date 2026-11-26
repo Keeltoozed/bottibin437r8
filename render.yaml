@@ -23,6 +23,8 @@ services:
         value: "100.0"
       - key: SIZING_MODE
         value: "equal_margin"
+      - key: FULL_HOLD_MODE
+        value: "true"
       - key: FIXED_MARGIN_PCT
         value: "0.030"
       - key: MAX_ENTRY_5M_SPIKE_PCT

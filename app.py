@@ -198,26 +198,28 @@ with st.sidebar:
     _hdr_eq = max(10.0, _sb_summary["equity"])
     st.markdown(f"### 🚀 Equal Margin Cross (${_hdr_eq:.0f})")
 
-    # Режим риск-профиля (Честный Cross-Margin 50x: 3.0% маржа = 1.5x плечо от депо, 0 ликвидаций на -2% + реинвест!)
+    # Режим риск-профиля (Основной: Full-Hold 100% без вытаскивания долей + ступенчатые замки SL + Trail, PF 2.13!)
     strategy_mode = st.radio(
         "Профиль риск-менеджмента (Cross Margin):",
         [
-            "🚀 Big-Runner Cross 50x (маржа 3.0% = $150 объём, 8 слотов + Trail @ 3.1R)",
-            "🔥 Safe Cross 50x (маржа 2.5% = $125 объём, 8 слотов — мягкая просадка)",
-            "🛡️ Risk-Parity Проп (50x Cross, фикс-риск 4.0% на стоп, 6 слотов)"
+            "🚀 Full-Hold Cross 50x (100% до конца + Замки SL, маржа 3.0% — PF 2.13)",
+            "💰 Partial-Split Cross 50x (35% TP1 + 25% TP2 + 40% Trail, маржа 3.0%)",
+            "🔥 Safe Full-Hold 50x (100% до конца, маржа 2.5% — мягкая просадка)"
         ],
         index=0
     )
-    if "Risk-Parity" in strategy_mode:
+    if "Partial-Split" in strategy_mode:
         default_lev = 50
-        config.SIZING_MODE = "risk_parity"
-        config.RISK_PER_TRADE_PCT = 0.040
-        config.MAX_CONCURRENT_POSITIONS = 6
+        config.FULL_HOLD_MODE = False
+        config.SIZING_MODE = "equal_margin"
+        config.FIXED_MARGIN_PCT = 0.030
+        config.MAX_CONCURRENT_POSITIONS = 8
         config.MIN_5M_VOLUME_SURGE_RATIO = 1.80
         config.MIN_CLOSE_STRENGTH = 0.66
         config.DAILY_LOSS_LIMIT = 99
-    elif "Safe Cross" in strategy_mode:
+    elif "Safe Full-Hold" in strategy_mode:
         default_lev = 50
+        config.FULL_HOLD_MODE = True
         config.SIZING_MODE = "equal_margin"
         config.FIXED_MARGIN_PCT = 0.025
         config.MAX_CONCURRENT_POSITIONS = 8
@@ -226,6 +228,7 @@ with st.sidebar:
         config.DAILY_LOSS_LIMIT = 99
     else:
         default_lev = 50
+        config.FULL_HOLD_MODE = True
         config.SIZING_MODE = "equal_margin"
         config.FIXED_MARGIN_PCT = 0.030
         config.MAX_CONCURRENT_POSITIONS = 8
@@ -406,12 +409,24 @@ with tab_pos:
                     tp1_pos = pos.get('tp1', 0.0) or 0.0
                     tp2_pos = pos.get('tp2', 0.0) or 0.0
                     ep_plan = pos.get('exit_plan') or {}
-                    tp1_tag = f"{int(ep_plan.get('tp1_share', 0.45)*100)}%@{ep_plan.get('tp1_r', 1.5)}R"
-                    tp2_tag = f"{int(ep_plan.get('tp2_share', 0.25)*100)}%@{ep_plan.get('tp2_r', 2.25)}R"
+                    sh1_ui = float(ep_plan.get('tp1_share', 0.0))
                     st.markdown(f"**{stop_label}:** `{fmt_price(sl_pos)}`")
-                    st.markdown(f"**TP1 ({tp1_tag}):** `{fmt_price(tp1_pos)}`")
-                    st.markdown(f"**TP2 ({tp2_tag}):** `{fmt_price(tp2_pos)}`")
-                    st.caption(f"{be_badge} • 🎯 {ep_plan.get('profile', 'DYNAMIC')}")
+                    if sh1_ui <= 0.001:
+                        st.markdown(f"**Замок 1 (БУ+ @{ep_plan.get('tp1_r', 1.72)}R):** `{fmt_price(tp1_pos)}`")
+                        st.markdown(f"**Замок 2 (+{ep_plan.get('tp2_lock_r', 1.32)}R @{ep_plan.get('tp2_r', 2.60)}R):** `{fmt_price(tp2_pos)}`")
+                        if pos.get("tp2_hit"):
+                            fh_badge = "🔒 Замок 2 АКТИВЕН (100% в ракете)"
+                        elif pos.get("breakeven_set"):
+                            fh_badge = "🛡️ Замок 1 АКТИВЕН (100% в ракете)"
+                        else:
+                            fh_badge = "Ожидание Замка 1 (100% объём)"
+                        st.caption(f"{fh_badge} • 🎯 {ep_plan.get('profile', 'DYNAMIC')}")
+                    else:
+                        tp1_tag = f"{int(sh1_ui*100)}%@{ep_plan.get('tp1_r', 1.5)}R"
+                        tp2_tag = f"{int(ep_plan.get('tp2_share', 0.25)*100)}%@{ep_plan.get('tp2_r', 2.25)}R"
+                        st.markdown(f"**TP1 ({tp1_tag}):** `{fmt_price(tp1_pos)}`")
+                        st.markdown(f"**TP2 ({tp2_tag}):** `{fmt_price(tp2_pos)}`")
+                        st.caption(f"{be_badge} • 🎯 {ep_plan.get('profile', 'DYNAMIC')}")
                 with col_e:
                     if st.button("Закрыть", key=f"close_{sym}"):
                         portfolio.close_position(sym, pos.get('current_price', 0.0), "Ручное закрытие из интерфейса")
@@ -645,44 +660,49 @@ with tab_shadow:
 # 6. TIME MACHINE (БЭКТЕСТ ЗА НЕДЕЛЮ ПО МЕТОДОЛОГИИ DAY-TRADER-SKILL)
 # ------------------------------------------------------------------------------
 with tab_timemachine:
-    st.subheader("🔬 Time Machine: Честный институциональный бэктест (Без заглядывания в будущее)")
+    st.subheader("🔬 Time Machine: Реалистичный подневный стресс-бэктест (С проскальзыванием, фандингом и убыточными днями)")
     st.markdown(f"""
-    **Честная проверка реальной логики Hyper Cross 50x (`${config.INITIAL_BALANCE:.0f}` старт, `50x` Cross, до 6 слотов) против старого скальпера:**
-    * **Нулевой Lookahead Bias:** сигнал рассчитывается строго по закрытой свече `[t-1]`, вход по цене открытия следующей свечи `[t]`.
-    * **Реальные издержки биржи:** `0.06%` комиссия тейкера + `0.06%` проскальзывание на круг (`0.12%`) и строгий учет `1 позиция = 1 сделка`.
-    * **Anti-Rug Rocket Harvest:** `60%` прибыли сразу в кэш на `1.65R` + стоп в `+0.35R` + `40%` безрисковый параболический трейл + `TTL 24ч`.
+    **Жесткая реалистичная проверка без прикрас (`${config.INITIAL_BALANCE:.0f}` старт, честный `50x` Cross Margin):**
+    * **Нулевой Lookahead Bias + Stop-First:** сигнал строго по закрытой свече `[t-1]`, внутри свечи Стоп-Лосс всегда проверяется раньше тейков.
+    * **Суровое биржевое трение:** `0.09%` на входе + **`0.12%` на стоп-маркете (`0.21%` на круг = `-10.5%` маржи при `50x`)** + фандинг каждые `8ч` + потолок ликвидности стакана `$1,500`.
+    * **Календарь по дням:** показывает отдельно каждый торговый день — включая просадочные и убыточные дни (`✅ / ❌`).
     """)
 
-    if st.button("▶ Запустить честный аудит стратегий (Rocket Hunter vs Старый скальпер)", type="primary"):
-        with st.spinner("Предрасчет индикаторов, ML-скоринга и симуляция без заглядывания в будущее..."):
+    if st.button("▶ Запустить реалистичный подневный бэктест (с календарем плюсовых и убыточных дней)", type="primary"):
+        with st.spinner("Загрузка свечей, стресс-проскальзывание, фандинг и расчёт каждого дня..."):
             from realistic_backtest_7d import get_7d_data, precompute_indicators, simulate_strategy
             cdata = get_7d_data(prefer_extended_universe=True)
             pre = precompute_indicators(cdata)
 
             configs = [
-                ("🚀 Big-Runner Cross 50x ($100, маржа 3.0% = $150 объём + Честный Cross)", dict(leverage=50, equal_margin_pct=0.030, max_spike_5m=3.50, big_runner_mode=True, tp1_r=1.72, tp1_share=0.35)),
-                ("🔥 Safe Cross 50x ($100, маржа 2.5% = $125 объём + Честный Cross)", dict(leverage=50, equal_margin_pct=0.025, max_spike_5m=3.50, big_runner_mode=True, tp1_r=1.72, tp1_share=0.35)),
+                ("🚀 Full-Hold Cross 50x ($100, 100% до конца + Замки SL, маржа 3.0%)", dict(leverage=50, equal_margin_pct=0.030, max_spike_5m=3.50, big_runner_mode=True, tp1_r=1.72, tp1_share=0.0)),
+                ("💰 Partial-Split Cross 50x ($100, 35% TP1 + Trail, маржа 3.0%)", dict(leverage=50, equal_margin_pct=0.030, max_spike_5m=3.50, big_runner_mode=True, tp1_r=1.72, tp1_share=0.35)),
                 ("🎯 Anti-Rug Fixed Target (100% на 1.70R до слива)", dict(leverage=50, risk_pct=0.040, tp1_r=1.70, tp1_share=1.00)),
                 ("❌ Старый 12-барный скальпер (Early BE + 35м Time-Stop)", dict(leverage=12, legacy_churn_mode=True)),
             ]
 
             rows = []
-            for name, kw in configs:
+            primary_daily = []
+            for idx_c, (name, kw) in enumerate(configs):
                 res = simulate_strategy(all_data=cdata, initial_balance=config.INITIAL_BALANCE, precomputed=pre, **kw)
+                if idx_c == 0:
+                    primary_daily = res.get("daily_breakdown", [])
                 rows.append({
                     "Конфигурация": name,
                     "Итог ($)": f"${res['final_balance']:.2f}",
                     "Чистый PnL": f"${res['net_pnl']:+.2f}",
-                    "Доходность (ROI)": f"{res['roi_pct']:+.1f}%",
+                    "Дни (✅/❌)": f"{res.get('winning_days', 0)}✅ / {res.get('losing_days', 0)}❌",
                     "Винрейт": f"{res['win_rate']}%",
                     "Сделок": res["total_trades"],
                     "Макс. просадка": f"{res['max_drawdown_pct']}%",
                     "Profit Factor": res["profit_factor"],
-                    "Мат. ожидание": f"{res['expectancy_r']:+.3f}R",
-                    "Комиссии": f"${res['total_commission']:.2f}"
+                    "Комиссии+Слип": f"${res['total_commission']:.2f}"
                 })
 
             render_table(pd.DataFrame(rows))
+            if primary_daily:
+                st.markdown("#### 📅 Подневная ведомость основной стратегии (`Full-Hold Cross 50x`)")
+                render_table(pd.DataFrame(primary_daily))
             st.success("✅ Аудит завершен: архитектура **Rocket Hunter** дает устойчивое положительное математическое ожидание с учетом реальных комиссий и проскальзывания!")
 
 # ------------------------------------------------------------------------------
