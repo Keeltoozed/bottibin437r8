@@ -23,6 +23,24 @@ class ExitManager:
         self._last_log_time = 0.0
         self._last_shadow_check = 0.0
 
+    @staticmethod
+    def _compute_big_runner_trail(side: str, extreme_price: float, entry: float, risk_dist: float, atr_pct: float, mfe_r: float, current_sl: float) -> float:
+        """Широкий Big-Runner ATR-трейлинг: активируется только от +3.1R, не душит ракеты до +350%..+700%+."""
+        if mfe_r >= 6.6:
+            band = max(1.69 * atr_pct * extreme_price, 0.81 * risk_dist)
+        elif mfe_r >= 4.5:
+            band = max(1.98 * atr_pct * extreme_price, 1.06 * risk_dist)
+        elif mfe_r >= 3.1:
+            band = max(2.25 * atr_pct * extreme_price, 1.25 * risk_dist)
+        else:
+            return current_sl
+
+        if side == "LONG":
+            floor_p = entry + 1.05 * risk_dist if mfe_r >= 3.1 else current_sl
+            return max(floor_p, extreme_price - band)
+        floor_p = entry - 1.05 * risk_dist if mfe_r >= 3.1 else current_sl
+        return min(floor_p, extreme_price + band)
+
     async def _check_shadow_outcomes(self):
         """Проверяет свечи и экстремумы (High/Low) для теневого трекера отклонённых сетапов."""
         try:
@@ -98,12 +116,12 @@ class ExitManager:
 
                     # Индивидуальный динамический профиль выхода конкретно под эту сделку
                     ep = pos.get("exit_plan") or {}
-                    tp1_r_val = float(ep.get("tp1_r", getattr(config, "TARGET_1_R", 1.50)))
+                    tp1_r_val = float(ep.get("tp1_r", getattr(config, "TARGET_1_R", 1.72)))
                     tp1_share = float(ep.get("tp1_share", tp1_part))
                     tp1_lock = float(ep.get("tp1_lock_r", post_tp1_lock_r))
-                    tp2_r_val = float(ep.get("tp2_r", 2.25))
+                    tp2_r_val = float(ep.get("tp2_r", 2.60))
                     tp2_share = float(ep.get("tp2_share", 0.0))
-                    tp2_lock = float(ep.get("tp2_lock_r", 1.15))
+                    tp2_lock = float(ep.get("tp2_lock_r", 1.32))
 
                     if should_log:
                         print(
@@ -123,10 +141,10 @@ class ExitManager:
                         mfe_r = mfe_dist / risk_dist
                         cur_r = (cur_price - entry) / risk_dist
 
-                        # 1. СТОП-ЛОСС / БЕЗРИСКОВЫЙ ЗАМОК / ПАРАБОЛИЧЕСКИЙ ANTI-RUG ТРЕЙЛ
+                        # 1. СТОП-ЛОСС / БЕЗРИСКОВЫЙ ЗАМОК / ШИРОКИЙ BIG-RUNNER ТРЕЙЛ
                         if cur_price <= wick_sl:
-                            if pos.get("tp1_hit") and mfe_r >= 2.2:
-                                reason_label = f"🚀 Anti-Rug Rocket Trail ({pos['pnl_pct']:+.1f}%)"
+                            if pos.get("tp1_hit") and mfe_r >= 3.1:
+                                reason_label = f"🚀 Big-Runner Rocket Trail ({pos['pnl_pct']:+.1f}%)"
                             elif pos.get("breakeven_set"):
                                 reason_label = f"🛡️ Profit-Lock Shield ({pos['pnl_pct']:+.1f}%)"
                             else:
@@ -167,16 +185,9 @@ class ExitManager:
                             )
                             continue
 
-                        # Stage 3 (Trail): Прогрессивный Anti-Rug Parabolic Ratchet для безрискового Moonbag-ранера!
+                        # Stage 3 (Trail): Широкий Big-Runner Ratchet (включается только от +3.1R!)
                         if pos["tp1_hit"]:
-                            if mfe_r >= 5.5:
-                                trail_sl = highest - max(0.95 * atr_pct * highest, 0.55 * risk_dist)
-                            elif mfe_r >= 3.2:
-                                trail_sl = highest - max(1.25 * atr_pct * highest, 0.75 * risk_dist)
-                            elif mfe_r >= 2.1:
-                                trail_sl = max(entry + 1.10 * risk_dist, highest - max(1.60 * atr_pct * highest, 0.90 * risk_dist))
-                            else:
-                                trail_sl = pos["wick_sl"]
+                            trail_sl = self._compute_big_runner_trail("LONG", highest, entry, risk_dist, atr_pct, mfe_r, pos["wick_sl"])
                             trailing_sl_price = config.round_price(trail_sl)
                             if trailing_sl_price > pos["wick_sl"]:
                                 pos["wick_sl"] = trailing_sl_price
@@ -210,10 +221,10 @@ class ExitManager:
                         mfe_r = mfe_dist / risk_dist
                         cur_r = (entry - cur_price) / risk_dist
 
-                        # 1. СТОП-ЛОСС / БЕЗРИСКОВЫЙ ЗАМОК / ПАРАБОЛИЧЕСКИЙ ANTI-RUG ТРЕЙЛ
+                        # 1. СТОП-ЛОСС / БЕЗРИСКОВЫЙ ЗАМОК / ШИРОКИЙ BIG-RUNNER ТРЕЙЛ
                         if cur_price >= wick_sl:
-                            if pos.get("tp1_hit") and mfe_r >= 2.2:
-                                reason_label = f"🚀 Anti-Rug Dump Trail ({pos['pnl_pct']:+.1f}%)"
+                            if pos.get("tp1_hit") and mfe_r >= 3.1:
+                                reason_label = f"🚀 Big-Runner Dump Trail ({pos['pnl_pct']:+.1f}%)"
                             elif pos.get("breakeven_set"):
                                 reason_label = f"🛡️ Profit-Lock Shield ({pos['pnl_pct']:+.1f}%)"
                             else:
@@ -254,16 +265,9 @@ class ExitManager:
                             )
                             continue
 
-                        # Stage 3 (Trail): Прогрессивный Anti-Bounce Parabolic Ratchet для безрискового шорт-ранера!
+                        # Stage 3 (Trail): Широкий Big-Runner Ratchet для шорт-ранера (от +3.1R!)
                         if pos["tp1_hit"]:
-                            if mfe_r >= 5.5:
-                                trail_sl = lowest + max(0.95 * atr_pct * lowest, 0.55 * risk_dist)
-                            elif mfe_r >= 3.2:
-                                trail_sl = lowest + max(1.25 * atr_pct * lowest, 0.75 * risk_dist)
-                            elif mfe_r >= 2.1:
-                                trail_sl = min(entry - 1.10 * risk_dist, lowest + max(1.60 * atr_pct * lowest, 0.90 * risk_dist))
-                            else:
-                                trail_sl = pos["wick_sl"]
+                            trail_sl = self._compute_big_runner_trail("SHORT", lowest, entry, risk_dist, atr_pct, mfe_r, pos["wick_sl"])
                             trailing_sl_price = config.round_price(trail_sl)
                             if trailing_sl_price < pos["wick_sl"]:
                                 pos["wick_sl"] = trailing_sl_price

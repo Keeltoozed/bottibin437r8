@@ -194,36 +194,41 @@ with st.sidebar:
         st.rerun()
         
     st.divider()
-    st.markdown(f"### 🚀 Alpha Hyper Cross (${int(config.INITIAL_BALANCE)})")
+    _sb_summary = portfolio.get_portfolio_summary()
+    _hdr_eq = max(10.0, _sb_summary["equity"])
+    st.markdown(f"### 🚀 Equal Margin Cross (${_hdr_eq:.0f})")
 
-    # Режим риск-профиля (Cross-Margin 50x: 500% ROI на 10% ракеты за счет малого залога + жесткий % риск!)
+    # Режим риск-профиля (Cross-Margin 50x: одинаковая маржа 4.0% + широкое удержание Big-Runner до +700%+)
     strategy_mode = st.radio(
         "Профиль риск-менеджмента (Cross Margin):",
         [
-            "🚀 Hyper Cross 50x (риск 5.5%, 6 слотов + 500 пар + FVG)",
-            "🔥 Cross Balanced 50x (риск 4.0%, 5 слотов — мин. просадка)",
-            "🛡️ Стандарт Проп (25x, риск 4.0%, 4 слота)"
+            "🚀 Big-Runner Equal 50x (маржа 4.0%, 8 слотов + Trail @ 3.1R)",
+            "🔥 Safe Big-Runner 50x (маржа 3.5%, 8 слотов — DD 27.4%)",
+            "🛡️ Risk-Parity Проп (25x, риск 4.0%, 4 слота)"
         ],
         index=0
     )
-    if "Стандарт" in strategy_mode:
+    if "Risk-Parity" in strategy_mode:
         default_lev = 25
+        config.SIZING_MODE = "risk_parity"
         config.RISK_PER_TRADE_PCT = 0.040
         config.MAX_CONCURRENT_POSITIONS = 4
         config.MIN_5M_VOLUME_SURGE_RATIO = 1.80
         config.MIN_CLOSE_STRENGTH = 0.66
         config.DAILY_LOSS_LIMIT = 99
-    elif "Balanced" in strategy_mode:
+    elif "Safe Big-Runner" in strategy_mode:
         default_lev = 50
-        config.RISK_PER_TRADE_PCT = 0.040
-        config.MAX_CONCURRENT_POSITIONS = 5
+        config.SIZING_MODE = "equal_margin"
+        config.FIXED_MARGIN_PCT = 0.035
+        config.MAX_CONCURRENT_POSITIONS = 8
         config.MIN_5M_VOLUME_SURGE_RATIO = 1.80
         config.MIN_CLOSE_STRENGTH = 0.66
         config.DAILY_LOSS_LIMIT = 99
     else:
         default_lev = 50
-        config.RISK_PER_TRADE_PCT = 0.055
-        config.MAX_CONCURRENT_POSITIONS = 6
+        config.SIZING_MODE = "equal_margin"
+        config.FIXED_MARGIN_PCT = 0.040
+        config.MAX_CONCURRENT_POSITIONS = 8
         config.MIN_5M_VOLUME_SURGE_RATIO = 1.80
         config.MIN_CLOSE_STRENGTH = 0.66
         config.DAILY_LOSS_LIMIT = 99
@@ -245,10 +250,16 @@ with st.sidebar:
         portfolio.save()
         st.rerun()
 
-    est_risk_usd = round(max(10.0, portfolio.get_portfolio_summary()["equity"]) * config.RISK_PER_TRADE_PCT, 2)
-    st.text(f"Плечо входов: {portfolio.current_leverage}x | Риск 1R: ${est_risk_usd:.2f} ({config.RISK_PER_TRADE_PCT*100:.1f}%)")
+    _ref_eq_sb = max(10.0, portfolio.cash + sum(float(p.get("margin_usdt", 0.0) or 0.0) for p in portfolio.open_positions.values()))
+    if str(getattr(config, "SIZING_MODE", "equal_margin")).lower() == "equal_margin":
+        _eq_mg = round(_ref_eq_sb * float(getattr(config, "FIXED_MARGIN_PCT", 0.035)), 2)
+        _eq_notional = round(_eq_mg * portfolio.current_leverage, 2)
+        st.text(f"Равная маржа входа: ${_eq_mg:.2f} ({config.FIXED_MARGIN_PCT*100:.1f}% депо = ${_eq_notional:.0f} @ {portfolio.current_leverage}x)")
+    else:
+        est_risk_usd = round(_hdr_eq * config.RISK_PER_TRADE_PCT, 2)
+        st.text(f"Плечо входов: {portfolio.current_leverage}x | Риск 1R: ${est_risk_usd:.2f} ({config.RISK_PER_TRADE_PCT*100:.1f}%)")
     st.text(f"Слоты: до {config.MAX_CONCURRENT_POSITIONS} активных + {getattr(config, 'MAX_RISK_FREE_RUNNERS', 2)} безрисковых | TTL: {getattr(config, 'TTL_HOURS', 24)}ч")
-    st.text(f"Вход: Alpha RS vs BTC + 3H/80м Сжатие + FVG/EMA200 + RVOL ≥ {config.MIN_5M_VOLUME_SURGE_RATIO:.2f}x")
+    st.text(f"Фильтр входа: Anti-Spike ≤ {getattr(config, 'MAX_ENTRY_5M_SPIKE_PCT', 3.50):.1f}% + Alpha RS + FVG/EMA200 + RVOL ≥ {config.MIN_5M_VOLUME_SURGE_RATIO:.2f}x")
     st.text(f"Anti-Rug Выход: Динамический TP1/TP2 + Parabolic Trail")
     st.text(f"Защита просадки: Half-Kelly при DD ≥ {int(config.DD_GUARD_THRESHOLD*100)}%")
     st.text(f"Лимит стопов: Макс {config.DAILY_LOSS_LIMIT} в день ({portfolio.daily_losses_count}/{config.DAILY_LOSS_LIMIT})")
@@ -645,8 +656,8 @@ with tab_timemachine:
             pre = precompute_indicators(cdata)
 
             configs = [
-                ("🚀 Hyper Cross 50x ($100, 5.5% риск, 6 слотов + Dynamic TP1/TP2 + Trail)", dict(leverage=50, risk_pct=0.055, tp1_r=1.50, tp1_share=0.45)),
-                ("🔥 Balanced Cross 50x ($100, 4.0% риск, 5 слотов — мин. DD)", dict(leverage=50, risk_pct=0.040, tp1_r=1.50, tp1_share=0.45)),
+                ("🚀 Big-Runner Equal 50x ($100, маржа 4.0% + Anti-Spike + Trail @ 3.1R)", dict(leverage=50, equal_margin_pct=0.040, max_spike_5m=3.50, big_runner_mode=True, tp1_r=1.72, tp1_share=0.35)),
+                ("🔥 Safe Big-Runner 50x ($100, маржа 3.5% + Anti-Spike + Trail @ 3.1R)", dict(leverage=50, equal_margin_pct=0.035, max_spike_5m=3.50, big_runner_mode=True, tp1_r=1.72, tp1_share=0.35)),
                 ("🎯 Anti-Rug Fixed Target (100% на 1.70R до слива)", dict(leverage=50, risk_pct=0.050, tp1_r=1.70, tp1_share=1.00)),
                 ("❌ Старый 12-барный скальпер (Early BE + 35м Time-Stop)", dict(leverage=12, legacy_churn_mode=True)),
             ]

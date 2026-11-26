@@ -159,6 +159,9 @@ def simulate_strategy(
     tp1_r: float = 1.65,
     tp1_share: float = 0.60,
     legacy_churn_mode: bool = False,
+    equal_margin_pct: float = 0.0,
+    max_spike_5m: float = 0.0,
+    big_runner_mode: bool = False,
     **kwargs
 ) -> Dict[str, Any]:
     pre = precomputed if precomputed is not None else precompute_indicators(all_data)
@@ -256,14 +259,24 @@ def simulate_strategy(
                         pos["sl"] = max(pos["sl"], entry + 0.35 * rd)
 
                 if pos["tp1_hit"]:
-                    if mfe_r >= 6.0:
-                        trail_p = pos["hi"] - max(0.95 * atr_p * pos["hi"], 0.55 * rd)
-                    elif mfe_r >= 3.5:
-                        trail_p = pos["hi"] - max(1.25 * atr_p * pos["hi"], 0.75 * rd)
-                    elif mfe_r >= 2.2:
-                        trail_p = max(entry + 1.15 * rd, pos["hi"] - max(1.65 * atr_p * pos["hi"], 0.95 * rd))
+                    if big_runner_mode:
+                        if mfe_r >= 6.6:
+                            trail_p = pos["hi"] - max(1.69 * atr_p * pos["hi"], 0.81 * rd)
+                        elif mfe_r >= 4.5:
+                            trail_p = pos["hi"] - max(1.98 * atr_p * pos["hi"], 1.06 * rd)
+                        elif mfe_r >= 3.1:
+                            trail_p = max(entry + 1.05 * rd, pos["hi"] - max(2.25 * atr_p * pos["hi"], 1.25 * rd))
+                        else:
+                            trail_p = pos["sl"]
                     else:
-                        trail_p = pos["sl"]
+                        if mfe_r >= 6.0:
+                            trail_p = pos["hi"] - max(0.95 * atr_p * pos["hi"], 0.55 * rd)
+                        elif mfe_r >= 3.5:
+                            trail_p = pos["hi"] - max(1.25 * atr_p * pos["hi"], 0.75 * rd)
+                        elif mfe_r >= 2.2:
+                            trail_p = max(entry + 1.15 * rd, pos["hi"] - max(1.65 * atr_p * pos["hi"], 0.95 * rd))
+                        else:
+                            trail_p = pos["sl"]
                     pos["sl"] = max(pos["sl"], trail_p)
 
                 unreal += pos["mg"] * ((cl - entry) / entry) * lev
@@ -322,14 +335,24 @@ def simulate_strategy(
                         pos["sl"] = min(pos["sl"], entry - 0.35 * rd)
 
                 if pos["tp1_hit"]:
-                    if mfe_r >= 6.0:
-                        trail_p = pos["lo"] + max(0.95 * atr_p * pos["lo"], 0.55 * rd)
-                    elif mfe_r >= 3.5:
-                        trail_p = pos["lo"] + max(1.25 * atr_p * pos["lo"], 0.75 * rd)
-                    elif mfe_r >= 2.2:
-                        trail_p = min(entry - 1.15 * rd, pos["lo"] + max(1.65 * atr_p * pos["lo"], 0.95 * rd))
+                    if big_runner_mode:
+                        if mfe_r >= 6.6:
+                            trail_p = pos["lo"] + max(1.69 * atr_p * pos["lo"], 0.81 * rd)
+                        elif mfe_r >= 4.5:
+                            trail_p = pos["lo"] + max(1.98 * atr_p * pos["lo"], 1.06 * rd)
+                        elif mfe_r >= 3.1:
+                            trail_p = min(entry - 1.05 * rd, pos["lo"] + max(2.25 * atr_p * pos["lo"], 1.25 * rd))
+                        else:
+                            trail_p = pos["sl"]
                     else:
-                        trail_p = pos["sl"]
+                        if mfe_r >= 6.0:
+                            trail_p = pos["lo"] + max(0.95 * atr_p * pos["lo"], 0.55 * rd)
+                        elif mfe_r >= 3.5:
+                            trail_p = pos["lo"] + max(1.25 * atr_p * pos["lo"], 0.75 * rd)
+                        elif mfe_r >= 2.2:
+                            trail_p = min(entry - 1.15 * rd, pos["lo"] + max(1.65 * atr_p * pos["lo"], 0.95 * rd))
+                        else:
+                            trail_p = pos["sl"]
                     pos["sl"] = min(pos["sl"], trail_p)
 
                 unreal += pos["mg"] * ((entry - cl) / entry) * lev
@@ -373,6 +396,8 @@ def simulate_strategy(
                         continue
                     if d["ext"][k] > 0.048 or d["ext"][k - 3] > 0.028:
                         continue
+                    if max_spike_5m > 0.0 and abs(pct_5m) > max_spike_5m:
+                        continue
                     ema9, ema21, ema50 = d["ema9"][k], d["ema21"][k], d["ema50"][k]
                     ema27, ema63, ema150 = d["ema27"][k], d["ema63"][k], d["ema150"][k]
                     rsi = d["rsi"][k]
@@ -391,7 +416,10 @@ def simulate_strategy(
                         and clv_l >= 0.66 and uw <= 0.26 and cl > ema9 >= ema21 * 0.998
                         and 48.0 <= rsi <= 86.0 and d["ret_3h"][k] <= 0.20 and not btc_dump and not btc_spike
                     ):
-                        sl = min(max((ep - min(lo, d["l"][k - 1]) * 0.9985) / ep, 1.55 * atr_p, 0.0080), 0.0360)
+                        _sl_floor = 0.0110 if big_runner_mode else 0.0080
+                        _sl_atr_m = 1.75 if big_runner_mode else 1.55
+                        _sl_cap = 0.0550 if big_runner_mode else 0.0360
+                        sl = min(max((ep - min(lo, d["l"][k - 1]) * 0.9985) / ep, _sl_atr_m * atr_p, _sl_floor), _sl_cap)
                         cands.append((rvol * alpha_5m * clv_l, sym, "LONG", ep, sl))
                         continue
 
@@ -405,16 +433,24 @@ def simulate_strategy(
                         and clv_s >= 0.66 and lw <= 0.26 and cl < ema9 <= ema21 * 1.002
                         and 14.0 <= rsi <= 52.0 and d["ret_3h"][k] >= -0.20 and not btc_pump and not btc_flush
                     ):
-                        sl = min(max((max(hi, d["h"][k - 1]) * 1.0015 - ep) / ep, 1.55 * atr_p, 0.0080), 0.0360)
+                        _sl_floor = 0.0110 if big_runner_mode else 0.0080
+                        _sl_atr_m = 1.75 if big_runner_mode else 1.55
+                        _sl_cap = 0.0550 if big_runner_mode else 0.0360
+                        sl = min(max((max(hi, d["h"][k - 1]) * 1.0015 - ep) / ep, _sl_atr_m * atr_p, _sl_floor), _sl_cap)
                         cands.append((rvol * abs(alpha_5m) * clv_s, sym, "SHORT", ep, sl))
 
             cands.sort(reverse=True)
             for score, sym, side, ep, sl_dist in cands[:1]:
                 cur_eq = max(10.0, cash + sum(p["mg"] for p in open_pos.values()))
                 cur_dd = (peak_eq - cur_eq) / peak_eq if peak_eq > 0 else 0.0
-                r_eff = risk_pct * (0.75 if cur_dd >= 0.18 else 1.0)
-                risk_usd = cur_eq * r_eff
-                mg = round(min((risk_usd / (sl_dist + 2 * cost)) / leverage, cur_eq * 0.25, cash * 0.48), 2)
+                dd_mult = 0.75 if cur_dd >= 0.20 else 1.0
+                if equal_margin_pct > 0.0:
+                    mg = round(min(cur_eq * equal_margin_pct * dd_mult, cur_eq * 0.25, cash * 0.48), 2)
+                    risk_usd = max(mg * leverage * sl_dist, 0.05)
+                else:
+                    r_eff = risk_pct * dd_mult
+                    risk_usd = cur_eq * r_eff
+                    mg = round(min((risk_usd / (sl_dist + 2 * cost)) / leverage, cur_eq * 0.25, cash * 0.48), 2)
                 if mg < 0.50 or cash < mg + 0.05:
                     continue
                 fee_in = mg * leverage * cost

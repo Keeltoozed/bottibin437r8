@@ -35,20 +35,20 @@ class MarketScanner:
 
     @staticmethod
     def compute_dynamic_exit_plan(ctx: Dict[str, Any], side: str, sl_dist: float) -> Dict[str, Any]:
-        """Индивидуальный динамический план выхода (TP1, TP2, замок SL и 25-30% Trail) под конкретную монету и сетап."""
+        """Индивидуальный Big-Runner 3-Stage план (35% TP1 + 25% TP2 + 40% широкий Moonbag для +350%..+700%+)."""
         brk_type = ctx.get("breakout_type", "STRUCT_3H")
         atr_pct = float(ctx.get("atr14_pct", 0.006) or 0.006)
         adx14 = float(ctx.get("adx14", 20.0) or 20.0)
         has_fvg = bool(ctx.get("has_fvg_bull") if side == "LONG" else ctx.get("has_fvg_bear"))
 
         if brk_type == "RUG_SHORT":
-            return {"profile": "FAST_RUG_DUMP", "tp1_r": 1.25, "tp1_share": 0.45, "tp1_lock_r": 0.20, "tp2_r": 1.95, "tp2_share": 0.30, "tp2_lock_r": 0.95}
+            return {"profile": "FAST_RUG_DUMP", "tp1_r": 1.45, "tp1_share": 0.35, "tp1_lock_r": 0.25, "tp2_r": 2.25, "tp2_share": 0.30, "tp2_lock_r": 1.10}
         elif brk_type == "SQUEEZE_80M" or (has_fvg and adx14 >= 20.0):
-            return {"profile": "EXPLOSIVE_FVG", "tp1_r": 1.65, "tp1_share": 0.45, "tp1_lock_r": 0.35, "tp2_r": 2.62, "tp2_share": 0.25, "tp2_lock_r": 1.35}
+            return {"profile": "EXPLOSIVE_FVG", "tp1_r": 1.90, "tp1_share": 0.35, "tp1_lock_r": 0.40, "tp2_r": 3.00, "tp2_share": 0.25, "tp2_lock_r": 1.55}
         elif atr_pct >= 0.012 or sl_dist >= 0.030:
-            return {"profile": "HIGH_VOL_SWING", "tp1_r": 1.35, "tp1_share": 0.45, "tp1_lock_r": 0.25, "tp2_r": 2.00, "tp2_share": 0.30, "tp2_lock_r": 1.00}
+            return {"profile": "HIGH_VOL_SWING", "tp1_r": 1.55, "tp1_share": 0.35, "tp1_lock_r": 0.30, "tp2_r": 2.30, "tp2_share": 0.25, "tp2_lock_r": 1.15}
         else:
-            return {"profile": "STD_TREND_FIB", "tp1_r": 1.50, "tp1_share": 0.45, "tp1_lock_r": 0.30, "tp2_r": 2.25, "tp2_share": 0.25, "tp2_lock_r": 1.15}
+            return {"profile": "STD_TREND_FIB", "tp1_r": 1.72, "tp1_share": 0.35, "tp1_lock_r": 0.35, "tp2_r": 2.60, "tp2_share": 0.25, "tp2_lock_r": 1.32}
 
     async def scan_market_once(self, force: bool = False) -> List[Dict[str, Any]]:
         """Один параллельный проход сканирования рынка строго на закрытии 5m свечи (защита от HTTP 418/429)."""
@@ -163,6 +163,7 @@ class MarketScanner:
                 dist_s_pct = analysis.get("dist_to_breakout_short_pct", 1.0)
 
                 min_req_impulse = max(config.MIN_5M_PRICE_IMPULSE_PCT, atr_pct * 100.0 * 0.85)
+                max_spike_5m = float(getattr(config, "MAX_ENTRY_5M_SPIKE_PCT", 3.50))
                 min_atr_pct = float(getattr(config, "MIN_ATR_PCT", 0.0025))
                 avg_5m_qvol = float(analysis.get("avg_5m_quote_vol", 0.0) or 0.0)
                 v3_surge = float(analysis.get("v3_surge", 1.0) or 1.0)
@@ -221,7 +222,7 @@ class MarketScanner:
                     vol_floor_ok and
                     is_mtf_long and
                     is_macro_long and
-                    pct_5m >= min_req_impulse and
+                    min_req_impulse <= pct_5m <= max_spike_5m and
                     alpha_5m >= min_a5 and
                     alpha_15m >= min_a15 and
                     clv_long >= config.MIN_CLOSE_STRENGTH and
@@ -244,7 +245,7 @@ class MarketScanner:
                     vol_floor_ok and
                     is_mtf_short and
                     is_macro_short and
-                    pct_5m <= -min_req_impulse and
+                    -max_spike_5m <= pct_5m <= -min_req_impulse and
                     alpha_5m <= -min_a5 and
                     alpha_15m <= -min_a15 and
                     clv_short >= config.MIN_CLOSE_STRENGTH and
@@ -270,7 +271,7 @@ class MarketScanner:
                         adx14_val >= 20.0 and is_mtf_long and ema21_ext <= 0.028 and
                         alpha_5m >= 0.65 and alpha_15m >= 0.90 and
                         clv_long >= 0.72 and upper_wick <= 0.22 and
-                        52.0 <= rsi <= 76.0 and analysis.get("live_drift_long_pct", 0.0) <= config.MAX_LIVE_DRIFT_PCT and
+                        52.0 <= rsi <= 76.0 and pct_5m <= max_spike_5m and analysis.get("live_drift_long_pct", 0.0) <= config.MAX_LIVE_DRIFT_PCT and
                         config.STOP_LOSS_MIN_PCT <= sm_long_sl <= config.STOP_LOSS_MAX_PCT
                     )
                     if sm_tech_l and not btc_regime.get("is_dumping", False) and not btc_regime.get("is_spike_up", False):
@@ -288,7 +289,7 @@ class MarketScanner:
                             adx14_val >= 20.0 and is_mtf_short and ema21_ext <= 0.028 and
                             alpha_5m <= -0.65 and alpha_15m <= -0.90 and
                             clv_short >= 0.72 and lower_wick <= 0.22 and
-                            24.0 <= rsi <= 48.0 and analysis.get("live_drift_short_pct", 0.0) <= config.MAX_LIVE_DRIFT_PCT and
+                            24.0 <= rsi <= 48.0 and pct_5m >= -max_spike_5m and analysis.get("live_drift_short_pct", 0.0) <= config.MAX_LIVE_DRIFT_PCT and
                             config.STOP_LOSS_MIN_PCT <= sm_short_sl <= config.STOP_LOSS_MAX_PCT
                         )
                         if sm_tech_s and not btc_regime.get("is_pumping", False) and not btc_regime.get("is_flush_down", False):
@@ -332,6 +333,8 @@ class MarketScanner:
                             w_status = f"📊 Пробой есть, ждем RVOL ({surge:.1f}x < {config.MIN_5M_VOLUME_SURGE_RATIO:.1f}x)"
                         elif v3_surge < min_v3:
                             w_status = f"📊 Одиночный всплеск (RVOL 3b: {v3_surge:.2f}x < {min_v3:.2f}x)"
+                        elif abs(pct_5m) > max_spike_5m:
+                            w_status = f"🌋 Выдохшийся спайк 5m ({pct_5m:+.2f}% > {max_spike_5m:.1f}%)"
                         elif abs(pct_5m) < min_req_impulse:
                             w_status = f"⚡ Слабый импульс ({pct_5m:+.2f}% < {min_req_impulse:.2f}%)"
                         elif clv_w < config.MIN_CLOSE_STRENGTH or wick_w > config.WICK_EXHAUSTION_MAX:
@@ -455,8 +458,8 @@ class MarketScanner:
                     flush=True
                 )
 
-        # 5. ОТБОР ТОП-3 КАНДИДАТОВ ЗА ПРОХОД ДЛЯ GROQ AI (ловит несколько независимых ракет на одном баре до 6 слотов!)
-        candidates_to_eval = all_scored[:3]
+        # 5. ОТБОР ТОП-4 КАНДИДАТОВ ЗА ПРОХОД ДЛЯ GROQ AI (ловит несколько независимых ракет на одном баре до 8 слотов!)
+        candidates_to_eval = all_scored[:4]
 
         # 6. GROQ SOFT GATE & RISK-BASED POSITION SIZING
         for ctx in candidates_to_eval:
@@ -507,34 +510,39 @@ class MarketScanner:
                     print(f"🛑 [CIRCUIT BREAKER] Дневной лимит {config.DAILY_LOSS_LIMIT} убытка исчерпан.", flush=True)
                     break
 
-                # ДИНАМИЧЕСКИЙ ГЕОМЕТРИЧЕСКИЙ САЙЗИНГ С HALF-KELLY ЗАЩИТОЙ ОТ ПРОСАДКИ:
-                # Риск рассчитывается как 3.0% от текущего эквити.
-                # Если текущее эквити просело более чем на 15% от пикового (peak_equity),
-                # риск автоматически снижается на 40% (до 1.8%), защищая депозит от серии стопов.
+                # ЕДИНЫЙ САЙЗИНГ ПОРТФЕЛЯ:
+                # 1. equal_margin ("как они"): каждая сделка открывается НА ОДИНАКОВУЮ МАРЖУ (3.5% от эквити = $3.50 / $175 @ 50x при $100),
+                #    без перекосов $2.81 vs $5.19 между монетами. Опорный баланс (cash + locked) не прыгает от микро-тиков открытых позиций!
+                # 2. risk_parity: переменная маржа под фиксированный долларовый риск на сделку.
                 summary = portfolio.get_portfolio_summary()
                 cur_equity = max(10.0, summary["equity"])
+                ref_equity = max(10.0, portfolio.cash + sum(float(p.get("margin_usdt", 0.0) or 0.0) for p in portfolio.open_positions.values()))
                 peak_equity = max(getattr(portfolio, "peak_equity", cur_equity), cur_equity)
                 dd_pct = (peak_equity - cur_equity) / peak_equity if peak_equity > 0 else 0.0
-
-                base_risk_pct = config.RISK_PER_TRADE_PCT
-                if dd_pct >= getattr(config, "DD_GUARD_THRESHOLD", 0.15):
-                    effective_risk_pct = base_risk_pct * getattr(config, "DD_GUARD_RISK_MULT", 0.60)
-                else:
-                    effective_risk_pct = base_risk_pct
+                dd_mult = float(getattr(config, "DD_GUARD_RISK_MULT", 0.75)) if dd_pct >= getattr(config, "DD_GUARD_THRESHOLD", 0.20) else 1.0
 
                 conv_mult = 1.0
                 if float(ctx.get("ml_prob", 0.5)) >= 0.58 and float(ctx.get("volume_surge_ratio", 1.0)) >= 2.20:
                     conv_mult = float(getattr(config, "CONVICTION_RISK_MULT", 1.00))
-                risk_usd = round(cur_equity * effective_risk_pct * conv_mult, 3)
+
                 sl_dist_pct = abs(entry_p - exact_sl) / max(entry_p, 1e-9)
                 lev_to_use = getattr(portfolio, "current_leverage", config.LEVERAGE)
-
                 eff_sl_dist = max(sl_dist_pct, float(getattr(config, "SIZING_SL_FLOOR_PCT", 0.0080)))
-                target_notional = risk_usd / (eff_sl_dist + 0.0012)
-                raw_margin = target_notional / lev_to_use
-                max_mg = cur_equity * float(getattr(config, "MAX_MARGIN_EQUITY_PCT", 0.30))
+                max_mg = ref_equity * float(getattr(config, "MAX_MARGIN_EQUITY_PCT", 0.30))
                 min_mg = float(getattr(config, "MIN_MARGIN_USDT", 0.50))
-                actual_margin = round(min(raw_margin, max_mg, portfolio.cash * 0.65), 2)
+
+                sizing_mode = str(getattr(config, "SIZING_MODE", "equal_margin")).lower()
+                if sizing_mode == "equal_margin":
+                    fixed_mg_pct = float(getattr(config, "FIXED_MARGIN_PCT", 0.035))
+                    raw_margin = ref_equity * fixed_mg_pct * dd_mult * conv_mult
+                    actual_margin = round(min(raw_margin, max_mg, portfolio.cash * 0.65), 2)
+                    risk_usd = round(max(actual_margin * lev_to_use * eff_sl_dist, 0.25), 3)
+                else:
+                    effective_risk_pct = config.RISK_PER_TRADE_PCT * dd_mult
+                    risk_usd = round(cur_equity * effective_risk_pct * conv_mult, 3)
+                    target_notional = risk_usd / (eff_sl_dist + 0.0012)
+                    raw_margin = target_notional / lev_to_use
+                    actual_margin = round(min(raw_margin, max_mg, portfolio.cash * 0.65), 2)
 
                 # УМНАЯ ЗАЩИТА ОТ КОРРЕЛЯЦИОННОГО РИСКА:
                 # 1. Безрисковые ранеры (tp1_hit=True) НЕ учитываются — никогда не блокируют новые входы!

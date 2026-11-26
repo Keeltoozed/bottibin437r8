@@ -21,6 +21,18 @@ services:
         value: "true"
       - key: INITIAL_BALANCE
         value: "100.0"
+      - key: SIZING_MODE
+        value: "equal_margin"
+      - key: FIXED_MARGIN_PCT
+        value: "0.040"
+      - key: MAX_ENTRY_5M_SPIKE_PCT
+        value: "3.50"
+      - key: SL_ATR_MULT
+        value: "1.75"
+      - key: STOP_LOSS_MIN_PCT
+        value: "0.0110"
+      - key: STOP_LOSS_MAX_PCT
+        value: "0.0550"
       - key: LEVERAGE
         value: "50"
       - key: RISK_PER_TRADE_PCT
@@ -28,7 +40,7 @@ services:
       - key: TRADE_AMOUNT_USDT
         value: "10.0"
       - key: MAX_POSITIONS
-        value: "6"
+        value: "8"
       - key: TTL_HOURS
         value: "24"
       - key: MIN_24H_VOLUME_USDT

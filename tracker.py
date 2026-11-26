@@ -295,7 +295,9 @@ class PortfolioTracker:
                 raw_pct = (entry - cur_price) / entry
 
             gross_unrealized = pos["margin_usdt"] * (raw_pct * lev)
-            est_fees = pos["margin_usdt"] * lev * 0.0012
+            # В живом нереализованном PnL учитываем только уже уплаченную комиссию входа (0.05% Taker, как на бирже),
+            # не вычитая заранее будущую комиссию закрытия и проскальзывание (при закрытии close_position честно спишет все 0.12%).
+            est_fees = pos["margin_usdt"] * lev * 0.0005
             net_unrealized = gross_unrealized - est_fees
             pos["pnl_pct"] = round((net_unrealized / max(pos["margin_usdt"], 1e-9)) * 100, 2)
             pos["unrealized_pnl"] = round(net_unrealized, 3)

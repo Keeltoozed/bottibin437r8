@@ -36,15 +36,17 @@ BINANCE_TESTNET_FUTURES_URL = "https://testnet.binancefuture.com"
 PAPER_TRADING = os.getenv("PAPER_TRADING", "true").lower() == "true"
 INITIAL_BALANCE = float(os.getenv("INITIAL_BALANCE", "100.0"))
 
-# Фиксированный долларовый риск на сделку (Геометрический Compounding + Half-Kelly DD Guard):
-# 5.5% от текущего эквити ($5.50 на $100) при Cross-Margin 50x и до 6 активных слотов:
-# высокое плечо 50x сжимает залог маржи на сделку до 2-12% от депо, позволяя брать до 6 ракет без потери размера на узких стопах!
+# Режим сайзинга: equal_margin ("как они" — равный залог маржи на каждую сделку!) или risk_parity
+SIZING_MODE = os.getenv("SIZING_MODE", "equal_margin")
+FIXED_MARGIN_PCT = float(os.getenv("FIXED_MARGIN_PCT", "0.040"))  # 4.0% от эквити ($4.00 маржа / $200.00 позиция @ 50x при $100!)
+
+# Параметры Risk-Parity (используются только при SIZING_MODE=risk_parity) и защиты от просадки:
 RISK_PER_TRADE_PCT = float(os.getenv("RISK_PER_TRADE_PCT", "0.055"))
 CONVICTION_RISK_MULT = float(os.getenv("CONVICTION_RISK_MULT", "1.00"))
 DD_GUARD_THRESHOLD = float(os.getenv("DD_GUARD_THRESHOLD", "0.20"))
 DD_GUARD_RISK_MULT = float(os.getenv("DD_GUARD_RISK_MULT", "0.75"))
 TRADE_AMOUNT_USDT = float(os.getenv("TRADE_AMOUNT_USDT", "10.0"))
-MAX_CONCURRENT_POSITIONS = min(int(os.getenv("MAX_POSITIONS", "6")), 8)
+MAX_CONCURRENT_POSITIONS = min(int(os.getenv("MAX_POSITIONS", "8")), 10)
 LEVERAGE = int(os.getenv("LEVERAGE", "50"))
 ENABLE_SHORT = os.getenv("ENABLE_SHORT", "true").lower() == "true"
 
@@ -88,18 +90,19 @@ MIN_CLOSE_STRENGTH = float(os.getenv("MIN_CLOSE_STRENGTH", "0.66"))
 WICK_REJECTION_MIN = float(os.getenv("WICK_REJECTION_MIN", "0.0"))
 WICK_EXHAUSTION_MAX = float(os.getenv("WICK_EXHAUSTION_MAX", "0.26"))              # Встречный фитиль истощения <= 26%
 
-# ANTI-RUG TOP GUARD (защита от покупки хая параболы прямо перед дампом!):
+# ANTI-RUG TOP GUARD & ANTI-SPIKE (защита от покупки вертикального спайка и хая параболы перед откатом!):
+MAX_ENTRY_5M_SPIKE_PCT = float(os.getenv("MAX_ENTRY_5M_SPIKE_PCT", "3.50"))  # Блок выдохшихся 5m свечей > 3.5% (PF 1.65->1.78, DD 31.2%->28.3%!)
 MAX_EMA21_EXTENSION_PCT = float(os.getenv("MAX_EMA21_EXTENSION_PCT", "0.048"))     # Не выше 4.8% от EMA21 на сигнальной свече
 MAX_PRE_BREAKOUT_EXT_PCT = float(os.getenv("MAX_PRE_BREAKOUT_EXT_PCT", "0.028"))   # За 15 мин (3 бара) до пробоя монета была в базе <= 2.8% от EMA21!
 MAX_3H_CLIMAX_RETURN_PCT = float(os.getenv("MAX_3H_CLIMAX_RETURN_PCT", "0.20"))    # Блок входа в выдохшуюся параболу (> +20% за 3 часа)
 MAX_LIVE_DRIFT_PCT = float(os.getenv("MAX_LIVE_DRIFT_PCT", "0.018"))
 
-# Волатильно-адаптивные границы стопа (до 4.5% для волатильных альтов; маржа автоматически сжимается под строгие 4.0% риска!):
-STOP_LOSS_MIN_PCT = float(os.getenv("STOP_LOSS_MIN_PCT", "0.0080"))  # 0.80% мин стоп
-STOP_LOSS_MAX_PCT = float(os.getenv("STOP_LOSS_MAX_PCT", "0.0450"))  # 4.50% макс стоп (как на волатильных сигналах 3.7-4.5%)
+# Волатильно-адаптивные границы стопа (простор под Big-Runner удержание: мин 1.1%, макс 5.5%, ATR x1.75 — не сносит шумом!):
+STOP_LOSS_MIN_PCT = float(os.getenv("STOP_LOSS_MIN_PCT", "0.0110"))  # 1.10% мин стоп (защита от шумовых сбивов)
+STOP_LOSS_MAX_PCT = float(os.getenv("STOP_LOSS_MAX_PCT", "0.0550"))  # 5.50% макс стоп (как на волатильных сигналах 3.7-5.5%)
 MAX_ALLOWED_SL_PCT = STOP_LOSS_MAX_PCT
-SL_ATR_MULT = float(os.getenv("SL_ATR_MULT", "1.55"))                # Структурный стоп не ближе 1.55 * ATR14
-SIZING_SL_FLOOR_PCT = float(os.getenv("SIZING_SL_FLOOR_PCT", "0.0080"))
+SL_ATR_MULT = float(os.getenv("SL_ATR_MULT", "1.75"))                # Структурный стоп не ближе 1.75 * ATR14
+SIZING_SL_FLOOR_PCT = float(os.getenv("SIZING_SL_FLOOR_PCT", "0.0110"))
 MIN_MARGIN_USDT = float(os.getenv("MIN_MARGIN_USDT", "0.50"))
 MIN_MARGIN_EQUITY_PCT = float(os.getenv("MIN_MARGIN_EQUITY_PCT", "0.04"))
 MAX_MARGIN_EQUITY_PCT = float(os.getenv("MAX_MARGIN_EQUITY_PCT", "0.30"))
@@ -116,18 +119,18 @@ EARLY_BE_TRIGGER_PCT = float(os.getenv("EARLY_BE_TRIGGER_PCT", "9.99"))   # От
 EARLY_BE_TRIGGER_R = float(os.getenv("EARLY_BE_TRIGGER_R", "99.0"))
 EARLY_BE_LOCK_PCT = float(os.getenv("EARLY_BE_LOCK_PCT", "0.0022"))
 
-TARGET_1_R = float(os.getenv("TARGET_1_R", "1.65"))          # На +1.65R мгновенно забираем 60% прибыли в кэш (до любого возможного слива!)
-TARGET_2_R = float(os.getenv("TARGET_2_R", "6.00"))          # Верхний ориентир супер-ракеты (сопровождается прогрессивным Anti-Rug Ratchet)
-TP1_PARTIAL_PCT = float(os.getenv("TP1_PARTIAL_PCT", "0.60")) # 60% в кэш на 1.65R + стоп остатка 40% в +0.35R (сделка 100% безрисковая!)
-POST_TP1_LOCK_R = float(os.getenv("POST_TP1_LOCK_R", "0.35"))
-MAX_RISK_FREE_RUNNERS = int(os.getenv("MAX_RISK_FREE_RUNNERS", "3"))  # Безрисковые ранеры (после TP1) не блокируют слоты для новых ракет!
+TARGET_1_R = float(os.getenv("TARGET_1_R", "1.90"))          # Дальний TP1 (+1.90R): 35% в кэш, не режем ракету рано!
+TARGET_2_R = float(os.getenv("TARGET_2_R", "8.00"))          # Верхний ориентир супер-ракеты (+350%..+700%+ @ 50x)
+TP1_PARTIAL_PCT = float(os.getenv("TP1_PARTIAL_PCT", "0.35")) # 35% в кэш на TP1 + 25% на TP2 -> 40% летит в Big-Runner Moonbag!
+POST_TP1_LOCK_R = float(os.getenv("POST_TP1_LOCK_R", "0.40"))
+MAX_RISK_FREE_RUNNERS = int(os.getenv("MAX_RISK_FREE_RUNNERS", "4"))  # Безрисковые ранеры (после TP1) не блокируют слоты для новых ракет!
 TP2_PARTIAL_OF_REMAINING = 1.00
 
 TP1_PCT = float(os.getenv("TP1_PCT", "0.0000"))
 TP2_PCT = float(os.getenv("TP2_PCT", "0.0000"))
 
-RUNNER_ATR_MULT = float(os.getenv("RUNNER_ATR_MULT", "1.65"))
-RUNNER_ACTIVATION_R = float(os.getenv("RUNNER_ACTIVATION_R", "2.2"))
+RUNNER_ATR_MULT = float(os.getenv("RUNNER_ATR_MULT", "2.25"))
+RUNNER_ACTIVATION_R = float(os.getenv("RUNNER_ACTIVATION_R", "3.1"))
 TRAILING_STOP_PCT = float(os.getenv("TRAILING_STOP_PCT", "0.0100"))
 TIME_STOP_MINUTES = int(os.getenv("TIME_STOP_MINUTES", "0"))  # 0 = ранний срез отключен (не режет нормальный ретест)
 TTL_HOURS = int(os.getenv("TTL_HOURS", "24"))                  # Максимальное время жизни сделки без TP1 (24ч высвобождает слоты под новые ракеты)
