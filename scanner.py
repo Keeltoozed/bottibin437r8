@@ -23,9 +23,8 @@ from tracker import portfolio
 
 class MarketScanner:
     """
-    Высокоскоростной автономный сканер структурных пробоев (Structural Rocket Hunter).
-    Ищет выходы из многочасовых баз Дончиана (20 баров) с подтверждением RVOL >= 1.8x,
-    сильным закрытием бара (CLV >= 0.68), честным структурным стопом и фиксированным риском в долларах!
+    Высокоскоростной автономный сканер структурных пробоев (Alpha Rocket + Smart Money FVG).
+    Выбирает индивидуальный динамический профиль TP1/TP2/Trail под каждую сделку с учетом ATR, FVG, ADX и типа пробоя!
     """
     def __init__(self):
         self.is_running = False
@@ -33,6 +32,23 @@ class MarketScanner:
         self._last_log_time = 0.0
         self._last_scanned_bar: int = 0
         self._last_mirror_used: str = ""
+
+    @staticmethod
+    def compute_dynamic_exit_plan(ctx: Dict[str, Any], side: str, sl_dist: float) -> Dict[str, Any]:
+        """Индивидуальный динамический план выхода (TP1, TP2, замок SL и 25-30% Trail) под конкретную монету и сетап."""
+        brk_type = ctx.get("breakout_type", "STRUCT_3H")
+        atr_pct = float(ctx.get("atr14_pct", 0.006) or 0.006)
+        adx14 = float(ctx.get("adx14", 20.0) or 20.0)
+        has_fvg = bool(ctx.get("has_fvg_bull") if side == "LONG" else ctx.get("has_fvg_bear"))
+
+        if brk_type == "RUG_SHORT":
+            return {"profile": "FAST_RUG_DUMP", "tp1_r": 1.25, "tp1_share": 0.45, "tp1_lock_r": 0.20, "tp2_r": 1.95, "tp2_share": 0.30, "tp2_lock_r": 0.95}
+        elif brk_type == "SQUEEZE_80M" or (has_fvg and adx14 >= 20.0):
+            return {"profile": "EXPLOSIVE_FVG", "tp1_r": 1.65, "tp1_share": 0.45, "tp1_lock_r": 0.35, "tp2_r": 2.62, "tp2_share": 0.25, "tp2_lock_r": 1.35}
+        elif atr_pct >= 0.012 or sl_dist >= 0.030:
+            return {"profile": "HIGH_VOL_SWING", "tp1_r": 1.35, "tp1_share": 0.45, "tp1_lock_r": 0.25, "tp2_r": 2.00, "tp2_share": 0.30, "tp2_lock_r": 1.00}
+        else:
+            return {"profile": "STD_TREND_FIB", "tp1_r": 1.50, "tp1_share": 0.45, "tp1_lock_r": 0.30, "tp2_r": 2.25, "tp2_share": 0.25, "tp2_lock_r": 1.15}
 
     async def scan_market_once(self, force: bool = False) -> List[Dict[str, Any]]:
         """Один параллельный проход сканирования рынка строго на закрытии 5m свечи (защита от HTTP 418/429)."""
@@ -72,13 +88,14 @@ class MarketScanner:
         btc_regime = await binance_client.fetch_btc_regime()
         portfolio.btc_regime_str = btc_regime.get("status_str", "")
 
-        # 1. UNIVERSE: Широкий радар пробоев (до 115-150 ликвидных пар на fapi / bitget / vision)
+        # 1. UNIVERSE: Полный мониторинг 400-500+ крипто-пар в Stage 1 -> глубокий 200-свечной разбор топ-240 активных ракет!
         tickers = await binance_client.fetch_top_tickers(
             min_vol_usdt=config.MIN_24H_VOLUME_USDT,
             limit=config.SCAN_TICKERS_LIMIT
         )
-        portfolio.last_universe_count = len(tickers)
-        portfolio.funnel_stats["universe"] += len(tickers)
+        full_market_n = max(len(tickers), getattr(binance_client, "last_full_market_count", len(tickers)))
+        portfolio.last_universe_count = full_market_n
+        portfolio.funnel_stats["universe"] += full_market_n
 
         should_log = force or (now - self._last_log_time) >= 60.0
         if should_log:
@@ -162,11 +179,11 @@ class MarketScanner:
                     min_avg_vol = float(getattr(config, "MIN_AVG_5M_QUOTE_VOL", 5000.0))
                 last_5m_qvol = float(analysis.get("last_quote_volume", 0.0) or 0.0)
                 if is_spot_mirror:
-                    vol_floor_ok = (avg_5m_qvol >= min_avg_vol) and (last_5m_qvol >= 2500.0)
+                    vol_floor_ok = (avg_5m_qvol >= min_avg_vol) and (last_5m_qvol >= 2000.0)
                 elif is_alt_futures:
-                    vol_floor_ok = (avg_5m_qvol >= min_avg_vol) and (last_5m_qvol >= 4000.0)
+                    vol_floor_ok = (avg_5m_qvol >= min_avg_vol) and (last_5m_qvol >= 2500.0)
                 else:
-                    vol_floor_ok = (avg_5m_qvol >= min_avg_vol) and (last_5m_qvol >= 15000.0)
+                    vol_floor_ok = (avg_5m_qvol >= min_avg_vol) and (last_5m_qvol >= 8000.0)
                 min_v3 = float(getattr(config, "MIN_V3_VOLUME_PERSISTENCE", 1.10))
                 is_mtf_long = analysis.get("is_mtf_long_ok", False) if getattr(config, "ENABLE_MTF_15M_FILTER", True) else True
                 is_mtf_short = analysis.get("is_mtf_short_ok", False) if getattr(config, "ENABLE_MTF_15M_FILTER", True) else True
@@ -240,6 +257,50 @@ class MarketScanner:
                     config.STOP_LOSS_MIN_PCT <= sl_short_dist <= config.STOP_LOSS_MAX_PCT
                 )
                 is_short = tech_short and not btc_regime.get("is_pumping", False) and not btc_regime.get("is_flush_down", False)
+
+                # SMART MONEY FVG + BOS + EMA200 + ADX >= 20 (дополнительный высокоточный трендовый вход, 8/8 GREEN +489%!)
+                is_sm_fvg = False
+                if (not is_long and not is_short) and getattr(config, "ENABLE_SM_FVG_ENTRY", True):
+                    adx14_val = float(analysis.get("adx14", 0.0) or 0.0)
+                    sm_long_sl = float(analysis.get("sm_long_sl_pct", sl_long_dist) or sl_long_dist)
+                    sm_short_sl = float(analysis.get("sm_short_sl_pct", sl_short_dist) or sl_short_dist)
+                    sm_tech_l = (
+                        analysis.get("sm_bos_long", False) and
+                        vol_floor_ok and atr_pct >= min_atr_pct and v3_surge >= min_v3 and
+                        adx14_val >= 20.0 and is_mtf_long and ema21_ext <= 0.028 and
+                        alpha_5m >= 0.65 and alpha_15m >= 0.90 and
+                        clv_long >= 0.72 and upper_wick <= 0.22 and
+                        52.0 <= rsi <= 76.0 and analysis.get("live_drift_long_pct", 0.0) <= config.MAX_LIVE_DRIFT_PCT and
+                        config.STOP_LOSS_MIN_PCT <= sm_long_sl <= config.STOP_LOSS_MAX_PCT
+                    )
+                    if sm_tech_l and not btc_regime.get("is_dumping", False) and not btc_regime.get("is_spike_up", False):
+                        is_long = True
+                        is_sm_fvg = True
+                        brk_type = "SM_FVG"
+                        sl_long_dist = sm_long_sl
+                        analysis["breakout_type"] = "SM_FVG"
+                        analysis["sl_pct_distance"] = sm_long_sl
+                        analysis["wick_stop_loss"] = analysis.get("sm_long_wick_sl", analysis["wick_stop_loss"])
+                    elif config.ENABLE_SHORT:
+                        sm_tech_s = (
+                            analysis.get("sm_bos_short", False) and
+                            vol_floor_ok and atr_pct >= min_atr_pct and v3_surge >= min_v3 and
+                            adx14_val >= 20.0 and is_mtf_short and ema21_ext <= 0.028 and
+                            alpha_5m <= -0.65 and alpha_15m <= -0.90 and
+                            clv_short >= 0.72 and lower_wick <= 0.22 and
+                            24.0 <= rsi <= 48.0 and analysis.get("live_drift_short_pct", 0.0) <= config.MAX_LIVE_DRIFT_PCT and
+                            config.STOP_LOSS_MIN_PCT <= sm_short_sl <= config.STOP_LOSS_MAX_PCT
+                        )
+                        if sm_tech_s and not btc_regime.get("is_pumping", False) and not btc_regime.get("is_flush_down", False):
+                            is_short = True
+                            is_sm_fvg = True
+                            brk_type = "SM_FVG"
+                            sl_short_dist = sm_short_sl
+                            analysis["breakout_type"] = "SM_FVG"
+                            analysis["short_sl_dist"] = sm_short_sl
+                            analysis["short_sl_pct_distance"] = sm_short_sl
+                            analysis["short_wick_stop_loss"] = analysis.get("sm_short_wick_sl", analysis["short_wick_stop_loss"])
+                            analysis["short_wick_sl"] = analysis["short_wick_stop_loss"]
 
                 if (tech_long and not is_long) or (tech_short and not is_short):
                     portfolio.funnel_stats["btc_blocked"] = portfolio.funnel_stats.get("btc_blocked", 0) + 1
@@ -323,7 +384,18 @@ class MarketScanner:
                     chosen["watch_activity"] = round(surge * 3.0 + abs(alpha_5m), 3)
                     return {"kind": "watch", "data": chosen}
 
-                chosen["score"] = round(abs(alpha_5m) * surge * clv_used, 3)
+                # Smart Money Confluence Score Boost (FVG + HTF EMA200 + ADX >= 20):
+                # Вход только при строгих условиях AlphaRocket, а лучшие трендовые FVG-ракеты поднимаются в топ!
+                sm_mult = 0.85 if is_sm_fvg else 1.0
+                if not is_sm_fvg:
+                    if (side == "LONG" and analysis.get("has_fvg_bull") and analysis.get("above_ema200")) or (
+                        side == "SHORT" and analysis.get("has_fvg_bear") and not analysis.get("above_ema200", True)
+                    ):
+                        sm_mult *= float(getattr(config, "FVG_EMA200_SCORE_BOOST", 1.25))
+                    if float(analysis.get("adx14", 0.0) or 0.0) >= 20.0:
+                        sm_mult *= float(getattr(config, "ADX_TREND_SCORE_BOOST", 1.15))
+
+                chosen["score"] = round(abs(alpha_5m) * surge * clv_used * sm_mult, 3)
                 chosen["radar_status"] = f"🚀 ALPHA ПРОБОЙ [{brk_type}] (RS {alpha_5m:+.1f}%)"
                 return {"kind": "candidate", "data": chosen}
 
@@ -368,7 +440,7 @@ class MarketScanner:
                     for c in all_scored[:3]
                 ])
                 print(
-                    f"🚀 [ПРОБОЙ НАЙДЕН] {now_str} [{mirror_tag}] — Радар {len(tickers)} пар | "
+                    f"🚀 [ПРОБОЙ НАЙДЕН] {now_str} [{mirror_tag}] — Радар {portfolio.last_universe_count} пар (разбор {len(tickers)}) | "
                     f"Кандидатов: {len(all_scored)} | {top_str}",
                     flush=True
                 )
@@ -378,13 +450,13 @@ class MarketScanner:
                     for w in watch_pool[:3]
                 ]) if watch_pool else "ожидание импульса"
                 print(
-                    f"📡 [ROCKET RADAR] {now_str} [{mirror_tag}] — Мониторинг {len(tickers)} пар | "
+                    f"📡 [ROCKET RADAR] {now_str} [{mirror_tag}] — Мониторинг {portfolio.last_universe_count} пар (глубокий разбор {len(tickers)}) | "
                     f"BTC 15m: {btc_p:+.2f}% | На прицеле: {watch_str}",
                     flush=True
                 )
 
-        # 5. ОТБОР ЛУЧШЕГО КАНДИДАТА ДЛЯ GROQ AI (СТРОГО 1 НОВЫЙ ВХОД ЗА ПРОХОД — ЗАЩИТА ОТ ПАРНЫХ СИНХРОННЫХ СТОПОВ!)
-        candidates_to_eval = all_scored[:1]
+        # 5. ОТБОР ТОП-3 КАНДИДАТОВ ЗА ПРОХОД ДЛЯ GROQ AI (ловит несколько независимых ракет на одном баре до 6 слотов!)
+        candidates_to_eval = all_scored[:3]
 
         # 6. GROQ SOFT GATE & RISK-BASED POSITION SIZING
         for ctx in candidates_to_eval:
@@ -395,16 +467,18 @@ class MarketScanner:
             approved, groq_eval = await groq_engine.evaluate_setup(ctx)
 
             entry_p = ctx["current_price"]
+            sl_dist_pct_dyn = ctx.get("sl_pct_distance", 0.01) if cand_side == "LONG" else ctx.get("short_sl_dist", 0.01)
+            exit_plan = self.compute_dynamic_exit_plan(ctx, cand_side, float(sl_dist_pct_dyn or 0.01))
             if cand_side == "LONG":
                 exact_sl = ctx.get("wick_stop_loss", config.round_price(entry_p * 0.990))
                 risk_per_coin = max(entry_p - exact_sl, entry_p * config.STOP_LOSS_MIN_PCT)
-                tp1_target = config.round_price(entry_p + max(config.TARGET_1_R * risk_per_coin, entry_p * config.TP1_PCT))
-                tp2_target = config.round_price(entry_p + max(config.TARGET_2_R * risk_per_coin, entry_p * config.TP2_PCT))
+                tp1_target = config.round_price(entry_p + exit_plan["tp1_r"] * risk_per_coin)
+                tp2_target = config.round_price(entry_p + exit_plan["tp2_r"] * risk_per_coin)
             else:
                 exact_sl = ctx.get("short_wick_stop_loss", config.round_price(entry_p * 1.010))
                 risk_per_coin = max(exact_sl - entry_p, entry_p * config.STOP_LOSS_MIN_PCT)
-                tp1_target = config.round_price(entry_p - max(config.TARGET_1_R * risk_per_coin, entry_p * config.TP1_PCT))
-                tp2_target = config.round_price(entry_p - max(config.TARGET_2_R * risk_per_coin, entry_p * config.TP2_PCT))
+                tp1_target = config.round_price(entry_p - exit_plan["tp1_r"] * risk_per_coin)
+                tp2_target = config.round_price(entry_p - exit_plan["tp2_r"] * risk_per_coin)
 
             eval_entry = {
                 "symbol": sym,
@@ -458,32 +532,25 @@ class MarketScanner:
                 eff_sl_dist = max(sl_dist_pct, float(getattr(config, "SIZING_SL_FLOOR_PCT", 0.0080)))
                 target_notional = risk_usd / (eff_sl_dist + 0.0012)
                 raw_margin = target_notional / lev_to_use
-                max_mg = cur_equity * float(getattr(config, "MAX_MARGIN_EQUITY_PCT", 0.25))
-                min_mg = float(getattr(config, "MIN_MARGIN_USDT", 1.00))
-                actual_margin = round(min(raw_margin, max_mg, portfolio.cash * 0.48), 2)
+                max_mg = cur_equity * float(getattr(config, "MAX_MARGIN_EQUITY_PCT", 0.30))
+                min_mg = float(getattr(config, "MIN_MARGIN_USDT", 0.50))
+                actual_margin = round(min(raw_margin, max_mg, portfolio.cash * 0.65), 2)
 
-                # УСИЛЕННАЯ ЗАЩИТА ОТ КОРРЕЛЯЦИОННОГО РИСКА (БЕЗРИСКОВЫЕ MOONBAG-РАНЕРЫ НЕ БЛОКИРУЮТ НОВЫЕ ВХОДЫ!):
+                # УМНАЯ ЗАЩИТА ОТ КОРРЕЛЯЦИОННОГО РИСКА:
+                # 1. Безрисковые ранеры (tp1_hit=True) НЕ учитываются — никогда не блокируют новые входы!
+                # 2. Разные стороны (LONG + SHORT) всегда разрешены независимо друг от друга.
+                # 3. Дополнительные однонаправленные входы (до MAX_CONCURRENT_POSITIONS=4) разрешены при подтвержденном тренде BTC!
                 at_risk_positions = [p for p in portfolio.open_positions.values() if not p.get("tp1_hit", False)]
                 if len(at_risk_positions) >= 1:
                     same_side_positions = [p for p in at_risk_positions if p.get("side") == cand_side]
                     if same_side_positions:
-                        existing_pos = same_side_positions[0]
-                        age_sec = now - float(existing_pos.get("opened_at", now))
-                        in_profit_or_be = (float(existing_pos.get("unrealized_pnl", 0.0)) > 0.0) or bool(existing_pos.get("breakeven_set", False))
-                        if age_sec < 300.0 or not in_profit_or_be:
-                            print(
-                                f"⚠️ [CORRELATION GUARD] Вторая позиция {cand_side} по {sym} отклонена: "
-                                f"первая сделка еще не вышла в профит/безубыток (возраст {int(age_sec)}с, PnL ${existing_pos.get('unrealized_pnl', 0):+.2f}).",
-                                flush=True
-                            )
-                            continue
                         btc_trend = btc_regime.get("trend", "CHOP")
-                        btc_5m = btc_regime.get("pct_5m", 0.0)
+                        btc_5m = float(btc_regime.get("pct_5m", 0.0) or 0.0)
                         if cand_side == "SHORT" and (btc_trend != "BEARISH" or btc_5m > 0.0):
-                            print(f"⚠️ [CORRELATION GUARD] Вторая позиция SHORT по {sym} отклонена: BTC ({btc_trend}, {btc_5m:+.2f}%) не в медвежьем тренде!", flush=True)
+                            print(f"⚠️ [CORRELATION GUARD] Доп. позиция SHORT по {sym} отклонена: BTC ({btc_trend}, {btc_5m:+.2f}%) не подтверждает шорты!", flush=True)
                             continue
                         elif cand_side == "LONG" and (btc_trend != "BULLISH" or btc_5m < 0.0):
-                            print(f"⚠️ [CORRELATION GUARD] Вторая позиция LONG по {sym} отклонена: BTC ({btc_trend}, {btc_5m:+.2f}%) не в бычьем тренде!", flush=True)
+                            print(f"⚠️ [CORRELATION GUARD] Доп. позиция LONG по {sym} отклонена: BTC ({btc_trend}, {btc_5m:+.2f}%) не подтверждает лонги!", flush=True)
                             continue
 
                 max_total_slots = config.MAX_CONCURRENT_POSITIONS + int(getattr(config, "MAX_RISK_FREE_RUNNERS", 2))
@@ -497,17 +564,20 @@ class MarketScanner:
                         wick_sl=exact_sl,
                         tp1=tp1_target,
                         tp2=tp2_target,
-                        groq_reason=f"Rocket [{brk_type}] (Score: {ctx.get('score', 1.0)}, RVOL: {ctx['volume_surge_ratio']}x) | {eval_entry['reason']}",
+                        groq_reason=f"Rocket [{brk_type} | {exit_plan['profile']}] (Score: {ctx.get('score', 1.0)}, RVOL: {ctx['volume_surge_ratio']}x) | {eval_entry['reason']}",
                         leverage=lev_to_use,
                         atr_pct=ctx.get("atr14_pct", 0.006),
-                        risk_usd=risk_usd
+                        risk_usd=risk_usd,
+                        exit_plan=exit_plan
                     )
                     if opened:
                         self.cooldowns[sym] = now
+                        trail_left = int(round((1.0 - exit_plan["tp1_share"] - exit_plan["tp2_share"]) * 100))
                         print(
-                            f"🟢 [ROCKET OPEN] {cand_side} {sym} [{brk_type}] по ${entry_p:.4f} | "
+                            f"🟢 [ROCKET OPEN] {cand_side} {sym} [{brk_type} | {exit_plan['profile']}] по {config.round_price(entry_p)} | "
                             f"Маржа: ${actual_margin:.2f} ({lev_to_use}x, Риск 1R: ${risk_usd:.2f}) | "
-                            f"SL: ${exact_sl:.4f} ({sl_dist_pct*100:.2f}%) | TP1(60%@{config.TARGET_1_R}R): ${tp1_target:.4f} | 40% Anti-Rug Trail",
+                            f"SL: {config.round_price(exact_sl)} ({sl_dist_pct*100:.2f}%) | TP1({int(exit_plan['tp1_share']*100)}%@{exit_plan['tp1_r']}R): {config.round_price(tp1_target)} | "
+                            f"TP2({int(exit_plan['tp2_share']*100)}%@{exit_plan['tp2_r']}R): {config.round_price(tp2_target)} | {trail_left}% Anti-Rug Trail",
                             flush=True
                         )
                         if len(at_risk_positions) + 1 >= config.MAX_CONCURRENT_POSITIONS:

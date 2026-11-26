@@ -20,16 +20,18 @@ services:
       - key: PAPER_TRADING
         value: "true"
       - key: INITIAL_BALANCE
-        value: "20.0"
+        value: "100.0"
       - key: LEVERAGE
-        value: "15"
+        value: "50"
       - key: RISK_PER_TRADE_PCT
-        value: "0.030"
+        value: "0.055"
       - key: TRADE_AMOUNT_USDT
-        value: "4.0"
+        value: "10.0"
       - key: MAX_POSITIONS
-        value: "2"
+        value: "6"
+      - key: TTL_HOURS
+        value: "24"
       - key: MIN_24H_VOLUME_USDT
-        value: "3000000"
+        value: "1500000"
       - key: SCAN_TICKERS_LIMIT
-        value: "180"
+        value: "240"

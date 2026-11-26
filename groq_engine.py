@@ -101,17 +101,22 @@ class GroqEngine:
         brk_label = context.get("breakout_type", "STRUCT_3H")
         alpha_5m = float(context.get("alpha_5m", p5m) or 0.0)
         alpha_15m = float(context.get("alpha_15m", p15m) or 0.0)
+        adx_val = context.get("adx14", 20.0)
+        fvg_bull = bool(context.get("has_fvg_bull", False))
+        fvg_bear = bool(context.get("has_fvg_bear", False))
+        htf_e200 = "Above EMA200" if context.get("above_ema200", False) else "Below EMA200"
+        risk_pct_ui = round(float(getattr(config, "RISK_PER_TRADE_PCT", 0.040)) * 100.0, 1)
 
         if cand_side == "LONG":
             clv_pct = context.get("close_strength_long", 0.75) * 100.0
             sl_price = context.get("wick_stop_loss", cur_p * 0.99)
             sl_dist = context.get("sl_pct_distance", 0.01) * 100.0
-            prompt = f"""Evaluate Idiosyncratic Alpha Rocket Breakout LONG ({brk_label}) for {symbol} on Binance ({lev}x leverage, fixed 3.0% equity risk).
-Metrics: Price ${cur_p}, Breakout ({brk_label}): YES, 5m RVOL: {vol_surge}x, Close Strength (CLV): {clv_pct:.0f}%, 5m Impulse: {p5m:+.2f}%, 15m: {p15m:+.2f}%, Alpha vs BTC: 5m {alpha_5m:+.2f}% / 15m {alpha_15m:+.2f}%, EMA21 Extension: {ema21_ext:.2f}%, RSI14: {rsi_val}, Trend: {trend_val}, Upper/Lower Wick: {u_wick:.1f}%/{l_wick:.1f}%, ATR14: {atr_pct:.2f}%, Structural SL: ${sl_price} ({sl_dist:.2f}%), BTC: {btc_reg}.
+            prompt = f"""Evaluate Idiosyncratic Alpha Rocket Breakout LONG ({brk_label}) for {symbol} ({lev}x leverage, fixed {risk_pct_ui}% equity risk).
+Metrics: Price ${cur_p}, Breakout ({brk_label}): YES, 5m RVOL: {vol_surge}x, Close Strength (CLV): {clv_pct:.0f}%, 5m Impulse: {p5m:+.2f}%, 15m: {p15m:+.2f}%, Alpha vs BTC: 5m {alpha_5m:+.2f}% / 15m {alpha_15m:+.2f}%, EMA21 Extension: {ema21_ext:.2f}%, HTF: {htf_e200}, ADX14: {adx_val}, BullFVG: {fvg_bull}, RSI14: {rsi_val}, Trend: {trend_val}, Upper/Lower Wick: {u_wick:.1f}%/{l_wick:.1f}%, ATR14: {atr_pct:.2f}%, Structural SL: ${sl_price} ({sl_dist:.2f}%), BTC: {btc_reg}.
 Quant & Memory: {ml_prob_str} | {token_mem}
 Prop-Desk Rules:
 1. Fresh Alpha breakouts (RVOL >= 1.8x, Alpha vs BTC >= +0.8%, CLV >= 66%) naturally print RSI 70-85 on ignition — DO NOT reject for RSI <= 86!
-2. Approve ("BUY", confidence 0.78-0.94) when idiosyncratic Alpha vs BTC is strong, upper wick <= 26%, and EMA21 extension <= {max_ext_ui:.1f}%.
+2. Approve ("BUY", confidence 0.78-0.94) when idiosyncratic Alpha vs BTC is strong, upper wick <= 26%, and EMA21 extension <= {max_ext_ui:.1f}% (extra conviction if BullFVG=True & ADX14 >= 20).
 3. Reject ("SKIP") ONLY if obvious Bull Trap (upper wick > 26%), extreme late climax (RSI > 86 or EMA21 extension > {max_ext_ui:.1f}%), or BTC is dumping.
 Return ONLY valid JSON matching exact keys:
 {{"trap_risk": false, "decision": "BUY", "confidence": 0.84, "reason": "Concise 1-sentence prop-trader thesis in Russian"}}"""
@@ -119,12 +124,12 @@ Return ONLY valid JSON matching exact keys:
             clv_pct = context.get("close_strength_short", 0.75) * 100.0
             sl_price = context.get("short_wick_stop_loss", cur_p * 1.01)
             sl_dist = context.get("short_sl_pct_distance", 0.01) * 100.0
-            prompt = f"""Evaluate Idiosyncratic Alpha / Rug-Hunter Breakdown SHORT ({brk_label}) for {symbol} on Binance ({lev}x leverage, fixed 3.0% equity risk).
-Metrics: Price ${cur_p}, Breakdown ({brk_label}): YES, 5m RVOL: {vol_surge}x, Bear Close Strength: {clv_pct:.0f}%, 5m Impulse: {p5m:+.2f}%, 15m: {p15m:+.2f}%, Alpha vs BTC: 5m {alpha_5m:+.2f}% / 15m {alpha_15m:+.2f}%, EMA21 Extension: {ema21_ext:.2f}%, RSI14: {rsi_val}, Trend: {trend_val}, Upper/Lower Wick: {u_wick:.1f}%/{l_wick:.1f}%, ATR14: {atr_pct:.2f}%, Structural SL: ${sl_price} ({sl_dist:.2f}%), BTC: {btc_reg}.
+            prompt = f"""Evaluate Idiosyncratic Alpha / Rug-Hunter Breakdown SHORT ({brk_label}) for {symbol} ({lev}x leverage, fixed {risk_pct_ui}% equity risk).
+Metrics: Price ${cur_p}, Breakdown ({brk_label}): YES, 5m RVOL: {vol_surge}x, Bear Close Strength: {clv_pct:.0f}%, 5m Impulse: {p5m:+.2f}%, 15m: {p15m:+.2f}%, Alpha vs BTC: 5m {alpha_5m:+.2f}% / 15m {alpha_15m:+.2f}%, EMA21 Extension: {ema21_ext:.2f}%, HTF: {htf_e200}, ADX14: {adx_val}, BearFVG: {fvg_bear}, RSI14: {rsi_val}, Trend: {trend_val}, Upper/Lower Wick: {u_wick:.1f}%/{l_wick:.1f}%, ATR14: {atr_pct:.2f}%, Structural SL: ${sl_price} ({sl_dist:.2f}%), BTC: {btc_reg}.
 Quant & Memory: {ml_prob_str} | {token_mem}
 Prop-Desk Rules:
 1. Fresh idiosyncratic breakdowns & post-pump rug dumps (RVOL >= 1.8x, Alpha vs BTC <= -0.8%, CLV >= 66%) naturally print RSI 15-30 — DO NOT reject for RSI >= 14!
-2. Approve ("SHORT", confidence 0.78-0.94) when breakdown volume & relative weakness vs BTC are real, lower wick <= 26%, and EMA21 extension <= {max_ext_ui:.1f}%.
+2. Approve ("SHORT", confidence 0.78-0.94) when breakdown volume & relative weakness vs BTC are real, lower wick <= 26%, and EMA21 extension <= {max_ext_ui:.1f}% (extra conviction if BearFVG=True & ADX14 >= 20).
 3. Reject ("SKIP") ONLY if obvious Bear Trap absorption (lower wick > 26%), extreme late exhaustion (RSI < 14 or EMA21 extension > {max_ext_ui:.1f}%), or BTC is pumping.
 Return ONLY valid JSON matching exact keys:
 {{"trap_risk": false, "decision": "SHORT", "confidence": 0.84, "reason": "Concise 1-sentence prop-trader thesis in Russian"}}"""
@@ -200,16 +205,16 @@ Return ONLY valid JSON matching exact keys:
         clv_val = context.get("close_strength_long", 0.7) if cand_side == "LONG" else context.get("close_strength_short", 0.7)
         wick_val = context.get("upper_wick_pct", 0.1) if cand_side == "LONG" else context.get("lower_wick_pct", 0.1)
 
-        # A+ Alpha Rocket Override: если кандидат прошел все 15 квантовых фильтров AlphaRocket
-        # (пробой + 15m MTF + Anti-Rug + относительная сила против BTC >= 0.80% + RVOL >= 1.80x + CLV >= 66%),
-        # не позволяем перестраховке LLM пропустить подтвержденную ракету!
+        # A+ Quant Override: разрешаем подтвержденные 3H/Squeeze пробои И Smart Money (SM_FVG) с сильной Alpha vs BTC
         alpha_abs = abs(float(context.get("alpha_5m", p5m) or 0.0))
+        min_rvol_ov = 1.50 if brk_label == "SM_FVG" else config.MIN_5M_VOLUME_SURGE_RATIO
+        min_a5_ov = 0.65 if brk_label == "SM_FVG" else getattr(config, "MIN_ALPHA_5M_PCT", 0.80)
         if (
             eval_result.get("decision") != expected_decision and
-            float(vol_surge) >= config.MIN_5M_VOLUME_SURGE_RATIO and
+            float(vol_surge) >= min_rvol_ov and
             float(clv_val) >= config.MIN_CLOSE_STRENGTH and
             float(wick_val) <= config.WICK_EXHAUSTION_MAX and
-            alpha_abs >= getattr(config, "MIN_ALPHA_5M_PCT", 0.80) and
+            alpha_abs >= min_a5_ov and
             float(context.get("ema21_ext_pct", 0)) <= config.MAX_EMA21_EXTENSION_PCT and
             float(context.get(sl_key, 0)) <= config.MAX_ALLOWED_SL_PCT
         ):

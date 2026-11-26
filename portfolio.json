@@ -1,7 +1,7 @@
 {
-  "cash": 20.0,
-  "initial_balance": 20.0,
-  "current_leverage": 15,
+  "cash": 100.0,
+  "initial_balance": 100.0,
+  "current_leverage": 50,
   "open_positions": {},
   "trade_history": [],
   "funnel_stats": {
@@ -21,8 +21,9 @@
   "symbol_lockouts": {},
   "consecutive_losses": 0,
   "daily_losses_count": 0,
-  "daily_loss_day": "2026-11-01",
+  "daily_loss_day": "2026-11-26",
   "pause_until": 0.0,
   "is_paused": false,
-  "last_updated": 1793558160.0
+  "peak_equity": 100.0,
+  "last_updated": 1795698500.0
 }

@@ -58,54 +58,82 @@ async def run_suite():
     print(f"  ✓ Статус Bitcoin: {btc_reg['status_str']}")
     tickers = await binance_client.fetch_top_tickers(min_vol_usdt=config.MIN_24H_VOLUME_USDT, limit=config.SCAN_TICKERS_LIMIT)
     assert len(tickers) >= 30, f"Радар вернул слишком мало пар: {len(tickers)}"
-    sol_analysis = await binance_client.fetch_candles_analysis("SOLUSDT", interval="5m", limit=80)
+    sol_analysis = await binance_client.fetch_candles_analysis("SOLUSDT", interval="5m", limit=200)
     assert sol_analysis is not None and "is_breakout_long" in sol_analysis and "close_strength_long" in sol_analysis
-    print(f"  ✓ Радар отобрал {len(tickers)} ликвидных пар; структурный разбор SOLUSDT корректен (CLV={sol_analysis['close_strength_long']})")
+    assert "adx14" in sol_analysis and "ema200" in sol_analysis and "has_fvg_bull" in sol_analysis
+    assert config.INITIAL_BALANCE == 100.0 and config.LEVERAGE == 50 and config.MAX_CONCURRENT_POSITIONS == 6 and config.TTL_HOURS == 24
+    assert binance_client.last_full_market_count >= 250, f"Полный скринер должен покрывать >= 250 пар, получено {binance_client.last_full_market_count}"
+    print(f"  ✓ Скринер охватил {binance_client.last_full_market_count} пар рынка → топ-{len(tickers)} в разборе; SOLUSDT корректен (CLV={sol_analysis['close_strength_long']}, ADX={sol_analysis['adx14']}, 50x/6slots)")
 
-    # 3. ТЕСТ ANTI-RUG ROCKET HARVEST (60% В КЭШ НА 1.65R + 40% БЕЗРИСКОВЫЙ MOONBAG + СВОБОДНЫЙ СЛОТ)
-    print("\n[ТЕСТ 3/8] Проверка Anti-Rug выхода (60% на 1.65R + 40% Parabolic Trail + безрисковый слот)...")
+    # 3. ТЕСТ ДИНАМИЧЕСКОГО 3-STAGE ВЫХОДА (TP1 + TP2 + TRAIL + СВОБОДНЫЙ СЛОТ)
+    print("\n[ТЕСТ 3/8] Проверка динамического 3-ступенчатого выхода (TP1 + TP2 + Parabolic Trail + 4 слота)...")
     portfolio.open_positions.clear()
     portfolio.trade_history.clear()
     portfolio.symbol_lockouts.clear()
     portfolio.consecutive_losses = 0
     portfolio.daily_losses_count = 0
     portfolio.pause_until = 0.0
-    portfolio.cash = 20.0
+    portfolio.cash = 100.0
+    portfolio.peak_equity = 100.0
+
+    from scanner import market_scanner
+    dyn_plan = market_scanner.compute_dynamic_exit_plan(
+        {"breakout_type": "SQUEEZE_80M", "atr14_pct": 0.008, "adx14": 24.0, "has_fvg_bull": True},
+        side="LONG", sl_dist=0.012
+    )
+    assert dyn_plan["profile"] == "EXPLOSIVE_FVG" and dyn_plan["tp1_r"] == 1.65 and dyn_plan["tp2_r"] == 2.62
+    rug_plan = market_scanner.compute_dynamic_exit_plan(
+        {"breakout_type": "RUG_SHORT", "atr14_pct": 0.015, "adx14": 22.0, "has_fvg_bear": True},
+        side="SHORT", sl_dist=0.025
+    )
+    assert rug_plan["profile"] == "FAST_RUG_DUMP" and rug_plan["tp1_r"] == 1.25 and rug_plan["tp2_r"] == 1.95
 
     opened = portfolio.open_position(
-        symbol="GUAUSDT", side="LONG", entry_price=10.0, size_usdt=4.00,
-        wick_sl=9.88, tp1=10.198, tp2=10.72, groq_reason="Anti-Rug Rocket Test",
-        leverage=15, atr_pct=0.008, risk_usd=0.60
+        symbol="GUAUSDT", side="LONG", entry_price=10.0, size_usdt=16.00,
+        wick_sl=9.88, tp1=10.198, tp2=10.3144, groq_reason="Dynamic 3-TP Test",
+        leverage=25, atr_pct=0.008, risk_usd=4.00, exit_plan=dyn_plan
     )
     assert opened
     summary_open = portfolio.get_portfolio_summary()
-    assert abs(summary_open["equity"] - 20.0) < 0.01, f"Equity при открытии должен быть $20.00, а не ${summary_open['equity']}"
+    assert abs(summary_open["equity"] - 100.0) < 0.01, f"Equity при открытии должен быть $100.00, а не ${summary_open['equity']}"
     assert int(getattr(config, "TIME_STOP_MINUTES", 0)) == 0, "Time-Stop по умолчанию должен быть 0 (отключен)!"
-    print(f"  ✓ Позиция открыта: Cash=${summary_open['cash']:.2f}, Залог=${summary_open['locked_margin']:.2f}, Equity=${summary_open['equity']:.2f}")
+    print(f"  ✓ Позиция открыта ({dyn_plan['profile']}): Cash=${summary_open['cash']:.2f}, Залог=${summary_open['locked_margin']:.2f}, Equity=${summary_open['equity']:.2f}")
 
-    # Шаг 1: TP1 (+1.65R) -> мгновенно забираем 60% прибыли в кэш ДО возможного слива и запираем стоп остатка в +0.35R!
+    # Шаг 1: TP1 (+1.65R) -> забираем 45% в кэш, SL -> +0.35R
     portfolio.open_positions["GUAUSDT"]["tp1_hit"] = True
     portfolio.open_positions["GUAUSDT"]["wick_sl"] = 10.042
     portfolio.open_positions["GUAUSDT"]["breakeven_set"] = True
-    portfolio.close_position("GUAUSDT", 10.198, f"🎯 TP1 {config.TARGET_1_R}R: 60% в кэш", partial_pct=config.TP1_PARTIAL_PCT)
-    assert "GUAUSDT" in portfolio.open_positions, "40% Moonbag должен остаться в рынке для ловли большой ракеты!"
-    assert len(portfolio.trade_history) == 0, "Частичный тейк не должен дробить сделку в статистике!"
+    portfolio.close_position("GUAUSDT", 10.198, f"🎯 TP1 {dyn_plan['tp1_r']:.2f}R: 45% в кэш", partial_pct=dyn_plan["tp1_share"])
+    assert "GUAUSDT" in portfolio.open_positions and abs(portfolio.open_positions["GUAUSDT"]["margin_usdt"] - 8.80) < 0.05
 
-    # Проверяем, что безрисковый Moonbag (tp1_hit=True) НЕ блокирует открытие 2 новых активных ракет!
-    assert portfolio.open_position("LISTAUSDT", "LONG", 1.0, 3.0, 0.985, 1.025, 1.09, "Wave 1", 15)
-    assert portfolio.open_position("EVAAUSDT", "SHORT", 2.0, 3.0, 2.03, 1.95, 1.82, "Rug Short", 15)
-    print("  ✓ Безрисковый 40% Moonbag не блокирует слоты: успешно открыты 2 новые ракеты параллельно!")
-    portfolio.close_position("LISTAUSDT", 1.0, "Cleanup", partial_pct=1.0)
-    portfolio.close_position("EVAAUSDT", 2.0, "Cleanup", partial_pct=1.0)
+    # Шаг 2: TP2 (+2.62R) -> забираем еще 25% от старта (rem_frac = 0.25/0.55) -> в ранере остается ровно 30% ($4.80)!
+    portfolio.open_positions["GUAUSDT"]["tp2_hit"] = True
+    rem_frac = dyn_plan["tp2_share"] / (1.0 - dyn_plan["tp1_share"])
+    portfolio.close_position("GUAUSDT", 10.3144, f"🚀 TP2 {dyn_plan['tp2_r']:.2f}R: еще 25% в кэш", partial_pct=rem_frac)
+    assert "GUAUSDT" in portfolio.open_positions and abs(portfolio.open_positions["GUAUSDT"]["margin_usdt"] - 4.80) < 0.05
+    assert len(portfolio.trade_history) == 0, "Частичные TP1+TP2 не должны дробить сделку в статистике!"
+
+    # Проверяем, что безрисковый Moonbag (tp1_hit=True) НЕ блокирует открытие до 4 активных ракет параллельно!
+    assert portfolio.open_position("LISTAUSDT", "LONG", 1.0, 10.0, 0.985, 1.025, 1.09, "Wave 1", 25)
+    assert portfolio.open_position("EVAAUSDT", "SHORT", 2.0, 10.0, 2.03, 1.95, 1.82, "Rug Short", 25)
+    assert portfolio.open_position("BTWUSDT", "LONG", 0.5, 10.0, 0.492, 0.514, 0.545, "Wave 2", 25)
+    assert portfolio.open_position("MMTUSDT", "LONG", 1.5, 10.0, 1.47, 1.54, 1.65, "Wave 3", 25)
+    print("  ✓ Безрисковый 30% Moonbag не блокирует слоты: успешно открыты 4 активные ракеты параллельно (4+1)!")
+    for s_c, p_c in [("LISTAUSDT", 1.0), ("EVAAUSDT", 2.0), ("BTWUSDT", 0.5), ("MMTUSDT", 1.5)]:
+        portfolio.close_position(s_c, p_c, "Cleanup", partial_pct=1.0)
     portfolio.trade_history.clear()
+    portfolio.symbol_lockouts.clear()
+    portfolio.daily_losses_count = 0
+    portfolio.consecutive_losses = 0
 
-    # Шаг 2: Ракета взлетает на +12% ($11.20) и закрывается по плотному Anti-Rug Parabolic Trail до слива!
+    # Шаг 3: Ракета взлетает на +12% ($11.20) и закрывается по Parabolic Trail!
     portfolio.close_position("GUAUSDT", 11.20, "🚀 Anti-Rug Rocket Trail", partial_pct=1.0)
     assert "GUAUSDT" not in portfolio.open_positions
-    assert len(portfolio.trade_history) == 1, "Вся позиция (60% TP1 + 40% Ранер) обязана записаться ровно как 1 сделка!"
+    assert len(portfolio.trade_history) == 1, "Вся позиция (TP1 + TP2 + Trail) обязана записаться ровно как 1 сделка!"
     rec = portfolio.trade_history[0]
-    print(f"  ✓ Большая ракета схвачена до слива 1 сделкой: PnL ${rec['realized_pnl']:+.2f} ({rec['roi_pct']:+.1f}%) | {rec['reason']}")
-    assert portfolio.cash > 23.0, f"Баланс должен мощно вырасти на большой ракете, получено ${portfolio.cash:.2f}"
+    assert "TP1(45%)" in rec["reason"] and "TP2(25%)" in rec["reason"], f"Неожиданная метка истории: {rec['reason']}"
+    print(f"  ✓ Большая ракета схвачена 3-шаговым выходом 1 сделкой: PnL ${rec['realized_pnl']:+.2f} ({rec['roi_pct']:+.1f}%) | {rec['reason']}")
+    assert portfolio.cash > 118.0, f"Баланс $100 должен мощно вырасти на большой ракете, получено ${portfolio.cash:.2f}"
 
     # 4. ТЕСТ TIME-STOP БЕЗ ЛОЖНОЙ БЛОКИРОВКИ CIRCUIT BREAKER
     print("\n[ТЕСТ 4/8] Проверка мягкого Time-Stop (не замораживает бота на околонулевом выходе)...")
@@ -167,7 +195,7 @@ async def run_suite():
 
     bybit_tickers = await binance_client.fetch_top_tickers(min_vol_usdt=config.MIN_24H_VOLUME_USDT, limit=config.SCAN_TICKERS_LIMIT)
     assert binance_client.active_mirror_name == "bybit", f"При бане fapi (418) должен включиться bybit, получено {binance_client.active_mirror_name}"
-    assert len(bybit_tickers) >= 150, f"Bybit Futures должен вернуть >= 150 чистых крипто-пар, получено {len(bybit_tickers)}"
+    assert config.MAX_CONCURRENT_POSITIONS == 6 and len(bybit_tickers) >= 220 and binance_client.last_full_market_count >= 350, f"Bybit должен мониторить >= 350 пар и вернуть >= 220 в разбор, получено market={binance_client.last_full_market_count}, top={len(bybit_tickers)}"
     bb_bad = [t["symbol"] for t in bybit_tickers if t["symbol"] in ("NVDAUSDT", "TSLAUSDT", "SOXLUSDT", "XAUUSDT", "PAXGUSDT", "AAPLUSDT", "TGTSTOCKUSDT")]
     assert not bb_bad, f"В радар Bybit попали RWA/акции/золото: {bb_bad}"
     bb_new = sum(1 for t in bybit_tickers if t.get("is_new_listing"))

@@ -80,6 +80,7 @@ class ExitManager:
                 early_be_r = float(getattr(config, "EARLY_BE_TRIGGER_R", 99.0))
                 early_be_lock = float(getattr(config, "EARLY_BE_LOCK_PCT", 0.0022))
                 time_stop_sec = int(getattr(config, "TIME_STOP_MINUTES", 0)) * 60
+                ttl_sec = int(getattr(config, "TTL_HOURS", 24)) * 3600
 
                 for sym in symbols:
                     if sym not in portfolio.open_positions:
@@ -95,16 +96,25 @@ class ExitManager:
                     risk_dist = max(float(pos.get("risk_dist", abs(entry - pos.get("original_sl", wick_sl)))), entry * 0.005)
                     elapsed_sec = now - float(pos.get("opened_at", now))
 
+                    # Индивидуальный динамический профиль выхода конкретно под эту сделку
+                    ep = pos.get("exit_plan") or {}
+                    tp1_r_val = float(ep.get("tp1_r", getattr(config, "TARGET_1_R", 1.50)))
+                    tp1_share = float(ep.get("tp1_share", tp1_part))
+                    tp1_lock = float(ep.get("tp1_lock_r", post_tp1_lock_r))
+                    tp2_r_val = float(ep.get("tp2_r", 2.25))
+                    tp2_share = float(ep.get("tp2_share", 0.0))
+                    tp2_lock = float(ep.get("tp2_lock_r", 1.15))
+
                     if should_log:
                         print(
-                            f"📊 [RUNNER TRACKER] {sym} ({side} {pos['leverage']}x): ${cur_price:.4f} (Вход: ${entry:.4f}) | "
-                            f"PnL остатка: {pos['pnl_pct']:+.2f}% (${pos['unrealized_pnl']:+.2f}) | "
-                            f"SL: ${wick_sl:.4f} | TP1: ${tp1:.4f} | TP1_Hit: {pos.get('tp1_hit', False)}",
+                            f"📊 [RUNNER TRACKER] {sym} ({side} {pos['leverage']}x | {ep.get('profile', 'STD')}): {config.round_price(cur_price)} (Вход: {config.round_price(entry)}) | "
+                            f"PnL: {pos['pnl_pct']:+.2f}% (${pos['unrealized_pnl']:+.2f}) | "
+                            f"SL: {config.round_price(wick_sl)} | TP1: {config.round_price(tp1)} | TP2: {config.round_price(tp2)}",
                             flush=True
                         )
 
                     # ==========================================================
-                    # ЛОГИКА СОПРОВОЖДЕНИЯ ДЛЯ LONG (ANTI-RUG ROCKET HARVEST)
+                    # ЛОГИКА СОПРОВОЖДЕНИЯ ДЛЯ LONG (ДИНАМИЧЕСКИЙ 3-STAGE ВЫХОД)
                     # ==========================================================
                     if side == "LONG":
                         highest = max(pos.get("highest_price", cur_price), cur_price)
@@ -124,7 +134,6 @@ class ExitManager:
                             portfolio.close_position(sym, cur_price, reason=reason_label, partial_pct=1.0)
                             continue
 
-                        # Опциональный ранний BE (по умолчанию 99R = отключен, чтобы не душить нормальный ретест)
                         if not pos["tp1_hit"] and early_be_r < 90.0 and (mfe_pct >= early_be_pct or mfe_r >= early_be_r):
                             be_price = config.round_price(entry * (1.0 + early_be_lock))
                             if be_price > pos["wick_sl"]:
@@ -132,22 +141,33 @@ class ExitManager:
                                 pos["breakeven_set"] = True
                                 portfolio.save()
 
-                        # Tier 1: Фиксация 60% прибыли в кэш на +1.65R ДО любого возможного слива + замок остатка в +0.35R!
+                        # Stage 1 (TP1): динамическая фиксация части в кэш + замок остатка в плюс
                         if not pos["tp1_hit"] and cur_price >= tp1:
                             pos["tp1_hit"] = True
-                            pos["wick_sl"] = config.round_price(max(pos["wick_sl"], entry + post_tp1_lock_r * risk_dist))
+                            pos["wick_sl"] = config.round_price(max(pos["wick_sl"], entry + tp1_lock * risk_dist))
                             pos["breakeven_set"] = True
-                            part_label = int(round(tp1_part * 100))
+                            part_label = int(round(tp1_share * 100))
                             portfolio.close_position(
                                 sym, cur_price,
-                                reason=f"🎯 TP1 {config.TARGET_1_R}R (+{pos['pnl_pct']:.1f}%): {part_label}% в кэш",
-                                partial_pct=tp1_part
+                                reason=f"🎯 TP1 {tp1_r_val:.2f}R (+{pos['pnl_pct']:.1f}%): {part_label}% в кэш",
+                                partial_pct=tp1_share
                             )
                             continue
 
-                        # Tier 2: Прогрессивный Anti-Rug Parabolic Ratchet для 40% безрискового Moonbag-ранера!
-                        # Чем выше взлетает ракета (+2.2R -> +3.5R -> +6.0R+), тем плотнее подтягивается стоп под максимум,
-                        # забирая сверхприбыль до резкого слива!
+                        # Stage 2 (TP2): вторая динамическая фиксация (доля от остатка так, чтобы закрыть tp2_share от старта!)
+                        if pos["tp1_hit"] and not pos.get("tp2_hit", False) and tp2_share > 0 and cur_price >= tp2:
+                            pos["tp2_hit"] = True
+                            pos["wick_sl"] = config.round_price(max(pos["wick_sl"], entry + tp2_lock * risk_dist))
+                            rem_frac = min(0.95, tp2_share / max(1.0 - tp1_share, 0.05))
+                            tp2_label = int(round(tp2_share * 100))
+                            portfolio.close_position(
+                                sym, cur_price,
+                                reason=f"🚀 TP2 {tp2_r_val:.2f}R (+{pos['pnl_pct']:.1f}%): еще {tp2_label}% в кэш",
+                                partial_pct=rem_frac
+                            )
+                            continue
+
+                        # Stage 3 (Trail): Прогрессивный Anti-Rug Parabolic Ratchet для безрискового Moonbag-ранера!
                         if pos["tp1_hit"]:
                             if mfe_r >= 5.5:
                                 trail_sl = highest - max(0.95 * atr_pct * highest, 0.55 * risk_dist)
@@ -162,7 +182,6 @@ class ExitManager:
                                 pos["wick_sl"] = trailing_sl_price
                                 portfolio.save()
 
-                        # Опциональный Time-Stop (срабатывает ТОЛЬКО если TIME_STOP_MINUTES > 0!)
                         if time_stop_sec > 0 and not pos["tp1_hit"] and elapsed_sec >= time_stop_sec:
                             if cur_r < 0.45:
                                 portfolio.close_position(
@@ -172,8 +191,17 @@ class ExitManager:
                                 )
                                 continue
 
+                        # Жесткий TTL (по умолчанию 24ч): закрывает зависшую без TP1 сделку и освобождает слот для свежей ракеты!
+                        if ttl_sec > 0 and not pos["tp1_hit"] and elapsed_sec >= ttl_sec:
+                            portfolio.close_position(
+                                sym, cur_price,
+                                reason=f"⏱️ TTL {int(ttl_sec//3600)}ч (высвобождение слота)",
+                                partial_pct=1.0
+                            )
+                            continue
+
                     # ==========================================================
-                    # ЛОГИКА СОПРОВОЖДЕНИЯ ДЛЯ SHORT (ANTI-RUG ROCKET HARVEST)
+                    # ЛОГИКА СОПРОВОЖДЕНИЯ ДЛЯ SHORT (ДИНАМИЧЕСКИЙ 3-STAGE ВЫХОД)
                     # ==========================================================
                     else:
                         lowest = min(pos.get("lowest_price", cur_price), cur_price)
@@ -200,20 +228,33 @@ class ExitManager:
                                 pos["breakeven_set"] = True
                                 portfolio.save()
 
-                        # Tier 1: Фиксация 60% слива в кэш на +1.65R + замок остатка в -0.35R
+                        # Stage 1 (TP1): динамическая фиксация прибыли в кэш + замок остатка
                         if not pos["tp1_hit"] and cur_price <= tp1:
                             pos["tp1_hit"] = True
-                            pos["wick_sl"] = config.round_price(min(pos["wick_sl"], entry - post_tp1_lock_r * risk_dist))
+                            pos["wick_sl"] = config.round_price(min(pos["wick_sl"], entry - tp1_lock * risk_dist))
                             pos["breakeven_set"] = True
-                            part_label = int(round(tp1_part * 100))
+                            part_label = int(round(tp1_share * 100))
                             portfolio.close_position(
                                 sym, cur_price,
-                                reason=f"🎯 TP1 {config.TARGET_1_R}R (+{pos['pnl_pct']:.1f}%): {part_label}% в кэш",
-                                partial_pct=tp1_part
+                                reason=f"🎯 TP1 {tp1_r_val:.2f}R (+{pos['pnl_pct']:.1f}%): {part_label}% в кэш",
+                                partial_pct=tp1_share
                             )
                             continue
 
-                        # Tier 2: Прогрессивный Anti-Bounce Parabolic Ratchet для 40% безрискового шорт-ранера!
+                        # Stage 2 (TP2): вторая динамическая фиксация перед трейлом остатка
+                        if pos["tp1_hit"] and not pos.get("tp2_hit", False) and tp2_share > 0 and cur_price <= tp2:
+                            pos["tp2_hit"] = True
+                            pos["wick_sl"] = config.round_price(min(pos["wick_sl"], entry - tp2_lock * risk_dist))
+                            rem_frac = min(0.95, tp2_share / max(1.0 - tp1_share, 0.05))
+                            tp2_label = int(round(tp2_share * 100))
+                            portfolio.close_position(
+                                sym, cur_price,
+                                reason=f"🚀 TP2 {tp2_r_val:.2f}R (+{pos['pnl_pct']:.1f}%): еще {tp2_label}% в кэш",
+                                partial_pct=rem_frac
+                            )
+                            continue
+
+                        # Stage 3 (Trail): Прогрессивный Anti-Bounce Parabolic Ratchet для безрискового шорт-ранера!
                         if pos["tp1_hit"]:
                             if mfe_r >= 5.5:
                                 trail_sl = lowest + max(0.95 * atr_pct * lowest, 0.55 * risk_dist)
@@ -236,6 +277,14 @@ class ExitManager:
                                     partial_pct=1.0
                                 )
                                 continue
+
+                        if ttl_sec > 0 and not pos["tp1_hit"] and elapsed_sec >= ttl_sec:
+                            portfolio.close_position(
+                                sym, cur_price,
+                                reason=f"⏱️ TTL {int(ttl_sec//3600)}ч (высвобождение слота)",
+                                partial_pct=1.0
+                            )
+                            continue
 
                 await asyncio.sleep(2.0)
             except Exception as e:

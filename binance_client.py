@@ -45,6 +45,8 @@ class BinanceClient:
         self._candles_cache: Dict[Tuple[str, str, int, int], Dict[str, Any]] = {}
         self._valid_crypto_perps: Dict[str, Tuple[float, Set[str]]] = {}
         self._new_crypto_perps: Dict[str, Set[str]] = {}
+        self._prev_scan_prices: Dict[str, float] = {}
+        self.last_full_market_count: int = 0
 
     @property
     def active_mirror_name(self) -> str:
@@ -552,22 +554,21 @@ class BinanceClient:
         if not data or not isinstance(data, list):
             return []
 
-        # Адаптация порога ликвидности под активное зеркало + авто-добор до 160-200 живых крипто-пар (включая НОВЫЕ ЛИСТИНГИ!):
-        # Даже если на Render осталась старая переменная окружения MIN_24H_VOLUME_USDT=20M, радар сам добирает полный пул чистых крипто-пар.
+        # Адаптация порога ликвидности под активное зеркало + предфильтр ВСЕГО рынка (400-500+ крипто-перпов) за 1 запрос:
         is_spot_mirror = self.is_spot_mirror
         m_name = self.active_mirror_name
         if m_name == "fapi":
-            base_min_vol = min(min_vol_usdt, 3_500_000.0)
-            hard_floor_vol = 1_000_000.0
-            new_listing_floor = 400_000.0
-        elif m_name in ("bybit", "gate", "bitget"):
-            base_min_vol = float(getattr(config, "ALT_FUTURES_MIN_VOL_USDT", 600_000.0))
-            hard_floor_vol = 250_000.0
-            new_listing_floor = 150_000.0
-        else:
-            base_min_vol = float(getattr(config, "SPOT_MIRROR_MIN_VOL_USDT", 500_000.0))
-            hard_floor_vol = 200_000.0
+            base_min_vol = min(min_vol_usdt, 1_500_000.0)
+            hard_floor_vol = 400_000.0
             new_listing_floor = 120_000.0
+        elif m_name in ("bybit", "gate", "bitget"):
+            base_min_vol = float(getattr(config, "ALT_FUTURES_MIN_VOL_USDT", 350_000.0))
+            hard_floor_vol = 200_000.0
+            new_listing_floor = 80_000.0
+        else:
+            base_min_vol = float(getattr(config, "SPOT_MIRROR_MIN_VOL_USDT", 350_000.0))
+            hard_floor_vol = 150_000.0
+            new_listing_floor = 80_000.0
 
         valid_crypto_perps = await self.fetch_valid_crypto_perps() if m_name in ("fapi", "bybit", "bitget", "gate") else set()
         new_crypto_perps = self._new_crypto_perps.get(m_name, set())
@@ -637,7 +638,10 @@ class BinanceClient:
 
                 dist_to_high = (high_p - last_p) / max(high_p, 1e-9)
                 dist_to_low = (last_p - low_p) / max(last_p, 1e-9)
-                rocket_heat = abs(pct) / max(min(dist_to_high, dist_to_low) * 100.0 + 0.5, 0.5)
+                prev_p = self._prev_scan_prices.get(sym)
+                delta_5m_abs = abs(last_p - prev_p) / max(prev_p, 1e-9) * 100.0 if (prev_p and prev_p > 0) else 0.0
+                pct_1h_h = abs(float(item.get("pct_1h_hint", 0) or 0))
+                rocket_heat = (abs(pct) + delta_5m_abs * 4.0 + pct_1h_h * 2.0) / max(min(dist_to_high, dist_to_low) * 100.0 + 0.5, 0.5)
                 if is_new_pair:
                     rocket_heat *= 1.35  # Приоритет свежим листингам и новым ракетам
 
@@ -646,6 +650,7 @@ class BinanceClient:
                     "price": last_p,
                     "volume_24h": vol,
                     "price_change_24h_pct": pct,
+                    "delta_5m_abs": round(delta_5m_abs, 2),
                     "high_24h": high_p,
                     "low_24h": low_p,
                     "dist_to_high_24h": round(dist_to_high, 4),
@@ -660,18 +665,22 @@ class BinanceClient:
             self._book_tickers_cache.update(fresh_books)
             self._book_tickers_cache_time = time.time()
 
+        self.last_full_market_count = len(all_clean_tickers)
+        for item_p in all_clean_tickers:
+            self._prev_scan_prices[item_p["symbol"]] = item_p["price"]
+
         if not all_clean_tickers:
             return []
 
-        # Приоритетно берем пары >= base_min_vol (и ВСЕ новые листинги >= new_listing_floor);
-        # если их меньше целевого лимита (например ночью в тихий рынок), мягко добираем из clean_tickers >= hard_floor_vol!
-        valid_tickers = [x for x in all_clean_tickers if x["volume_24h"] >= base_min_vol or x["is_new_listing"]]
-        target_fill = min(limit, 180)
-        if len(valid_tickers) < target_fill:
-            seen_syms = {x["symbol"] for x in valid_tickers}
-            extras = [x for x in all_clean_tickers if x["symbol"] not in seen_syms]
-            extras.sort(key=lambda x: (-x["rocket_heat"], -x["volume_24h"]))
-            valid_tickers.extend(extras[:(target_fill - len(valid_tickers))])
+        # Приоритетно берем ВСЕ пары из 400-500+ пула с движением (|5m_delta| >= 0.40%, у 24h хай/лоу, новые листинги)
+        # и мягко добираем до полного лимита (240+ самых перспективных пар для глубокого 200-свечного разбора!)
+        valid_tickers = list(all_clean_tickers)
+
+        # 0. Мгновенные 5m импульсы по ВСЕМ 400-500+ монетам рынка (ловит стартующие ракеты даже с $250K-$1M объема!)
+        instant_movers = sorted(
+            [x for x in valid_tickers if x.get("delta_5m_abs", 0.0) >= 0.40 or abs(x["price_change_24h_pct"]) >= 4.0],
+            key=lambda x: (-x.get("delta_5m_abs", 0.0), -x["rocket_heat"])
+        )
 
         # 1. Горячие LONG ракеты (активный рост + поджатие к хаям)
         breakout_long_pool = [
@@ -699,26 +708,30 @@ class BinanceClient:
 
         combined_dict: Dict[str, Dict[str, Any]] = {}
 
-        # 25% квоты: горячие LONG ракеты у хаев
-        for item in breakout_long_pool[:max(35, int(limit * 0.25))]:
+        # Мгновенные 5m-движения со всего 500-парного рынка
+        for item in instant_movers[:max(45, int(limit * 0.22))]:
             combined_dict[item["symbol"]] = item
 
-        # 20% квоты: горячие SHORT пробои у лоев
-        for item in breakdown_short_pool[:max(30, int(limit * 0.20))]:
+        # Горячие LONG ракеты у хаев
+        for item in breakout_long_pool[:max(45, int(limit * 0.22))]:
             combined_dict[item["symbol"]] = item
 
-        # 20% квоты: НОВЫЕ ЛИСТИНГИ / innovation-монеты
-        for item in new_listing_pool[:max(30, int(limit * 0.20))]:
+        # Горячие SHORT пробои у лоев
+        for item in breakdown_short_pool[:max(40, int(limit * 0.18))]:
             combined_dict[item["symbol"]] = item
 
-        # 20% квоты: главные волатильные лидеры дня
-        for item in top_movers[:max(30, int(limit * 0.20))]:
+        # НОВЫЕ ЛИСТИНГИ / innovation-монеты
+        for item in new_listing_pool[:max(35, int(limit * 0.15))]:
+            combined_dict[item["symbol"]] = item
+
+        # Главные волатильные лидеры дня
+        for item in top_movers[:max(40, int(limit * 0.18))]:
             if len(combined_dict) >= limit:
                 break
             if abs(item["price_change_24h_pct"]) <= max_24h_cap:
                 combined_dict[item["symbol"]] = item
 
-        # Добор до полного limit (180-200 пар): лидеры ликвидности + активные монеты
+        # Добор до полного limit (240+ самых живых пар): лидеры ликвидности и элита
         for item in by_volume:
             if len(combined_dict) >= limit:
                 break
@@ -858,6 +871,7 @@ class BinanceClient:
         ema27 = config.round_price(calc_ema(closed_closes, min(27, len(closed_closes))))
         ema63 = config.round_price(calc_ema(closed_closes, min(63, len(closed_closes))))
         ema150 = config.round_price(calc_ema(closed_closes, min(150, len(closed_closes))))
+        ema200 = config.round_price(calc_ema(closed_closes, min(200, len(closed_closes))))
 
         sig_cl = closed_signal_c["close"]
         if sig_cl >= ema63 * 0.998 and ema27 >= ema63 * 0.998 and ema63 >= ema150 * 0.996:
@@ -866,6 +880,43 @@ class BinanceClient:
             trend_15m = "BEAR"
         else:
             trend_15m = "CHOP"
+
+        # Smart Money Confluence: ADX-14 (сила тренда) + недавний 3-свечной FVG (имбаланс за последние 6 баров) + HTF EMA200
+        adx14 = 20.0
+        if len(closed_candles) >= 20:
+            tr_w, pdm_w, ndm_w = [], [], []
+            for j in range(1, len(closed_candles)):
+                c_j, c_p = closed_candles[j], closed_candles[j - 1]
+                up_m = c_j["high"] - c_p["high"]
+                dn_m = c_p["low"] - c_j["low"]
+                pdm_w.append(up_m if (up_m > dn_m and up_m > 0) else 0.0)
+                ndm_w.append(dn_m if (dn_m > up_m and dn_m > 0) else 0.0)
+                tr_w.append(max(c_j["high"] - c_j["low"], abs(c_j["high"] - c_p["close"]), abs(c_j["low"] - c_p["close"])))
+            alpha_w = 1.0 / 14.0
+            atr_w = tr_w[0]
+            p_w = pdm_w[0]
+            n_w = ndm_w[0]
+            adx_val = 20.0
+            for j in range(1, len(tr_w)):
+                atr_w = alpha_w * tr_w[j] + (1.0 - alpha_w) * atr_w
+                p_w = alpha_w * pdm_w[j] + (1.0 - alpha_w) * p_w
+                n_w = alpha_w * ndm_w[j] + (1.0 - alpha_w) * n_w
+                if atr_w > 1e-12:
+                    pdi = 100.0 * p_w / atr_w
+                    ndi = 100.0 * n_w / atr_w
+                    dx = 100.0 * abs(pdi - ndi) / max(pdi + ndi, 1e-12)
+                    adx_val = alpha_w * dx + (1.0 - alpha_w) * adx_val
+            adx14 = round(adx_val, 1)
+
+        has_fvg_bull = any(
+            closed_candles[j]["low"] > closed_candles[j - 2]["high"]
+            for j in range(max(2, len(closed_candles) - 6), len(closed_candles))
+        )
+        has_fvg_bear = any(
+            closed_candles[j]["high"] < closed_candles[j - 2]["low"]
+            for j in range(max(2, len(closed_candles) - 6), len(closed_candles))
+        )
+        above_ema200 = (sig_cl >= ema200)
 
         # СТРОГИЙ MTF ФИЛЬТР (ИСПРАВЛЕН БАГ ДОПУСКА CHOP!): в лонг только в BULL, в шорт только в BEAR (или при RUG_HUNTER_SHORT)
         is_mtf_long_ok = (trend_15m == "BULL")
@@ -952,23 +1003,33 @@ class BinanceClient:
         else:
             breakout_type = "WATCH"
 
+        # Детектор Smart Money (16b BOS + недавний 3-свечной FVG + тренд EMA200 + ADX >= 20)
+        swing_12_slice = closed_candles[-13:-1] if len(closed_candles) > 12 else closed_candles[:-1]
+        swing_12_low = min(c["low"] for c in swing_12_slice)
+        swing_12_high = max(c["high"] for c in swing_12_slice)
+        sm_bos_long = (sig_cl > sq_high) and has_fvg_bull and above_ema200 and (adx14 >= 20.0) and (surge_ratio >= 1.50)
+        sm_bos_short = (sig_cl < sq_low) and has_fvg_bear and (not above_ema200) and (adx14 >= 20.0) and (surge_ratio >= 1.50)
+
         target_high_ref = sq_high if sq_range_pct <= sq_max_rng else donchian_high
         target_low_ref = sq_low if sq_range_pct <= sq_max_rng else donchian_low
         ref_price_for_dist = sig_cl
         dist_to_breakout_long_pct = round(max(0.0, (target_high_ref - ref_price_for_dist) / max(ref_price_for_dist, 1e-9) * 100.0), 2)
         dist_to_breakout_short_pct = round(max(0.0, (ref_price_for_dist - target_low_ref) / max(ref_price_for_dist, 1e-9) * 100.0), 2)
 
-        # УМНЫЙ СТРУКТУРНЫЙ СТОП-ЛОСС (1.60 * ATR14 БУФЕР ЗА ФИТИЛЬ СВЕЧИ):
+        # УМНЫЙ СТРУКТУРНЫЙ СТОП-ЛОСС (1.55 * ATR14 БУФЕР ЗА ФИТИЛЬ/СВИНГ):
         active_sig_c = closed_signal_c
         recent_wick_low = min(prev_closed_c["low"], active_sig_c["low"])
         raw_wick_sl = config.round_price(recent_wick_low * (1.0 - config.WICK_BUFFER_PCT))
         raw_sl_pct = (current_price - raw_wick_sl) / max(current_price, 1e-9)
-        max_allowed_sl = float(getattr(config, "STOP_LOSS_MAX_PCT", 0.0350))
+        max_allowed_sl = float(getattr(config, "STOP_LOSS_MAX_PCT", 0.0450))
         min_allowed_sl = float(getattr(config, "STOP_LOSS_MIN_PCT", 0.0080))
-        sl_atr_mult = float(getattr(config, "SL_ATR_MULT", 1.60))
+        sl_atr_mult = float(getattr(config, "SL_ATR_MULT", 1.55))
 
         true_long_sl_pct = round(min(max(raw_sl_pct, sl_atr_mult * atr14_pct, min_allowed_sl), max_allowed_sl), 4)
         wick_stop_loss = config.round_price(current_price * (1.0 - true_long_sl_pct))
+        sm_raw_sl_l = (current_price - swing_12_low * (1.0 - config.WICK_BUFFER_PCT)) / max(current_price, 1e-9)
+        sm_long_sl_pct = round(min(max(sm_raw_sl_l, sl_atr_mult * atr14_pct, min_allowed_sl), max_allowed_sl), 4)
+        sm_long_wick_sl = config.round_price(current_price * (1.0 - sm_long_sl_pct))
 
         recent_wick_high = max(prev_closed_c["high"], active_sig_c["high"])
         raw_short_sl = config.round_price(recent_wick_high * (1.0 + config.WICK_BUFFER_PCT))
@@ -976,6 +1037,9 @@ class BinanceClient:
 
         true_short_sl_pct = round(min(max(raw_short_sl_pct, sl_atr_mult * atr14_pct, min_allowed_sl), max_allowed_sl), 4)
         short_wick_stop_loss = config.round_price(current_price * (1.0 + true_short_sl_pct))
+        sm_raw_sl_s = (swing_12_high * (1.0 + config.WICK_BUFFER_PCT) - current_price) / max(current_price, 1e-9)
+        sm_short_sl_pct = round(min(max(sm_raw_sl_s, sl_atr_mult * atr14_pct, min_allowed_sl), max_allowed_sl), 4)
+        sm_short_wick_sl = config.round_price(current_price * (1.0 + sm_short_sl_pct))
 
         ref_close_trend = closed_signal_c["close"]
         if ref_close_trend >= ema9 >= ema21:
@@ -1035,6 +1099,17 @@ class BinanceClient:
             "rsi": rsi,
             "ema9": ema9,
             "ema21": ema21,
+            "ema200": ema200,
+            "above_ema200": above_ema200,
+            "adx14": adx14,
+            "has_fvg_bull": has_fvg_bull,
+            "has_fvg_bear": has_fvg_bear,
+            "sm_bos_long": sm_bos_long,
+            "sm_bos_short": sm_bos_short,
+            "sm_long_sl_pct": sm_long_sl_pct,
+            "sm_long_wick_sl": sm_long_wick_sl,
+            "sm_short_sl_pct": sm_short_sl_pct,
+            "sm_short_wick_sl": sm_short_wick_sl,
             "trend": trend,
             "atr14_pct": atr14_pct,
             "candles": candles

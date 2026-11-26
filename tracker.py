@@ -103,8 +103,8 @@ class PortfolioTracker:
                 if not getattr(config, "ENABLE_CIRCUIT_BREAKER", False):
                     self.pause_until = 0.0
                     self.is_paused = False
-                raw_lev = int(state.get("current_leverage", getattr(config, "LEVERAGE", 15)))
-                self.current_leverage = raw_lev if 5 <= raw_lev <= 25 else getattr(config, "LEVERAGE", 15)
+                raw_lev = int(state.get("current_leverage", getattr(config, "LEVERAGE", 50)))
+                self.current_leverage = raw_lev if 5 <= raw_lev <= 100 else getattr(config, "LEVERAGE", 50)
                 print(f"✅ Портфель загружен: кэш ${self.cash:.2f}, открытых позиций: {len(self.open_positions)}, плечо: {self.current_leverage}x", flush=True)
         except Exception as e:
             print(f"⚠️ Ошибка чтения portfolio.json: {e}", flush=True)
@@ -146,7 +146,8 @@ class PortfolioTracker:
         groq_reason: str,
         leverage: int = config.LEVERAGE,
         atr_pct: float = 0.006,
-        risk_usd: float = 0.50
+        risk_usd: float = 0.50,
+        exit_plan: Optional[Dict[str, Any]] = None
     ) -> bool:
         """Открывает новую позицию с параметрами структурного стопа и ATR для Chandelier-трейлинга."""
         if symbol in self.open_positions:
@@ -183,6 +184,15 @@ class PortfolioTracker:
             "atr_pct": atr_pct,
             "tp1": tp1,
             "tp2": tp2,
+            "exit_plan": exit_plan or {
+                "profile": "STANDARD_3H",
+                "tp1_r": float(getattr(config, "TARGET_1_R", 1.50)),
+                "tp1_share": 0.45,
+                "tp1_lock_r": 0.30,
+                "tp2_r": 2.25,
+                "tp2_share": 0.25,
+                "tp2_lock_r": 1.15,
+            },
             "tp1_hit": False,
             "tp2_hit": False,
             "breakeven_set": False,
@@ -334,7 +344,8 @@ class PortfolioTracker:
             pos["notional_value"] = round(pos["margin_usdt"] * lev, 4)
             pos["coins_qty"] = round(pos["coins_qty"] * (1.0 - partial_pct), 6)
 
-            short_tag = f"TP1({int(round(partial_pct*100))}%)" if "TP1" in reason else ("TP2(30%)" if "TP2" in reason else f"Part({int(round(partial_pct*100))}%)")
+            init_pct = int(round((closed_margin / max(pos.get("initial_margin_usdt", closed_margin), 1e-9)) * 100))
+            short_tag = f"TP1({init_pct}%)" if "TP1" in reason else (f"TP2({init_pct}%)" if "TP2" in reason else f"Part({init_pct}%)")
             notes = pos.setdefault("partial_notes", [])
             notes.append(short_tag)
 
@@ -385,9 +396,11 @@ class PortfolioTracker:
         del self.open_positions[symbol]
 
         # Умная защита от тильта и серийных убытков:
-        # Околонулевой выход по Time-Stop (например -$0.04) не считается за аварийный стоп-лосс,
-        # а реальный стоп-лосс (<= -$0.20 или Structural Stop) активирует 3-часовой карантин монеты и Circuit Breaker!
-        is_full_stop = (total_realized <= -0.20) or ("Structural Stop" in full_reason)
+        # Околонулевой/TTL выход не считается за аварийный стоп-лосс,
+        # а реальный полный стоп (~>=1.5% депо или Structural Stop) активирует 90-мин карантин монеты!
+        full_stop_usd = max(0.20, self.get_portfolio_summary()["equity"] * 0.015)
+        is_non_stop_exit = ("Time-Stop" in full_reason) or ("TTL" in full_reason) or ("Cleanup" in full_reason)
+        is_full_stop = ("Structural Stop" in full_reason) or ((not is_non_stop_exit) and (total_realized <= -full_stop_usd))
         
         if is_full_stop:
             self.consecutive_losses += 1

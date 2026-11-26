@@ -194,38 +194,41 @@ with st.sidebar:
         st.rerun()
         
     st.divider()
-    st.markdown("### 🚀 Structural Rocket Hunter ($20)")
+    st.markdown(f"### 🚀 Alpha Hyper Cross (${int(config.INITIAL_BALANCE)})")
 
-    # Режим риск-профиля (Profit-Shield + Compounding Equity Risk Sizing)
+    # Режим риск-профиля (Cross-Margin 50x: 500% ROI на 10% ракеты за счет малого залога + жесткий % риск!)
     strategy_mode = st.radio(
-        "Профиль риск-менеджмента:",
+        "Профиль риск-менеджмента (Cross Margin):",
         [
-            "🛡️ Охотник за Ракетами — Profit-Shield (15x, риск 3.0% + Compounding)",
-            "🔥 Высокий Импульс (18x, риск 3.5% + A+ Boost)",
-            "🚀 Стандарт Проп (12x, риск 2.5% = ~$0.50)"
+            "🚀 Hyper Cross 50x (риск 5.5%, 6 слотов + 500 пар + FVG)",
+            "🔥 Cross Balanced 50x (риск 4.0%, 5 слотов — мин. просадка)",
+            "🛡️ Стандарт Проп (25x, риск 4.0%, 4 слота)"
         ],
         index=0
     )
     if "Стандарт" in strategy_mode:
-        default_lev = 12
-        config.RISK_PER_TRADE_PCT = 0.025
+        default_lev = 25
+        config.RISK_PER_TRADE_PCT = 0.040
+        config.MAX_CONCURRENT_POSITIONS = 4
         config.MIN_5M_VOLUME_SURGE_RATIO = 1.80
         config.MIN_CLOSE_STRENGTH = 0.66
         config.DAILY_LOSS_LIMIT = 99
-    elif "Высокий" in strategy_mode:
-        default_lev = 18
-        config.RISK_PER_TRADE_PCT = 0.035
+    elif "Balanced" in strategy_mode:
+        default_lev = 50
+        config.RISK_PER_TRADE_PCT = 0.040
+        config.MAX_CONCURRENT_POSITIONS = 5
         config.MIN_5M_VOLUME_SURGE_RATIO = 1.80
         config.MIN_CLOSE_STRENGTH = 0.66
         config.DAILY_LOSS_LIMIT = 99
     else:
-        default_lev = 15
-        config.RISK_PER_TRADE_PCT = 0.030
+        default_lev = 50
+        config.RISK_PER_TRADE_PCT = 0.055
+        config.MAX_CONCURRENT_POSITIONS = 6
         config.MIN_5M_VOLUME_SURGE_RATIO = 1.80
         config.MIN_CLOSE_STRENGTH = 0.66
         config.DAILY_LOSS_LIMIT = 99
 
-    lev_options = [10, 12, 15, 18, 20, 25]
+    lev_options = [10, 15, 20, 25, 35, 50, 75]
     if getattr(st.session_state, "_prev_mode", None) != strategy_mode:
         st.session_state["_prev_mode"] = strategy_mode
         portfolio.current_leverage = default_lev
@@ -233,8 +236,8 @@ with st.sidebar:
         portfolio.save()
 
     cur_lev = getattr(portfolio, "current_leverage", default_lev)
-    cur_idx = lev_options.index(cur_lev) if cur_lev in lev_options else 2
-    chosen_leverage = st.selectbox("⚡ Кредитное плечо (для новых сделок):", lev_options, index=cur_idx)
+    cur_idx = lev_options.index(cur_lev) if cur_lev in lev_options else lev_options.index(50)
+    chosen_leverage = st.selectbox("⚡ Кредитное плечо (Cross Margin):", lev_options, index=cur_idx)
 
     if chosen_leverage != getattr(portfolio, "current_leverage", None):
         portfolio.current_leverage = chosen_leverage
@@ -244,18 +247,21 @@ with st.sidebar:
 
     est_risk_usd = round(max(10.0, portfolio.get_portfolio_summary()["equity"]) * config.RISK_PER_TRADE_PCT, 2)
     st.text(f"Плечо входов: {portfolio.current_leverage}x | Риск 1R: ${est_risk_usd:.2f} ({config.RISK_PER_TRADE_PCT*100:.1f}%)")
-    st.text(f"Вход: Alpha RS vs BTC + 3H/80м Сжатие + RVOL ≥ {config.MIN_5M_VOLUME_SURGE_RATIO:.2f}x")
-    st.text(f"Anti-Rug Выход: 60% на {config.TARGET_1_R}R + 40% Parabolic Trail")
+    st.text(f"Слоты: до {config.MAX_CONCURRENT_POSITIONS} активных + {getattr(config, 'MAX_RISK_FREE_RUNNERS', 2)} безрисковых | TTL: {getattr(config, 'TTL_HOURS', 24)}ч")
+    st.text(f"Вход: Alpha RS vs BTC + 3H/80м Сжатие + FVG/EMA200 + RVOL ≥ {config.MIN_5M_VOLUME_SURGE_RATIO:.2f}x")
+    st.text(f"Anti-Rug Выход: Динамический TP1/TP2 + Parabolic Trail")
     st.text(f"Защита просадки: Half-Kelly при DD ≥ {int(config.DD_GUARD_THRESHOLD*100)}%")
     st.text(f"Лимит стопов: Макс {config.DAILY_LOSS_LIMIT} в день ({portfolio.daily_losses_count}/{config.DAILY_LOSS_LIMIT})")
-    st.text(f"Радар рынка: 🚀 {config.SCAN_TICKERS_LIMIT} пар Binance (MTF + Ликвидность)")
+    st.text(f"Радар рынка: 🚀 {config.SCAN_TICKERS_LIMIT} пар + новые листинги (MTF)")
     st.text(f"Модель Groq: {config.GROQ_PRIMARY_MODEL}")
     has_key = bool(config.GROQ_API_KEY)
     st.text(f"ИИ Статус: {'🟢 Активен (Groq Cloud)' if has_key else '🟡 Резервный (Institutional)'}")
 
     st.divider()
-    if st.button("🔄 Сбросить портфель к $20.00"):
+    if st.button(f"🔄 Сбросить портфель к ${config.INITIAL_BALANCE:.2f}"):
+        portfolio.initial_balance = config.INITIAL_BALANCE
         portfolio.cash = config.INITIAL_BALANCE
+        portfolio.peak_equity = config.INITIAL_BALANCE
         portfolio.open_positions.clear()
         portfolio.trade_history.clear()
         portfolio.symbol_lockouts.clear()
@@ -263,9 +269,9 @@ with st.sidebar:
         portfolio.daily_losses_count = 0
         portfolio.daily_loss_day = time.strftime('%Y-%m-%d', time.gmtime())
         portfolio.pause_until = 0.0
-        portfolio.current_leverage = getattr(config, "LEVERAGE", 12)
+        portfolio.current_leverage = getattr(config, "LEVERAGE", 25)
         portfolio.save()
-        st.success("Баланс сброшен до $20.00!")
+        st.success(f"Баланс сброшен до ${config.INITIAL_BALANCE:.2f}!")
         st.rerun()
 
     st.divider()
@@ -281,7 +287,7 @@ last_scan_info = getattr(portfolio, "last_scan_str", "Ожидание...")
 btc_regime_info = getattr(portfolio, "btc_regime_str", "🟡 Анализ Bitcoin...")
 active_mirror_info = binance_client.active_mirror_name.upper()
 st.caption(f"🌍 **Макро-щит (Защита от пролива/выноса BTC):** {btc_regime_info} | 🌐 Биржа: **{active_mirror_info}** | ⏱️ Аптайм сервера: **{format_uptime()}**")
-st.caption(f"Конвейер Alpha Rocket Hunter: Радар до {config.SCAN_TICKERS_LIMIT} крипто-фьючерсов (+ новые листинги) → 15m MTF + 3H/80м Пробой + Alpha RS vs BTC + RVOL ≥ {config.MIN_5M_VOLUME_SURGE_RATIO}x → ML + Groq AI → Anti-Rug 60% TP1 ({config.TARGET_1_R}R) + 40% Parabolic Trail | Режим: {'🧪 Paper Trading' if config.PAPER_TRADING else '⚡ Live Trading'} | Последний скан: {last_scan_info}")
+st.caption(f"Конвейер Alpha Rocket + SmartMoney FVG: Радар до {config.SCAN_TICKERS_LIMIT} крипто-фьючерсов (+ новые листинги) → 15m MTF + 3H/80м Пробой + BOS/FVG/ADX + Alpha RS vs BTC → ML + Groq AI → Динамический 3-Stage TP1/TP2 + Trail | Режим: {'🧪 Paper Trading' if config.PAPER_TRADING else '⚡ Live Trading'} | Последний скан: {last_scan_info}")
 
 # Оповещение и ручной сброс Circuit Breaker (если включен)
 if getattr(config, "ENABLE_CIRCUIT_BREAKER", False) and summary["circuit_breaker"]:
@@ -384,9 +390,13 @@ with tab_pos:
                     sl_pos = pos.get('wick_sl', 0.0) or 0.0
                     tp1_pos = pos.get('tp1', 0.0) or 0.0
                     tp2_pos = pos.get('tp2', 0.0) or 0.0
+                    ep_plan = pos.get('exit_plan') or {}
+                    tp1_tag = f"{int(ep_plan.get('tp1_share', 0.45)*100)}%@{ep_plan.get('tp1_r', 1.5)}R"
+                    tp2_tag = f"{int(ep_plan.get('tp2_share', 0.25)*100)}%@{ep_plan.get('tp2_r', 2.25)}R"
                     st.markdown(f"**{stop_label}:** `{fmt_price(sl_pos)}`")
-                    st.markdown(f"**TP1:** `{fmt_price(tp1_pos)}` | **TP2:** `{fmt_price(tp2_pos)}`")
-                    st.caption(be_badge)
+                    st.markdown(f"**TP1 ({tp1_tag}):** `{fmt_price(tp1_pos)}`")
+                    st.markdown(f"**TP2 ({tp2_tag}):** `{fmt_price(tp2_pos)}`")
+                    st.caption(f"{be_badge} • 🎯 {ep_plan.get('profile', 'DYNAMIC')}")
                 with col_e:
                     if st.button("Закрыть", key=f"close_{sym}"):
                         portfolio.close_position(sym, pos.get('current_price', 0.0), "Ручное закрытие из интерфейса")
@@ -621,11 +631,11 @@ with tab_shadow:
 # ------------------------------------------------------------------------------
 with tab_timemachine:
     st.subheader("🔬 Time Machine: Честный институциональный бэктест (Без заглядывания в будущее)")
-    st.markdown("""
-    **Честная проверка реальной логики Profit-Shield Rocket Hunter против старого скальпера (`$20` старт):**
+    st.markdown(f"""
+    **Честная проверка реальной логики Hyper Cross 50x (`${config.INITIAL_BALANCE:.0f}` старт, `50x` Cross, до 6 слотов) против старого скальпера:**
     * **Нулевой Lookahead Bias:** сигнал рассчитывается строго по закрытой свече `[t-1]`, вход по цене открытия следующей свечи `[t]`.
-    * **Реальные издержки биржи:** `0.05%` комиссия тейкера + `0.01%` проскальзывание на каждую сторону (`0.12%` на круг) и строгий учет `1 позиция = 1 сделка`.
-    * **4-Tier Profit-Lock Shield:** `Early BE` на `+0.60%`, `35%` на `1.20R` (min `0.90%`), Ratchet `+0.75%` на `+1.35%`, `30%` на `2.40R`, `35%` ранер по `2.2×ATR` + `20м` срез застоя + Smart `35м` Time-Stop.
+    * **Реальные издержки биржи:** `0.06%` комиссия тейкера + `0.06%` проскальзывание на круг (`0.12%`) и строгий учет `1 позиция = 1 сделка`.
+    * **Anti-Rug Rocket Harvest:** `60%` прибыли сразу в кэш на `1.65R` + стоп в `+0.35R` + `40%` безрисковый параболический трейл + `TTL 24ч`.
     """)
 
     if st.button("▶ Запустить честный аудит стратегий (Rocket Hunter vs Старый скальпер)", type="primary"):
@@ -635,15 +645,15 @@ with tab_timemachine:
             pre = precompute_indicators(cdata)
 
             configs = [
-                ("🚀 Anti-Rug Rocket Hunter (15x, 60%@1.65R + 40% Parabolic Trail)", dict(leverage=15, risk_pct=0.030, tp1_r=1.65, tp1_share=0.60)),
-                ("🔥 Anti-Rug High-Conviction (18x, Риск 3.5%, 60%@1.65R + Trail)", dict(leverage=18, risk_pct=0.035, tp1_r=1.65, tp1_share=0.60)),
-                ("🎯 Anti-Rug Fixed Target (15x, 100% на 1.70R до слива)", dict(leverage=15, risk_pct=0.030, tp1_r=1.70, tp1_share=1.00)),
+                ("🚀 Hyper Cross 50x ($100, 5.5% риск, 6 слотов + Dynamic TP1/TP2 + Trail)", dict(leverage=50, risk_pct=0.055, tp1_r=1.50, tp1_share=0.45)),
+                ("🔥 Balanced Cross 50x ($100, 4.0% риск, 5 слотов — мин. DD)", dict(leverage=50, risk_pct=0.040, tp1_r=1.50, tp1_share=0.45)),
+                ("🎯 Anti-Rug Fixed Target (100% на 1.70R до слива)", dict(leverage=50, risk_pct=0.050, tp1_r=1.70, tp1_share=1.00)),
                 ("❌ Старый 12-барный скальпер (Early BE + 35м Time-Stop)", dict(leverage=12, legacy_churn_mode=True)),
             ]
 
             rows = []
             for name, kw in configs:
-                res = simulate_strategy(all_data=cdata, initial_balance=20.0, precomputed=pre, **kw)
+                res = simulate_strategy(all_data=cdata, initial_balance=config.INITIAL_BALANCE, precomputed=pre, **kw)
                 rows.append({
                     "Конфигурация": name,
                     "Итог ($)": f"${res['final_balance']:.2f}",
