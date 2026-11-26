@@ -31,8 +31,8 @@ class BinanceClient:
         # Персональный rate-pacer для каждого зеркала (полностью исключает всплески HTTP 429 на shared IP Render!)
         self._mirror_min_interval: Dict[str, float] = {
             "fapi": 0.14,    # ~7 req/s
-            "bybit": 0.08,   # ~12 req/s (лимит Bybit 120 req/s)
-            "gate": 0.07,    # ~14 req/s (лимит Gate 900 req/s)
+            "bybit": 0.14,   # ~7 req/s (исключает retCode 10006 даже при плотных сканах 180 пар)
+            "gate": 0.08,    # ~12 req/s (лимит Gate 900 req/s)
             "bitget": 0.26,  # ~3.8 req/s (лимит Bitget 20 req/s на общий IP)
             "vision": 0.18,  # ~5.5 req/s
         }

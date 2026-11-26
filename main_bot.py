@@ -13,11 +13,41 @@ except Exception:
 
 import asyncio
 import time
+import aiohttp
 from binance_client import binance_client
 from scanner import market_scanner
 from exit_manager import exit_manager
 from tracker import portfolio
 import config
+
+BOT_START_TIME = time.time()
+
+def format_uptime() -> str:
+    sec = int(max(0, time.time() - BOT_START_TIME))
+    h, rem = divmod(sec, 3600)
+    m, _ = divmod(rem, 60)
+    return f"{h}ч {m:02d}м"
+
+async def keepalive_loop():
+    """
+    Анти-сон для Render: периодически пингует внешний health-эндпоинт сервиса,
+    чтобы Render не усыплял контейнер при закрытой вкладке браузера.
+    """
+    ext_url = (os.getenv("RENDER_EXTERNAL_URL") or "").strip().rstrip("/")
+    if not ext_url:
+        return
+    health_url = f"{ext_url}/_stcore/health"
+    print(f"🛰️ [KEEPALIVE] Авто-пинг анти-сна активирован: {health_url} (каждые 8 мин)", flush=True)
+    await asyncio.sleep(60)
+    while True:
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as s:
+                async with s.get(health_url) as resp:
+                    if resp.status != 200:
+                        print(f"⚠️ [KEEPALIVE] Ответ {resp.status} от {health_url}", flush=True)
+        except Exception as e:
+            print(f"⚠️ [KEEPALIVE] Ошибка пинга: {type(e).__name__}", flush=True)
+        await asyncio.sleep(480)
 
 async def heartbeat_loop():
     """Периодический отчет в логи каждые 30 секунд."""
@@ -27,7 +57,7 @@ async def heartbeat_loop():
             live_u = getattr(portfolio, "last_universe_count", 0)
             mirror_tag = binance_client.active_mirror_name
             print(
-                f"💓 [HEARTBEAT] Бот активен [{mirror_tag}] | Equity: ${summary['equity']:.2f} (Cash: ${summary['cash']:.2f}) | "
+                f"💓 [HEARTBEAT] Бот активен [{mirror_tag}] (Uptime: {format_uptime()}) | Equity: ${summary['equity']:.2f} (Cash: ${summary['cash']:.2f}) | "
                 f"Позиций: {summary['open_positions_count']}/{summary['max_positions']} | "
                 f"Радар: {live_u} пар (всего проходов: {portfolio.funnel_stats['universe']}) | "
                 f"Оценок Groq: {portfolio.funnel_stats['groq_evaluated']}",
@@ -62,7 +92,8 @@ async def start_autonomous_bot():
         await asyncio.gather(
             market_scanner.run_loop(),
             exit_manager.run_loop(),
-            heartbeat_loop()
+            heartbeat_loop(),
+            keepalive_loop()
         )
     except asyncio.CancelledError:
         print("🛑 Фоновый бот остановлен.", flush=True)

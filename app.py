@@ -20,10 +20,25 @@ import asyncio
 import pandas as pd
 from tracker import portfolio
 import config
-from main_bot import run_in_background
+from main_bot import run_in_background, format_uptime
+from binance_client import binance_client
 from scanner import market_scanner
 from obsidian_vault import obsidian_vault
 from ml_engine import ml_engine
+
+def fmt_price(val: float) -> str:
+    """Точное форматирование цены под любой номинал (от $0.000012 мемов до $90000 BTC)."""
+    if val is None or val <= 0:
+        return "$0.0000"
+    if val < 0.001:
+        return f"${val:.7f}"
+    if val < 0.1:
+        return f"${val:.6f}"
+    if val < 1.0:
+        return f"${val:.5f}"
+    if val < 100.0:
+        return f"${val:.4f}"
+    return f"${val:.2f}"
 
 # ==============================================================================
 # НАСТРОЙКА СТРАНИЦЫ
@@ -36,11 +51,14 @@ st.set_page_config(
 )
 
 # ==============================================================================
-# ЗАПУСК ФОНОВОГО БОТА (РОВНО 1 РАЗ НА СЕССИЮ СЕРВЕРА)
+# ЗАПУСК ФОНОВОГО БОТА (РОВНО 1 РАЗ НА СЕССИЮ СЕРВЕРА, ЕСЛИ НЕ ЗАПУЩЕН ИЗ boot.py)
 # ==============================================================================
 @st.cache_resource
 def initialize_bot():
-    """Запускает торгового бота в фоне ровно один раз при старте сервера."""
+    """Запускает торгового бота в фоне ровно один раз, если сервер запущен напрямую через streamlit run."""
+    if os.environ.get("BOT_ALREADY_STARTED") == "1":
+        return "external_boot"
+    os.environ["BOT_ALREADY_STARTED"] = "1"
     thread = threading.Thread(target=run_in_background, daemon=True)
     thread.start()
     print("🚀 [STARTUP] Фоновый поток торгового бота запущен из Streamlit!", flush=True)
@@ -261,8 +279,9 @@ summary = portfolio.get_portfolio_summary()
 st.title("🚀 Binance Autonomous Groq Trader (Rocket Hunter Engine)")
 last_scan_info = getattr(portfolio, "last_scan_str", "Ожидание...")
 btc_regime_info = getattr(portfolio, "btc_regime_str", "🟡 Анализ Bitcoin...")
-st.caption(f"🌍 **Макро-щит (Защита от пролива/выноса BTC):** {btc_regime_info}")
-st.caption(f"Конвейер Profit-Shield Rocket Hunter: Радар {config.SCAN_TICKERS_LIMIT} пар Binance → 15m MTF + Пробой 12 баров + ATR ≥ 0.40% + RVOL ≥ {config.MIN_5M_VOLUME_SURGE_RATIO}x → ML + Groq AI → Early BE +0.70% / 45% TP1 / 30% TP2 / 25% ATR Трейл | Режим: {'🧪 Paper Trading' if config.PAPER_TRADING else '⚡ Live Trading'} | Последний скан: {last_scan_info}")
+active_mirror_info = binance_client.active_mirror_name.upper()
+st.caption(f"🌍 **Макро-щит (Защита от пролива/выноса BTC):** {btc_regime_info} | 🌐 Биржа: **{active_mirror_info}** | ⏱️ Аптайм сервера: **{format_uptime()}**")
+st.caption(f"Конвейер Alpha Rocket Hunter: Радар до {config.SCAN_TICKERS_LIMIT} крипто-фьючерсов (+ новые листинги) → 15m MTF + 3H/80м Пробой + Alpha RS vs BTC + RVOL ≥ {config.MIN_5M_VOLUME_SURGE_RATIO}x → ML + Groq AI → Anti-Rug 60% TP1 ({config.TARGET_1_R}R) + 40% Parabolic Trail | Режим: {'🧪 Paper Trading' if config.PAPER_TRADING else '⚡ Live Trading'} | Последний скан: {last_scan_info}")
 
 # Оповещение и ручной сброс Circuit Breaker (если включен)
 if getattr(config, "ENABLE_CIRCUIT_BREAKER", False) and summary["circuit_breaker"]:
@@ -350,12 +369,12 @@ with tab_pos:
                     mg_pos = pos.get('margin_usdt', 0.0) or 0.0
                     init_mg = pos.get('initial_margin_usdt', mg_pos) or mg_pos
                     if init_mg > mg_pos + 0.05:
-                        st.caption(f"Вход: ${ep_pos:.4f} • В сделке: ${mg_pos:.2f} (исходная: ${init_mg:.2f})")
+                        st.caption(f"Вход: {fmt_price(ep_pos)} • В сделке: ${mg_pos:.2f} (исходная: ${init_mg:.2f})")
                     else:
-                        st.caption(f"Вход: ${ep_pos:.4f} • Маржа: ${mg_pos:.2f}")
+                        st.caption(f"Вход: {fmt_price(ep_pos)} • Маржа: ${mg_pos:.2f}")
                 with col_b:
                     cp_pos = pos.get('current_price', 0.0) or 0.0
-                    st.metric("Текущая цена", f"${cp_pos:.4f}")
+                    st.metric("Текущая цена", fmt_price(cp_pos))
                 with col_c:
                     pnl_usd = pos.get('unrealized_pnl', 0.0) or 0.0
                     pnl_pct = pos.get('pnl_pct', 0.0) or 0.0
@@ -365,8 +384,8 @@ with tab_pos:
                     sl_pos = pos.get('wick_sl', 0.0) or 0.0
                     tp1_pos = pos.get('tp1', 0.0) or 0.0
                     tp2_pos = pos.get('tp2', 0.0) or 0.0
-                    st.markdown(f"**{stop_label}:** `${sl_pos:.4f}`")
-                    st.markdown(f"**TP1:** `${tp1_pos:.4f}` | **TP2:** `${tp2_pos:.4f}`")
+                    st.markdown(f"**{stop_label}:** `{fmt_price(sl_pos)}`")
+                    st.markdown(f"**TP1:** `{fmt_price(tp1_pos)}` | **TP2:** `{fmt_price(tp2_pos)}`")
                     st.caption(be_badge)
                 with col_e:
                     if st.button("Закрыть", key=f"close_{sym}"):
@@ -399,8 +418,8 @@ with tab_pos:
                 with rc2:
                     ep_t = t.get('entry_price', 0.0) or 0.0
                     xp_t = t.get('exit_price', 0.0) or 0.0
-                    st.markdown(f"Вход: **${ep_t:.4f}**")
-                    st.markdown(f"Выход: **${xp_t:.4f}**")
+                    st.markdown(f"Вход: **{fmt_price(ep_t)}**")
+                    st.markdown(f"Выход: **{fmt_price(xp_t)}**")
                 with rc3:
                     st.markdown(f"<span style='color: {pnl_color}; font-size: 17px; font-weight: bold;'>{r_pnl:+.2f} USDT ({r_roi:+.1f}%)</span>", unsafe_allow_html=True)
                     init_mg_t = t.get('initial_margin_usdt', t.get('margin_usdt', 0.0)) or 0.0
