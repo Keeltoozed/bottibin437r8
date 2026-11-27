@@ -108,6 +108,9 @@ def precompute_indicators(data: Dict[str, List[Dict[str, float]]]) -> Dict[str, 
         ema63 = _calc_ema(c, 63)
         ema150 = _calc_ema(c, 150)
         ema200 = _calc_ema(c, 200)
+        macd_l = _calc_ema(c, 12) - _calc_ema(c, 26)
+        macd_s = _calc_ema(macd_l, 9)
+        macd_h = macd_l - macd_s
 
         tr = np.empty(n)
         tr[0] = h[0] - l[0]
@@ -168,6 +171,7 @@ def precompute_indicators(data: Dict[str, List[Dict[str, float]]]) -> Dict[str, 
         ind[sym] = {
             "t": t, "o": o, "h": h, "l": l, "c": c, "qv": qv, "vol_ma20": vol_ma20, "min_qv10": min_qv10,
             "ema9": ema9, "ema21": ema21, "ema50": ema50, "ema27": ema27, "ema63": ema63, "ema150": ema150, "ema200": ema200,
+            "macd_l": macd_l, "macd_s": macd_s, "macd_h": macd_h,
             "atr_pct": atr_pct, "adx": adx, "fvg_b": fvg_b, "fvg_s": fvg_s,
             "rvol": rvol, "v3_surge": v3_surge, "qvol_24h": qvol_24h,
             "rsi": rsi, "ext": ext, "ret_3h": ret_3h,
@@ -503,11 +507,15 @@ def simulate_strategy(
                     ema9, ema21, ema50 = d["ema9"][k], d["ema21"][k], d["ema50"][k]
                     ema27, ema63, ema150, ema200 = d["ema27"][k], d["ema63"][k], d["ema150"][k], d["ema200"][k]
                     rsi, adx = d["rsi"][k], d["adx"][k]
+                    macd_b = d["macd_l"][k] > d["macd_s"][k] and d["macd_h"][k] > d["macd_h"][k - 1]
+                    macd_s = d["macd_l"][k] < d["macd_s"][k] and d["macd_h"][k] < d["macd_h"][k - 1]
                     pct_15m = (cl - d["c"][k - 3]) / d["c"][k - 3] * 100.0
                     alpha_5m = pct_5m - bp5
                     alpha_15m = pct_15m - bp15
-                    mtf_l = (cl >= ema63 * 0.998 and ema27 >= ema63 * 0.998 and ema63 >= ema150 * 0.995)
-                    mtf_s = (cl <= ema63 * 1.002 and ema27 <= ema63 * 1.002 and ema63 <= ema150 * 1.005)
+                    mtf_l = (cl >= ema63 * 0.998 and ema27 >= ema63 * 0.998 and (ema63 >= ema150 * 0.995 or (big_runner_mode and macd_b and adx >= 20.0 and d["fvg_b"][k])))
+                    mtf_s = (cl <= ema63 * 1.002 and ema27 <= ema63 * 1.002 and (ema63 <= ema150 * 1.005 or (big_runner_mode and macd_s and adx >= 20.0 and d["fvg_s"][k])))
+                    eff_btc_l = btc_bull_m or (big_runner_mode and rvol >= 2.80 and alpha_5m >= 1.50)
+                    eff_btc_s = btc_bear_m or (big_runner_mode and rvol >= 2.80 and alpha_5m <= -1.50)
                     min_imp = max(0.55, atr_p * 85.0)
                     sq_rng = (d["h16"][k] - d["l16"][k]) / max(d["l16"][k], 1e-9)
 
@@ -526,13 +534,13 @@ def simulate_strategy(
                     if rvol >= req_rvol and d["ext"][k] <= 0.048 and d["ext"][k - 3] <= 0.028:
                         brk_l = (cl > d["h36"][k]) or (sq_rng <= 0.065 and cl > d["h16"][k] and rvol >= max(2.0, req_rvol))
                         if (
-                            btc_bull_m and wall_ok_l and brk_l and mtf_l and cl >= ema50 * 0.996 and pct_5m >= min_imp
+                            eff_btc_l and wall_ok_l and brk_l and mtf_l and cl >= ema50 * 0.996 and pct_5m >= min_imp
                             and alpha_5m >= 0.80 and alpha_15m >= 1.00
                             and clv_l >= req_clv and uw <= 0.26 and cl > ema9 >= ema21 * 0.998
                             and 48.0 <= rsi <= 86.0 and d["ret_3h"][k] <= 0.20 and not btc_dump and not btc_spike
                         ):
                             sl = min(max((ep - min(lo, d["l"][k - 1]) * 0.9985) / ep, _sl_atr_m * atr_p, _sl_floor), _sl_cap)
-                            fvg = bool(d["fvg_b"][k] and cl >= ema200 and adx >= 20.0)
+                            fvg = bool(d["fvg_b"][k] and adx >= 20.0)
                             t1 = (1.62 if fvg else (1.35 if sl >= 0.024 else 1.46)) if big_runner_mode else tp1_r
                             t2 = (2.55 if fvg else (2.00 if sl >= 0.024 else 2.21))
                             picked = (rvol * alpha_5m * clv_l * (1.25 if fvg else 1.0), "LONG", ep, sl, t1, t2)
@@ -540,7 +548,7 @@ def simulate_strategy(
                         pump_6h = (d["h72"][k] - d["l72"][k]) / max(d["l72"][k], 1e-9)
                         off_hi = (d["h72"][k] - cl) / max(d["h72"][k], 1e-9)
                         is_rug_s = (pump_6h >= 0.15 and 0.03 <= off_hi <= 0.22 and cl < d["l16"][k] and cl < ema50 and rvol >= max(2.0, req_rvol))
-                        brk_s = ((cl < d["l36"][k]) or (sq_rng <= 0.065 and cl < d["l16"][k] and rvol >= max(2.0, req_rvol))) and mtf_s and wall_ok_s and btc_bear_m
+                        brk_s = ((cl < d["l36"][k]) or (sq_rng <= 0.065 and cl < d["l16"][k] and rvol >= max(2.0, req_rvol))) and mtf_s and wall_ok_s and eff_btc_s
                         if not picked and (
                             (brk_s or is_rug_s) and cl <= ema50 * 1.004 and pct_5m <= -min_imp
                             and alpha_5m <= -0.80 and alpha_15m <= -1.00
@@ -548,24 +556,26 @@ def simulate_strategy(
                             and 14.0 <= rsi <= 52.0 and d["ret_3h"][k] >= -0.20 and not btc_pump and not btc_flush
                         ):
                             sl = min(max((max(hi, d["h"][k - 1]) * 1.0015 - ep) / ep, _sl_atr_m * atr_p, _sl_floor), _sl_cap)
-                            fvg = bool(d["fvg_s"][k] and cl <= ema200 and adx >= 20.0)
+                            fvg = bool(d["fvg_s"][k] and adx >= 20.0)
                             t1 = (1.25 if is_rug_s else (1.62 if fvg else (1.35 if sl >= 0.024 else 1.46))) if big_runner_mode else tp1_r
                             t2 = (1.95 if is_rug_s else (2.55 if fvg else (2.00 if sl >= 0.024 else 2.21)))
                             picked = (rvol * abs(alpha_5m) * clv_s * (1.25 if fvg else 1.0), "SHORT", ep, sl, t1, t2)
 
-                    if big_runner_mode and not picked and adx >= 20.0 and rvol >= (req_rvol if is_night else 1.50) and d["ext"][k] <= 0.028:
-                        if btc_bull_m and wall_ok_l and mtf_l and not btc_dump and not btc_spike and cl > ema200 and d["fvg_b"][k] and cl > d["h16"][k] and alpha_5m >= 0.65 and alpha_15m >= 0.90 and clv_l >= 0.72 and uw <= 0.22 and 52.0 <= rsi <= 76.0:
+                    if big_runner_mode and not picked and adx >= 20.0 and rvol >= (req_rvol if is_night else 1.50) and d["ext"][k] <= 0.032:
+                        sm_htf_l = mtf_l or (cl >= ema63 * 0.998 and macd_b)
+                        sm_htf_s = mtf_s or (cl <= ema63 * 1.002 and macd_s)
+                        if eff_btc_l and wall_ok_l and sm_htf_l and not btc_dump and not btc_spike and d["fvg_b"][k] and cl > d["h16"][k] and alpha_5m >= 0.65 and alpha_15m >= 0.90 and clv_l >= 0.70 and uw <= 0.24 and 50.0 <= rsi <= 78.0:
                             sl = min(max((ep - d["l12"][k] * 0.9985) / ep, _sl_atr_m * atr_p, _sl_floor), _sl_cap)
-                            picked = (rvol * alpha_5m * clv_l * 0.85, "LONG", ep, sl, 1.62, 2.55)
-                        elif btc_bear_m and wall_ok_s and mtf_s and not btc_pump and not btc_flush and cl < ema200 and d["fvg_s"][k] and cl < d["l16"][k] and alpha_5m <= -0.65 and alpha_15m <= -0.90 and clv_s >= 0.72 and lw <= 0.22 and 24.0 <= rsi <= 48.0:
+                            picked = (rvol * alpha_5m * clv_l * 0.90, "LONG", ep, sl, 1.62, 2.55)
+                        elif eff_btc_s and wall_ok_s and sm_htf_s and not btc_pump and not btc_flush and d["fvg_s"][k] and cl < d["l16"][k] and alpha_5m <= -0.65 and alpha_15m <= -0.90 and clv_s >= 0.70 and lw <= 0.24 and 22.0 <= rsi <= 50.0:
                             sl = min(max((d["h12"][k] * 1.0015 - ep) / ep, _sl_atr_m * atr_p, _sl_floor), _sl_cap)
-                            picked = (rvol * abs(alpha_5m) * clv_s * 0.85, "SHORT", ep, sl, 1.62, 2.55)
+                            picked = (rvol * abs(alpha_5m) * clv_s * 0.90, "SHORT", ep, sl, 1.62, 2.55)
 
                     if picked:
                         cands.append((picked[0], sym, picked[1], picked[2], picked[3], picked[4], picked[5]))
 
             cands.sort(reverse=True)
-            for score, sym, side, ep, sl_dist, t1_r_v, t2_r_v in cands[:4]:
+            for score, sym, side, ep, sl_dist, t1_r_v, t2_r_v in cands[:10]:
                 at_r_now = [p for p in open_pos.values() if not p["tp1_hit"]]
                 if len(at_r_now) >= max_at_risk or len(open_pos) >= max_slots:
                     break

@@ -11,6 +11,8 @@ GROQ_PRIMARY_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b").strip()
 GROQ_FALLBACK_MODEL = os.getenv("GROQ_MODEL_FALLBACK", "openai/gpt-oss-20b").strip()
 GROQ_RPM_LIMIT = int(os.getenv("GROQ_RPM_LIMIT", "25"))  # Безопасный лимит Groq Free Tier (до 30 RPM)
 GROQ_MIN_CONFIDENCE = float(os.getenv("GROQ_MIN_CONFIDENCE", "0.65"))  # 65% минимальная уверенность ИИ
+# Входить в КАЖДЫЙ математически валидный сигнал ракеты/Smart Money (Groq пишет тезис, но НЕ блокирует ранние развороты 3/7 со дна ниже EMA200!):
+ENTER_ALL_QUANT_SIGNALS = os.getenv("ENTER_ALL_QUANT_SIGNALS", "true").lower() == "true"
 
 # Диапазоны RSI для структурных пробоев (Momentum Ignition):
 # На свежем пробое многочасовой базы RSI закономерно выходит в 70-85 (это импульс, а не разворот!)

@@ -296,7 +296,11 @@ class MarketScanner:
                         not analysis.get("breakout_failed_long", False) and
                         config.STOP_LOSS_MIN_PCT <= sl_long_dist <= config.STOP_LOSS_MAX_PCT
                     )
-                    is_long = tech_long and btc_bull_5m and not btc_regime.get("is_dumping", False) and not btc_regime.get("is_spike_up", False)
+                    indep_long_ok = (surge >= 2.80 and alpha_5m >= 1.50)
+                    indep_short_ok = (surge >= 2.80 and alpha_5m <= -1.50)
+                    eff_btc_l = btc_bull_5m or indep_long_ok
+                    eff_btc_s = btc_bear_5m or indep_short_ok
+                    is_long = tech_long and eff_btc_l and not btc_regime.get("is_dumping", False) and not btc_regime.get("is_spike_up", False)
 
                     tech_short = (
                         config.ENABLE_SHORT and
@@ -320,26 +324,29 @@ class MarketScanner:
                         not analysis.get("breakout_failed_short", False) and
                         config.STOP_LOSS_MIN_PCT <= sl_short_dist <= config.STOP_LOSS_MAX_PCT
                     )
-                    is_short = tech_short and (btc_bear_5m or brk_type == "RUG_SHORT") and not btc_regime.get("is_pumping", False) and not btc_regime.get("is_flush_down", False)
+                    is_short = tech_short and (eff_btc_s or brk_type == "RUG_SHORT") and not btc_regime.get("is_pumping", False) and not btc_regime.get("is_flush_down", False)
 
-                    # SMART MONEY FVG + BOS + EMA200 + ADX >= 20 (для 5m режима)
+                    # SMART MONEY FVG + BOS + MACD + ADX >= 20 (включая ранние V-развороты 3/7 со дна ниже EMA200, как #MON!)
                     is_sm_fvg = False
                     if (not is_long and not is_short) and getattr(config, "ENABLE_SM_FVG_ENTRY", True):
                         adx14_val = float(analysis.get("adx14", 0.0) or 0.0)
                         sm_long_sl = float(analysis.get("sm_long_sl_pct", sl_long_dist) or sl_long_dist)
                         sm_short_sl = float(analysis.get("sm_short_sl_pct", sl_short_dist) or sl_short_dist)
                         sm_min_rv = eff_min_rvol if is_dead_night else 1.50
+                        ema63_val = float(analysis.get("ema63", sig_close) or sig_close)
+                        sm_htf_l = is_mtf_long or (sig_close >= ema63_val * 0.998 and bool(analysis.get("macd_bull", False)))
+                        sm_htf_s = is_mtf_short or (sig_close <= ema63_val * 1.002 and bool(analysis.get("macd_bear", False)))
                         sm_tech_l = (
                             analysis.get("sm_bos_long", False) and
                             anti_wall_long and surge >= sm_min_rv and
                             vol_floor_ok and atr_pct >= min_atr_pct and v3_surge >= min_v3 and
-                            adx14_val >= 20.0 and is_mtf_long and ema21_ext <= 0.028 and
+                            adx14_val >= 20.0 and sm_htf_l and ema21_ext <= 0.032 and
                             alpha_5m >= 0.65 and alpha_15m >= 0.90 and
-                            clv_long >= 0.72 and upper_wick <= 0.22 and
-                            52.0 <= rsi <= 76.0 and pct_5m <= max_spike_5m and analysis.get("live_drift_long_pct", 0.0) <= config.MAX_LIVE_DRIFT_PCT and
+                            clv_long >= 0.70 and upper_wick <= 0.24 and
+                            50.0 <= rsi <= 78.0 and pct_5m <= max_spike_5m and analysis.get("live_drift_long_pct", 0.0) <= config.MAX_LIVE_DRIFT_PCT and
                             config.STOP_LOSS_MIN_PCT <= sm_long_sl <= config.STOP_LOSS_MAX_PCT
                         )
-                        if sm_tech_l and btc_bull_5m and not btc_regime.get("is_dumping", False) and not btc_regime.get("is_spike_up", False):
+                        if sm_tech_l and eff_btc_l and not btc_regime.get("is_dumping", False) and not btc_regime.get("is_spike_up", False):
                             is_long = True
                             is_sm_fvg = True
                             brk_type = "SM_FVG"
@@ -352,13 +359,13 @@ class MarketScanner:
                                 analysis.get("sm_bos_short", False) and
                                 anti_wall_short and surge >= sm_min_rv and
                                 vol_floor_ok and atr_pct >= min_atr_pct and v3_surge >= min_v3 and
-                                adx14_val >= 20.0 and is_mtf_short and ema21_ext <= 0.028 and
+                                adx14_val >= 20.0 and sm_htf_s and ema21_ext <= 0.032 and
                                 alpha_5m <= -0.65 and alpha_15m <= -0.90 and
-                                clv_short >= 0.72 and lower_wick <= 0.22 and
-                                24.0 <= rsi <= 48.0 and pct_5m >= -max_spike_5m and analysis.get("live_drift_short_pct", 0.0) <= config.MAX_LIVE_DRIFT_PCT and
+                                clv_short >= 0.70 and lower_wick <= 0.24 and
+                                22.0 <= rsi <= 50.0 and pct_5m >= -max_spike_5m and analysis.get("live_drift_short_pct", 0.0) <= config.MAX_LIVE_DRIFT_PCT and
                                 config.STOP_LOSS_MIN_PCT <= sm_short_sl <= config.STOP_LOSS_MAX_PCT
                             )
-                            if sm_tech_s and btc_bear_5m and not btc_regime.get("is_pumping", False) and not btc_regime.get("is_flush_down", False):
+                            if sm_tech_s and eff_btc_s and not btc_regime.get("is_pumping", False) and not btc_regime.get("is_flush_down", False):
                                 is_short = True
                                 is_sm_fvg = True
                                 brk_type = "SM_FVG"
@@ -528,16 +535,23 @@ class MarketScanner:
                     flush=True
                 )
 
-        # 5. ОТБОР ТОП-4 КАНДИДАТОВ ЗА ПРОХОД ДЛЯ GROQ AI (ловит несколько независимых ракет на одном баре до 8 слотов!)
-        candidates_to_eval = all_scored[:4]
+        # 5. ОТБОР ВСЕХ АКТИВНЫХ СИГНАЛОВ ЗА ПРОХОД (до 10 за один 5m бар, заполняя все 15 слотов!)
+        candidates_to_eval = all_scored[:10]
 
-        # 6. GROQ SOFT GATE & RISK-BASED POSITION SIZING
+        # 6. GROQ ANALYTICS & ENTER-ALL EXECUTION ("Заходим в КАЖДЫЙ сигнал формулы, включая ранние 3/7 ракеты!")
         for ctx in candidates_to_eval:
             sym = ctx["symbol"]
             cand_side = ctx.get("candidate_side", "LONG")
             portfolio.funnel_stats["groq_evaluated"] += 1
 
             approved, groq_eval = await groq_engine.evaluate_setup(ctx)
+            if not approved and getattr(config, "ENTER_ALL_QUANT_SIGNALS", True):
+                approved = True
+                expected_dec = "BUY" if cand_side == "LONG" else "SHORT"
+                groq_eval["decision"] = expected_dec
+                groq_eval["confidence"] = max(float(groq_eval.get("confidence", 0.0) or 0.0), 0.72)
+                raw_rsn = str(groq_eval.get("reason") or "").strip()
+                groq_eval["reason"] = f"[Auto-Enter All Signals] {raw_rsn}" if raw_rsn else "Авто-вход по формуле Smart Money / Rocket (все сигналы в работе)"
 
             entry_p = ctx["current_price"]
             sl_dist_pct_dyn = ctx.get("sl_pct_distance", 0.01) if cand_side == "LONG" else ctx.get("short_sl_dist", 0.01)

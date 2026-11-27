@@ -1174,12 +1174,16 @@ class BinanceClient:
         else:
             breakout_type = "WATCH"
 
-        # Детектор Smart Money (16b BOS + недавний FVG + тренд EMA200 + ADX >= 20 + MACD подтверждение на 15m!)
+        # Детектор Smart Money + ранних разворотов со дна ("3/7 как #MON": 16b BOS + FVG + MACD + ADX>=20 выше EMA63 даже ДО переворота медленных EMA150/EMA200!)
         swing_12_slice = closed_candles[-13:-1] if len(closed_candles) > 12 else closed_candles[:-1]
         swing_12_low = min(c["low"] for c in swing_12_slice)
         swing_12_high = max(c["high"] for c in swing_12_slice)
-        sm_bos_long = (sig_cl > sq_high) and has_fvg_bull and above_ema200 and (adx14 >= 20.0) and (surge_ratio >= 1.50)
-        sm_bos_short = (sig_cl < sq_low) and has_fvg_bear and (not above_ema200) and (adx14 >= 20.0) and (surge_ratio >= 1.50)
+        if sig_cl >= ema63 * 0.998 and ema27 >= ema63 * 0.998 and has_fvg_bull and macd_bull and adx14 >= 20.0:
+            is_mtf_long_ok = True
+        if sig_cl <= ema63 * 1.002 and ema27 <= ema63 * 1.002 and has_fvg_bear and macd_bear and adx14 >= 20.0:
+            is_mtf_short_ok = True
+        sm_bos_long = (sig_cl > sq_high) and has_fvg_bull and (above_ema200 or (sig_cl >= ema63 * 0.998 and macd_bull)) and (adx14 >= 20.0) and (surge_ratio >= 1.50)
+        sm_bos_short = (sig_cl < sq_low) and has_fvg_bear and ((not above_ema200) or (sig_cl <= ema63 * 1.002 and macd_bear)) and (adx14 >= 20.0) and (surge_ratio >= 1.50)
 
         # 15m SMART MONEY 5/7 CONFLUENCE ENGINE (WR 70%, PF 2.02 на Bybit 7D и 8/8 исторических сплитов!):
         # 1. BOS 16 баров (4ч на 15m), 2. HTF EMA200, 3. EMA9 >= EMA21, 4. MACD импульс, 5. ADX>=20 + RSI, + бонусы FVG/ADX24/RVOL2.0 (>= 5/7)
