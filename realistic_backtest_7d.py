@@ -407,7 +407,7 @@ def simulate_strategy(
                 if idx is None or idx < 160 or idx < lockouts.get(sym, 0):
                     continue
                 k = idx - 1
-                if d["qvol_24h"][k] < 15_000_000.0:
+                if d["qvol_24h"][k] < 500_000.0:
                     continue
                 cl, lo, hi, op = d["c"][k], d["l"][k], d["h"][k], d["o"][k]
                 pct_5m = (cl - d["c"][k - 1]) / d["c"][k - 1] * 100.0
@@ -431,7 +431,7 @@ def simulate_strategy(
                     is_night = big_runner_mode and (dt_hr >= 21 or dt_hr < 1)
                     req_rvol = 2.10 if is_night else 1.80
                     req_clv = 0.72 if is_night else 0.66
-                    if atr_p < 0.0025 or d["vol_ma20"][k] < 15000.0 or rvol < req_rvol or d["v3_surge"][k] < 1.10:
+                    if atr_p < 0.0025 or d["vol_ma20"][k] < 1500.0 or rvol < req_rvol or d["v3_surge"][k] < 1.10:
                         continue
                     if big_runner_mode and (d["qv"][k] < 8000.0 or d["min_qv10"][k] < 600.0):
                         continue
@@ -488,7 +488,7 @@ def simulate_strategy(
                         cands.append((rvol * abs(alpha_5m) * clv_s, sym, "SHORT", ep, sl))
 
             cands.sort(reverse=True)
-            for score, sym, side, ep, sl_dist in cands[:1]:
+            for score, sym, side, ep, sl_dist in cands[:4]:
                 cur_eq = max(10.0, cash + sum(p["mg"] for p in open_pos.values()))
                 cur_dd = (peak_eq - cur_eq) / peak_eq if peak_eq > 0 else 0.0
                 dd_mult = 0.75 if cur_dd >= 0.20 else 1.0
@@ -561,6 +561,360 @@ def simulate_strategy(
         "max_drawdown_pct": round(max_dd * 100.0, 1),
         "profit_factor": pf,
         "expectancy_r": exp_r,
+        "total_commission": round(total_comm, 2),
+        "winning_days": win_days,
+        "losing_days": loss_days,
+        "daily_breakdown": daily_rows,
+    }
+
+
+def get_honest_alt_7d_data() -> Dict[str, List[Dict[str, Any]]]:
+    """Загружает живые 5m свечи за 7 дней по широкой выборке альткоинов Bybit Linear (включая мелкие перпы от $500K/24ч!)."""
+    import requests
+    from concurrent.futures import ThreadPoolExecutor
+    try:
+        inst_js = requests.get("https://api.bybit.com/v5/market/instruments-info", params={"category": "linear", "limit": "1000"}, timeout=8).json()
+        clean_perps = {
+            s["symbol"] for s in (inst_js.get("result") or {}).get("list") or []
+            if s.get("contractType") == "LinearPerpetual" and s.get("status") == "Trading"
+            and s.get("quoteCoin") == "USDT" and s.get("symbolType", "") in ("", "innovation")
+            and not s.get("marketRegion") and not s.get("underlyingTicker")
+        }
+        r = requests.get("https://api.bybit.com/v5/market/tickers", params={"category": "linear"}, timeout=8).json()
+        lst = (r.get("result") or {}).get("list") or []
+        valid = []
+        for x in lst:
+            sym = x.get("symbol", "")
+            if (clean_perps and sym not in clean_perps) or sym in getattr(config, "EXCLUDED_TICKERS", set()):
+                continue
+            qv = float(x.get("turnover24h") or 0)
+            if qv >= 600_000.0:
+                valid.append((qv, sym))
+        valid.sort(reverse=True)
+        syms = ["BTCUSDT"] + [s for _, s in valid[:85] if s != "BTCUSDT"]
+
+        def _fetch_one(sym: str):
+            rows = []
+            end_ms = None
+            for _ in range(2):
+                p = {"category": "linear", "symbol": sym, "interval": "5", "limit": "1000"}
+                if end_ms:
+                    p["end"] = str(end_ms)
+                try:
+                    js = requests.get("https://api.bybit.com/v5/market/kline", params=p, timeout=8).json()
+                    kl = (js.get("result") or {}).get("list") or []
+                    if not kl:
+                        break
+                    rows.extend(kl)
+                    end_ms = int(kl[-1][0]) - 300_000
+                except Exception:
+                    break
+            if len(rows) < 250:
+                return sym, None
+            seen = {}
+            for k in rows:
+                ts = int(k[0])
+                seen[ts] = {"time": ts, "open": float(k[1]), "high": float(k[2]), "low": float(k[3]), "close": float(k[4]), "quote_vol": float(k[6])}
+            return sym, [seen[t] for t in sorted(seen.keys())]
+
+        out = {}
+        with ThreadPoolExecutor(max_workers=12) as ex:
+            for s, cdls in ex.map(_fetch_one, syms):
+                if cdls:
+                    out[s] = cdls
+        if len(out) >= 25 and "BTCUSDT" in out:
+            return out
+    except Exception:
+        pass
+    return get_7d_data(prefer_extended_universe=True)
+
+
+def simulate_15m_smart_money(
+    all_data_5m: Dict[str, Any],
+    initial_balance: float = 100.0,
+    max_slots: int = 15,
+    mg_pct: float = 0.025,
+    cap_risk_pct: float = 0.028,
+    tp1_share: float = 0.0,
+    leverage: int = 50,
+) -> Dict[str, Any]:
+    """Честный 15m Smart Money + Runner бэктест (1-в-1 с боевым scanner.py: 15 слотов, BTC EMA50, узкий стоп <=2.2%, без фильтра $15M!)."""
+    ind: Dict[str, Any] = {}
+    all_ts = set()
+    for sym, cdls in all_data_5m.items():
+        buckets: Dict[int, Dict[str, Any]] = {}
+        for c in cdls:
+            ts = int(c["time"])
+            ts_ms = ts if ts > 1e11 else ts * 1000
+            b = (ts_ms // 900_000) * 900_000
+            if b not in buckets:
+                buckets[b] = {"time": b, "open": c["open"], "high": c["high"], "low": c["low"], "close": c["close"], "qv": c["quote_vol"], "cnt": 1}
+            else:
+                bk = buckets[b]
+                bk["high"] = max(bk["high"], c["high"])
+                bk["low"] = min(bk["low"], c["low"])
+                bk["close"] = c["close"]
+                bk["qv"] += c["quote_vol"]
+                bk["cnt"] += 1
+        rows = [buckets[k] for k in sorted(buckets.keys()) if buckets[k]["cnt"] == 3]
+        if len(rows) < 210:
+            continue
+        n = len(rows)
+        t = np.array([r["time"] for r in rows], dtype=np.int64)
+        o = np.array([r["open"] for r in rows], dtype=np.float64)
+        h = np.array([r["high"] for r in rows], dtype=np.float64)
+        l = np.array([r["low"] for r in rows], dtype=np.float64)
+        c = np.array([r["close"] for r in rows], dtype=np.float64)
+        qv = np.array([r["qv"] for r in rows], dtype=np.float64)
+        ema9, ema21, ema50, ema200 = _calc_ema(c, 9), _calc_ema(c, 21), _calc_ema(c, 50), _calc_ema(c, 200)
+        macd_l = _calc_ema(c, 12) - _calc_ema(c, 26)
+        macd_s = _calc_ema(macd_l, 9)
+        macd_h = macd_l - macd_s
+        tr = np.empty(n); tr[0] = h[0] - l[0]
+        tr[1:] = np.maximum.reduce([h[1:] - l[1:], np.abs(h[1:] - c[:-1]), np.abs(l[1:] - c[:-1])])
+        atr_pct = pd.Series(tr).rolling(14, min_periods=1).mean().values / np.maximum(c, 1e-9)
+        vol_ma20 = pd.Series(qv).rolling(20, min_periods=5).mean().shift(1).bfill().values
+        rvol = qv / np.maximum(vol_ma20, 1.0)
+        qvol_24h = pd.Series(qv).rolling(96, min_periods=16).sum().values
+        delta = np.diff(c, prepend=c[0])
+        ag = pd.Series(np.where(delta > 0, delta, 0.0)).rolling(14, min_periods=3).mean().values
+        al = pd.Series(np.where(delta < 0, -delta, 0.0)).rolling(14, min_periods=3).mean().values
+        rsi = np.where(al == 0, 50.0, 100.0 - 100.0 / (1.0 + ag / np.maximum(al, 1e-12)))
+        adx = np.full(n, 20.0)
+        aw, pw, nw, av, a14 = tr[0], 0.0, 0.0, 20.0, 1.0 / 14.0
+        for j in range(1, n):
+            um, dm = h[j] - h[j - 1], l[j - 1] - l[j]
+            pdm = um if (um > dm and um > 0) else 0.0
+            ndm = dm if (dm > um and dm > 0) else 0.0
+            aw = a14 * tr[j] + (1 - a14) * aw; pw = a14 * pdm + (1 - a14) * pw; nw = a14 * ndm + (1 - a14) * nw
+            if aw > 1e-12:
+                pdi, ndi = 100 * pw / aw, 100 * nw / aw
+                dx = 100 * abs(pdi - ndi) / max(pdi + ndi, 1e-12)
+                av = a14 * dx + (1 - a14) * av
+            adx[j] = av
+        sh, sl_s = pd.Series(h).shift(1), pd.Series(l).shift(1)
+        hb16, lb16 = sh.rolling(16, min_periods=12).max().values, sl_s.rolling(16, min_periods=12).min().values
+        h48, l48 = sh.rolling(48, min_periods=24).max().values, sl_s.rolling(48, min_periods=24).min().values
+        fvg_b = np.zeros(n, dtype=bool); fvg_s = np.zeros(n, dtype=bool)
+        for j in range(4, n):
+            fvg_b[j] = any(l[m] > h[m - 2] for m in range(j - 3, j + 1))
+            fvg_s[j] = any(h[m] < l[m - 2] for m in range(j - 3, j + 1))
+        if sym != "BTCUSDT":
+            all_ts.update(t.tolist())
+        ind[sym] = dict(t=t, o=o, h=h, l=l, c=c, qv=qv, vol_ma20=vol_ma20, qvol_24h=qvol_24h,
+                        ema9=ema9, ema21=ema21, ema50=ema50, ema200=ema200,
+                        macd_l=macd_l, macd_s=macd_s, macd_h=macd_h, atr_pct=atr_pct, rvol=rvol, rsi=rsi, adx=adx,
+                        hb16=hb16, lb16=lb16, h48=h48, l48=l48, fvg_b=fvg_b, fvg_s=fvg_s,
+                        time_idx={int(ts): i for i, ts in enumerate(t)})
+
+    ts_list = sorted(all_ts)[205:]
+    cash, peak_eq, max_dd, total_comm = initial_balance, initial_balance, 0.0, 0.0
+    entry_cost, stop_cost = 0.0009, 0.0012
+    open_pos: Dict[str, Dict[str, Any]] = {}
+    lockouts: Dict[str, int] = {}
+    trades_pnl: List[float] = []
+    daily_map: Dict[str, Dict[str, Any]] = {}
+    btc = ind.get("BTCUSDT")
+
+    for t_now in ts_list:
+        dt = datetime.datetime.utcfromtimestamp(t_now // 1000)
+        d_str = dt.strftime("%Y-%m-%d")
+        in_session = not (dt.hour >= 21 or dt.hour < 1)
+        btc_bull = btc_bear = True
+        bp15 = 0.0
+        if btc and t_now in btc["time_idx"]:
+            bi = btc["time_idx"][t_now]
+            if bi >= 5:
+                bk = bi - 1
+                bp15 = (btc["c"][bk] - btc["c"][bk - 1]) / btc["c"][bk - 1] * 100.0
+                bp45 = (btc["c"][bk] - btc["c"][bk - 3]) / btc["c"][bk - 3] * 100.0
+                btc_bull = (btc["c"][bk] >= btc["ema50"][bk] * 0.997) and (bp15 > -0.45) and (bp45 > -0.80)
+                btc_bear = (btc["c"][bk] <= btc["ema50"][bk] * 1.003) and (bp15 < +0.45) and (bp45 < +0.80)
+
+        if d_str not in daily_map:
+            u0 = sum(p["mg"] * (((ind[s]["c"][ind[s]["time_idx"][t_now]] - p["ep"]) / p["ep"] if p["side"] == "LONG" else (p["ep"] - ind[s]["c"][ind[s]["time_idx"][t_now]]) / p["ep"]) * leverage) for s, p in open_pos.items() if t_now in ind[s]["time_idx"])
+            se = cash + sum(p["mg"] for p in open_pos.values()) + u0
+            daily_map[d_str] = {"start_eq": se, "end_eq": se, "trades": 0, "wins": 0, "losses": 0}
+
+        unreal = 0.0
+        for sym in list(open_pos.keys()):
+            p = open_pos[sym]
+            d = ind[sym]
+            ix = d["time_idx"].get(t_now)
+            if ix is None:
+                continue
+            p["bars"] += 1
+            if p["bars"] % 32 == 0:
+                ff = p["mg"] * leverage * 0.0001
+                total_comm += ff; cash = max(0.0, cash - ff); p["real"] -= ff
+            h, l, cl = d["h"][ix], d["l"][ix], d["c"][ix]
+            ep, rd, atr_p = p["ep"], p["rd"], d["atr_pct"][ix - 1]
+            if p["side"] == "LONG":
+                if l <= p["sl"]:
+                    fee = p["mg"] * leverage * stop_cost; total_comm += fee
+                    pnl = p["mg"] * ((p["sl"] - ep) / ep) * leverage - fee
+                    cash = max(0.0, cash + p["mg"] + pnl); p["real"] += pnl; trades_pnl.append(p["real"])
+                    daily_map[d_str]["trades"] += 1; daily_map[d_str]["wins" if p["real"] > 0 else "losses"] += 1
+                    lockouts[sym] = ix + (8 if p["real"] < 0 else 2); del open_pos[sym]; continue
+                p["hi"] = max(p["hi"], h); mfe_r = (p["hi"] - ep) / rd
+                if not p["tp1"] and h >= ep + 1.15 * rd:
+                    p["tp1"] = True
+                    if tp1_share > 0:
+                        cm = p["mg"] * tp1_share; fee = cm * leverage * entry_cost; total_comm += fee
+                        cpnl = cm * ((1.15 * rd) / ep) * leverage - fee
+                        cash += cm + cpnl; p["real"] += cpnl; p["mg"] -= cm
+                    p["sl"] = max(p["sl"], ep + 0.25 * rd)
+                if p["tp1"] and not p["tp2"] and h >= ep + 1.65 * rd:
+                    p["tp2"] = True; p["sl"] = max(p["sl"], ep + 0.95 * rd)
+                if p["tp1"] and mfe_r >= 2.50:
+                    band = max((1.45 if mfe_r >= 5.0 else (1.70 if mfe_r >= 3.5 else 1.95)) * atr_p * p["hi"], (0.75 if mfe_r >= 5.0 else 0.95) * rd)
+                    p["sl"] = max(p["sl"], ep + 1.20 * rd, p["hi"] - band)
+                if not p["tp1"] and p["bars"] >= 96:
+                    fee = p["mg"] * leverage * stop_cost; total_comm += fee
+                    pnl = p["mg"] * ((cl - ep) / ep) * leverage - fee
+                    cash = max(0.0, cash + p["mg"] + pnl); p["real"] += pnl; trades_pnl.append(p["real"])
+                    daily_map[d_str]["trades"] += 1; daily_map[d_str]["wins" if p["real"] > 0 else "losses"] += 1
+                    lockouts[sym] = ix + 4; del open_pos[sym]; continue
+                unreal += p["mg"] * ((cl - ep) / ep) * leverage
+            else:
+                if h >= p["sl"]:
+                    fee = p["mg"] * leverage * stop_cost; total_comm += fee
+                    pnl = p["mg"] * ((ep - p["sl"]) / ep) * leverage - fee
+                    cash = max(0.0, cash + p["mg"] + pnl); p["real"] += pnl; trades_pnl.append(p["real"])
+                    daily_map[d_str]["trades"] += 1; daily_map[d_str]["wins" if p["real"] > 0 else "losses"] += 1
+                    lockouts[sym] = ix + (8 if p["real"] < 0 else 2); del open_pos[sym]; continue
+                p["lo"] = min(p["lo"], l); mfe_r = (ep - p["lo"]) / rd
+                if not p["tp1"] and l <= ep - 1.15 * rd:
+                    p["tp1"] = True
+                    if tp1_share > 0:
+                        cm = p["mg"] * tp1_share; fee = cm * leverage * entry_cost; total_comm += fee
+                        cpnl = cm * ((1.15 * rd) / ep) * leverage - fee
+                        cash += cm + cpnl; p["real"] += cpnl; p["mg"] -= cm
+                    p["sl"] = min(p["sl"], ep - 0.25 * rd)
+                if p["tp1"] and not p["tp2"] and l <= ep - 1.65 * rd:
+                    p["tp2"] = True; p["sl"] = min(p["sl"], ep - 0.95 * rd)
+                if p["tp1"] and mfe_r >= 2.50:
+                    band = max((1.45 if mfe_r >= 5.0 else (1.70 if mfe_r >= 3.5 else 1.95)) * atr_p * p["lo"], (0.75 if mfe_r >= 5.0 else 0.95) * rd)
+                    p["sl"] = min(p["sl"], ep - 1.20 * rd, p["lo"] + band)
+                if not p["tp1"] and p["bars"] >= 96:
+                    fee = p["mg"] * leverage * stop_cost; total_comm += fee
+                    pnl = p["mg"] * ((ep - cl) / ep) * leverage - fee
+                    cash = max(0.0, cash + p["mg"] + pnl); p["real"] += pnl; trades_pnl.append(p["real"])
+                    daily_map[d_str]["trades"] += 1; daily_map[d_str]["wins" if p["real"] > 0 else "losses"] += 1
+                    lockouts[sym] = ix + 4; del open_pos[sym]; continue
+                unreal += p["mg"] * ((ep - cl) / ep) * leverage
+
+        eq = cash + sum(p["mg"] for p in open_pos.values()) + unreal
+        daily_map[d_str]["end_eq"] = eq
+        peak_eq = max(peak_eq, eq)
+        max_dd = max(max_dd, (peak_eq - eq) / peak_eq if peak_eq > 0 else 0.0)
+
+        at_risk = [p for p in open_pos.values() if not p["tp1"]]
+        if in_session and len(at_risk) < max_slots and len(open_pos) < max_slots + 5 and cash >= 1.2:
+            cands = []
+            for sym, d in ind.items():
+                if sym == "BTCUSDT" or sym in open_pos:
+                    continue
+                ix = d["time_idx"].get(t_now)
+                if ix is None or ix < 205 or ix < lockouts.get(sym, 0):
+                    continue
+                k = ix - 1
+                if d["qvol_24h"][k] < 500_000.0 or d["vol_ma20"][k] < 2500.0:
+                    continue
+                cl, lo, hi, op = d["c"][k], d["l"][k], d["h"][k], d["o"][k]
+                p15_c = (cl - d["c"][k - 1]) / d["c"][k - 1] * 100.0
+                if abs(p15_c) > 5.5:
+                    continue
+                a15 = p15_c - bp15
+                rng = max(hi - lo, 1e-9)
+                clv_l, clv_s = (cl - lo) / rng, (hi - cl) / rng
+                uw, lw = (hi - max(op, cl)) / rng, (min(op, cl) - lo) / rng
+                rv, adx, rsi, atr_p = d["rvol"][k], d["adx"][k], d["rsi"][k], d["atr_pct"][k]
+                if rv < 1.50 or adx < 20.0 or atr_p < 0.0035:
+                    continue
+                if abs(cl - d["ema21"][k]) / max(d["ema21"][k], 1e-9) > 0.055:
+                    continue
+                h12h, l12h = d["h48"][k], d["l48"][k]
+                r12 = (h12h - l12h) / max(l12h, 1e-9)
+                pos12 = (cl - l12h) / max(h12h - l12h, 1e-9)
+                wl_ok = not (r12 >= 0.14 and pos12 >= 0.55 and 0.0 < (h12h - cl) / cl <= 0.045)
+                ws_ok = not (r12 >= 0.14 and pos12 <= 0.45 and 0.0 < (cl - l12h) / cl <= 0.045)
+                macd_bull = d["macd_l"][k] > d["macd_s"][k] and d["macd_h"][k] > d["macd_h"][k - 1]
+                macd_bear = d["macd_l"][k] < d["macd_s"][k] and d["macd_h"][k] < d["macd_h"][k - 1]
+                ep = d["o"][ix]
+                if btc_bull and wl_ok and cl > d["hb16"][k] and cl > d["ema200"][k] and cl > d["ema9"][k] >= d["ema21"][k] * 0.998 and macd_bull and a15 >= 0.45 and 50 <= rsi <= 80 and clv_l >= 0.66 and uw <= 0.28:
+                    conf = 4 + (1 if d["fvg_b"][k] else 0) + (1 if adx >= 24 else 0) + (1 if rv >= 2.0 else 0)
+                    if conf >= 5:
+                        sl = max((ep - min(lo, d["l"][k - 1]) * 0.9985) / ep, 1.45 * atr_p, 0.0110)
+                        if sl <= 0.0220:
+                            cands.append((conf * rv * max(a15, 0.5), sym, "LONG", ep, sl))
+                elif btc_bear and ws_ok and cl < d["lb16"][k] and cl < d["ema200"][k] and cl < d["ema9"][k] <= d["ema21"][k] * 1.002 and macd_bear and a15 <= -0.45 and 20 <= rsi <= 50 and clv_s >= 0.66 and lw <= 0.28:
+                    conf = 4 + (1 if d["fvg_s"][k] else 0) + (1 if adx >= 24 else 0) + (1 if rv >= 2.0 else 0)
+                    if conf >= 5:
+                        sl = max((max(hi, d["h"][k - 1]) * 1.0015 - ep) / ep, 1.45 * atr_p, 0.0110)
+                        if sl <= 0.0220:
+                            cands.append((conf * rv * max(abs(a15), 0.5), sym, "SHORT", ep, sl))
+            cands.sort(reverse=True)
+            for sc, sym, side, ep, sl_d in cands[:4]:
+                at_r = [p for p in open_pos.values() if not p["tp1"]]
+                if len(at_r) >= max_slots or len(open_pos) >= max_slots + 5:
+                    break
+                if sum(1 for p in at_r if p["side"] == side) >= 6:
+                    continue
+                ref_eq = max(10.0, cash + sum(p["mg"] for p in open_pos.values()))
+                dd_m = 0.75 if (peak_eq - eq) / peak_eq >= 0.20 else 1.0
+                base_mg = ref_eq * mg_pct * dd_m
+                max_mg_r = (ref_eq * cap_risk_pct * dd_m) / ((sl_d + stop_cost) * leverage)
+                mg = round(min(base_mg, max_mg_r, 1500.0 / leverage, cash * 0.40), 2)
+                if mg < 0.50 or cash < mg + 0.20:
+                    continue
+                fee_in = mg * leverage * entry_cost; total_comm += fee_in
+                cash -= (mg + fee_in)
+                rd = ep * sl_d
+                open_pos[sym] = dict(side=side, ep=ep, mg=mg, sl=ep - rd if side == "LONG" else ep + rd, rd=rd, tp1=False, tp2=False, hi=ep, lo=ep, real=-fee_in, bars=0)
+
+    for sym, p in list(open_pos.items()):
+        cl = ind[sym]["c"][-1]
+        raw = (cl - p["ep"]) / p["ep"] if p["side"] == "LONG" else (p["ep"] - cl) / p["ep"]
+        fee = p["mg"] * leverage * entry_cost
+        total_comm += fee
+        pnl = p["mg"] * raw * leverage - fee
+        cash = max(0.0, cash + p["mg"] + pnl)
+        p["real"] += pnl
+        trades_pnl.append(p["real"])
+
+    wins = [x for x in trades_pnl if x > 0]
+    losses = [x for x in trades_pnl if x <= 0]
+    wr = round(len(wins) / len(trades_pnl) * 100.0, 1) if trades_pnl else 0.0
+    pf = round(sum(wins) / abs(sum(losses)), 2) if losses and sum(losses) != 0 else (99.0 if wins else 0.0)
+    daily_rows = []
+    win_days = loss_days = 0
+    for dk in sorted(daily_map.keys()):
+        dm = daily_map[dk]
+        d_pnl = round(dm["end_eq"] - dm["start_eq"], 2)
+        d_pct = round((d_pnl / max(dm["start_eq"], 1.0)) * 100.0, 1)
+        if dm["trades"] > 0 or abs(d_pnl) >= 0.05:
+            if d_pnl >= 0:
+                win_days += 1
+            else:
+                loss_days += 1
+        daily_rows.append({
+            "Дата": dk,
+            "Итог дня": "✅ Плюс" if d_pnl >= 0 else "❌ Убыток",
+            "PnL за день ($)": f"${d_pnl:+.2f}",
+            "PnL за день (%)": f"{d_pct:+.1f}%",
+            "Закрыто сделок": f"{dm['trades']} (W:{dm['wins']} / L:{dm['losses']})",
+            "Эквити к концу дня": f"${dm['end_eq']:.2f}",
+        })
+    return {
+        "final_balance": round(cash, 2),
+        "net_pnl": round(cash - initial_balance, 2),
+        "roi_pct": round((cash - initial_balance) / initial_balance * 100.0, 1),
+        "win_rate": wr,
+        "total_trades": len(trades_pnl),
+        "max_drawdown_pct": round(max_dd * 100.0, 1),
+        "profit_factor": pf,
+        "expectancy_r": 0.0,
         "total_commission": round(total_comm, 2),
         "winning_days": win_days,
         "losing_days": loss_days,

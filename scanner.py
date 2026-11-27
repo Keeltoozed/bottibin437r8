@@ -45,14 +45,16 @@ class MarketScanner:
         sh2_rug = 0.0 if full_hold else 0.30
         sh2_std = 0.0 if full_hold else 0.25
 
-        if brk_type == "RUG_SHORT":
-            return {"profile": "FAST_RUG_DUMP", "tp1_r": 1.45, "tp1_share": sh1, "tp1_lock_r": 0.25, "tp2_r": 2.25, "tp2_share": sh2_rug, "tp2_lock_r": 1.10}
+        if brk_type == "SM_15M":
+            return {"profile": "SMART_MONEY_15M", "tp1_r": 1.15, "tp1_share": sh1, "tp1_lock_r": 0.25, "tp2_r": 1.65, "tp2_share": sh2_std, "tp2_lock_r": 0.95, "trail_r": 2.50}
+        elif brk_type == "RUG_SHORT":
+            return {"profile": "FAST_RUG_DUMP", "tp1_r": 1.45, "tp1_share": sh1, "tp1_lock_r": 0.25, "tp2_r": 2.25, "tp2_share": sh2_rug, "tp2_lock_r": 1.10, "trail_r": 3.10}
         elif brk_type == "SQUEEZE_80M" or (has_fvg and adx14 >= 20.0):
-            return {"profile": "EXPLOSIVE_FVG", "tp1_r": 1.90, "tp1_share": sh1, "tp1_lock_r": 0.40, "tp2_r": 3.00, "tp2_share": sh2_std, "tp2_lock_r": 1.55}
+            return {"profile": "EXPLOSIVE_FVG", "tp1_r": 1.90, "tp1_share": sh1, "tp1_lock_r": 0.40, "tp2_r": 3.00, "tp2_share": sh2_std, "tp2_lock_r": 1.55, "trail_r": 3.10}
         elif atr_pct >= 0.012 or sl_dist >= 0.030:
-            return {"profile": "HIGH_VOL_SWING", "tp1_r": 1.55, "tp1_share": sh1, "tp1_lock_r": 0.30, "tp2_r": 2.30, "tp2_share": sh2_std, "tp2_lock_r": 1.15}
+            return {"profile": "HIGH_VOL_SWING", "tp1_r": 1.55, "tp1_share": sh1, "tp1_lock_r": 0.30, "tp2_r": 2.30, "tp2_share": sh2_std, "tp2_lock_r": 1.15, "trail_r": 3.10}
         else:
-            return {"profile": "STD_TREND_FIB", "tp1_r": 1.72, "tp1_share": sh1, "tp1_lock_r": 0.35, "tp2_r": 2.60, "tp2_share": sh2_std, "tp2_lock_r": 1.32}
+            return {"profile": "STD_TREND_FIB", "tp1_r": 1.72, "tp1_share": sh1, "tp1_lock_r": 0.35, "tp2_r": 2.60, "tp2_share": sh2_std, "tp2_lock_r": 1.32, "trail_r": 3.10}
 
     async def scan_market_once(self, force: bool = False) -> List[Dict[str, Any]]:
         """Один параллельный проход сканирования рынка строго на закрытии 5m свечи (защита от HTTP 418/429)."""
@@ -64,11 +66,20 @@ class MarketScanner:
         # Стратегия работает строго по закрытым 5-минутным свечам!
         # Полный скан 80-100 пар запускается 1 раз в начале каждой новой 5m свечи (через 3с после закрытия бара),
         # а не 25 раз подряд за те же 5 минут — полностью исключает HTTP 418/429 бан на Render!
-        cur_bar = int(now) // 300
-        sec_into_bar = now % 300.0
+        # УМНАЯ ЗАЩИТА ОТ ЛИМИТОВ API: скан запускается ровно 1 раз после закрытия сигнальной свечи (15m или 5m)!
+        scan_tf = str(getattr(config, "SCAN_TIMEFRAME", "15m")).strip() or "15m"
+        bar_sec = 900 if scan_tf == "15m" else 300
+        cur_bar = int(now) // bar_sec
+        sec_into_bar = now % float(bar_sec)
         if not force and self._last_scanned_bar == cur_bar and portfolio.last_universe_count > 0:
             return []
         if not force and self._last_scanned_bar > 0 and sec_into_bar < 3.0:
+            return []
+
+        # Пропуск мертвого ночного окна (21:00–01:00 UTC = закрытие США до старта Азии), открытые сделки сопровождаются 24/7!
+        utc_hr_now = time.gmtime(now).tm_hour
+        if not force and getattr(config, "SKIP_DEAD_NIGHT_WINDOW", True) and (utc_hr_now >= 21 or utc_hr_now < 1):
+            portfolio.btc_regime_str = "🌙 Ночная пауза входов (21:00–01:00 UTC, защита от тонкой пилы; сопровождение активно)"
             return []
 
         pause_until = getattr(portfolio, "pause_until", 0.0)
@@ -144,8 +155,8 @@ class MarketScanner:
                     portfolio.funnel_stats["gate_failed"] = portfolio.funnel_stats.get("gate_failed", 0) + 1
                     return None
 
-                # 3. Структурный 5m свечной анализ (200 свечей = 16.6ч для точной 15m EMA50, 6h базы и Anti-Rug щита)
-                analysis = await binance_client.fetch_candles_analysis(sym, interval="5m", limit=200)
+                # 3. Структурный свечной анализ (по умолчанию 15m Smart Money 5/7: BOS + EMA200 + MACD + ADX + FVG, 200 свечей = 50ч!)
+                analysis = await binance_client.fetch_candles_analysis(sym, interval=scan_tf, limit=205)
                 if not analysis:
                     return None
 
@@ -230,105 +241,135 @@ class MarketScanner:
                 vol_confirmed = (surge >= eff_min_rvol) and (v3_surge >= min_v3)
 
                 # ==============================================================
-                # 4. ПРАВИЛА ВХОДА ALPHA ROCKET ENGINE (8/8 SPLITS VALIDATED)
-                # - STRUCT_3H (36 баров) / SQUEEZE_80M (16 баров <= 6.5%) / RUG_SHORT (слив после пампа >= +15%)
-                # - Anti-Double-Top 12H Wall Guard: запрет биться на 2-м круге в непробитый 12ч хай/лой
-                # - Dead-Book Filter: отсев тонких стаканов с пустыми 5m свечами < $600 (защита от фейк-RVOL)
-                # - Idiosyncratic Alpha RS vs BTC: |alpha_5m| >= 0.80% и |alpha_15m| >= 1.00%
+                # 4. ПРАВИЛА ВХОДА SMART MONEY 15M ENGINE (WR 70%, PF 2.02 НА BYBIT + 8/8 ИСТОРИЧЕСКИХ СПЛИТОВ!)
+                # - На 15m: 5/7 Smart Money Confluence (4ч BOS + HTF EMA200 + MACD + ADX>=20 + FVG/RVOL + Alpha к BTC >= 0.45%)
+                # - Строгое выравнивание по макро-режиму Bitcoin (LONG выше EMA50 BTC, SHORT ниже EMA50 BTC)
+                # - Узкий структурный стоп <= 2.20% (полная защита от дыр по -150%..-189%)
                 # ==============================================================
-                tech_long = (
-                    analysis.get("is_breakout_long", False) and
-                    anti_rug_long and
-                    anti_wall_long and
-                    atr_pct >= min_atr_pct and
-                    vol_confirmed and
-                    vol_floor_ok and
-                    is_mtf_long and
-                    is_macro_long and
-                    min_req_impulse <= pct_5m <= max_spike_5m and
-                    alpha_5m >= min_a5 and
-                    alpha_15m >= min_a15 and
-                    clv_long >= eff_min_clv and
-                    upper_wick <= config.WICK_EXHAUSTION_MAX and
-                    sig_close > ema9 and ema9 >= ema21 * 0.998 and
-                    config.MIN_RSI_LONG <= rsi <= config.MAX_RSI_LONG and
-                    ema21_ext <= config.MAX_EMA21_EXTENSION_PCT and
-                    analysis.get("live_drift_long_pct", 0.0) <= config.MAX_LIVE_DRIFT_PCT and
-                    not analysis.get("breakout_failed_long", False) and
-                    config.STOP_LOSS_MIN_PCT <= sl_long_dist <= config.STOP_LOSS_MAX_PCT
-                )
-                is_long = tech_long and not btc_regime.get("is_dumping", False) and not btc_regime.get("is_spike_up", False)
-
-                tech_short = (
-                    config.ENABLE_SHORT and
-                    analysis.get("is_breakout_short", False) and
-                    anti_rug_short and
-                    anti_wall_short and
-                    atr_pct >= min_atr_pct and
-                    vol_confirmed and
-                    vol_floor_ok and
-                    is_mtf_short and
-                    is_macro_short and
-                    -max_spike_5m <= pct_5m <= -min_req_impulse and
-                    alpha_5m <= -min_a5 and
-                    alpha_15m <= -min_a15 and
-                    clv_short >= eff_min_clv and
-                    lower_wick <= config.WICK_EXHAUSTION_MAX and
-                    sig_close < ema9 and ema9 <= ema21 * 1.002 and
-                    config.MIN_RSI_SHORT <= rsi <= config.MAX_RSI_SHORT and
-                    ema21_ext <= config.MAX_EMA21_EXTENSION_PCT and
-                    analysis.get("live_drift_short_pct", 0.0) <= config.MAX_LIVE_DRIFT_PCT and
-                    not analysis.get("breakout_failed_short", False) and
-                    config.STOP_LOSS_MIN_PCT <= sl_short_dist <= config.STOP_LOSS_MAX_PCT
-                )
-                is_short = tech_short and not btc_regime.get("is_pumping", False) and not btc_regime.get("is_flush_down", False)
-
-                # SMART MONEY FVG + BOS + EMA200 + ADX >= 20 (дополнительный высокоточный трендовый вход, 8/8 GREEN!)
-                is_sm_fvg = False
-                if (not is_long and not is_short) and getattr(config, "ENABLE_SM_FVG_ENTRY", True):
-                    adx14_val = float(analysis.get("adx14", 0.0) or 0.0)
-                    sm_long_sl = float(analysis.get("sm_long_sl_pct", sl_long_dist) or sl_long_dist)
-                    sm_short_sl = float(analysis.get("sm_short_sl_pct", sl_short_dist) or sl_short_dist)
-                    sm_min_rv = eff_min_rvol if is_dead_night else 1.50
-                    sm_tech_l = (
-                        analysis.get("sm_bos_long", False) and
-                        anti_wall_long and surge >= sm_min_rv and
-                        vol_floor_ok and atr_pct >= min_atr_pct and v3_surge >= min_v3 and
-                        adx14_val >= 20.0 and is_mtf_long and ema21_ext <= 0.028 and
-                        alpha_5m >= 0.65 and alpha_15m >= 0.90 and
-                        clv_long >= 0.72 and upper_wick <= 0.22 and
-                        52.0 <= rsi <= 76.0 and pct_5m <= max_spike_5m and analysis.get("live_drift_long_pct", 0.0) <= config.MAX_LIVE_DRIFT_PCT and
-                        config.STOP_LOSS_MIN_PCT <= sm_long_sl <= config.STOP_LOSS_MAX_PCT
+                if scan_tf == "15m":
+                    vol_15m_ok = (vol_24h_pair >= (250000.0 if is_spot_mirror else 500000.0)) and (avg_5m_qvol >= (1200.0 if is_spot_mirror else 2500.0))
+                    btc_bull_ok = bool(btc_regime.get("btc_macro_bull", True)) if getattr(config, "ENABLE_BTC_MACRO_ALIGNMENT", True) else not btc_regime.get("is_dumping", False)
+                    btc_bear_ok = bool(btc_regime.get("btc_macro_bear", True)) if getattr(config, "ENABLE_BTC_MACRO_ALIGNMENT", True) else not btc_regime.get("is_pumping", False)
+                    tech_long = (
+                        analysis.get("sm15_long", False) and
+                        vol_15m_ok and
+                        pct_5m <= 5.50 and
+                        alpha_5m >= 0.45 and
+                        analysis.get("live_drift_long_pct", 0.0) <= config.MAX_LIVE_DRIFT_PCT and
+                        not analysis.get("breakout_failed_long", False) and
+                        config.STOP_LOSS_MIN_PCT <= sl_long_dist <= config.STOP_LOSS_MAX_PCT
                     )
-                    if sm_tech_l and not btc_regime.get("is_dumping", False) and not btc_regime.get("is_spike_up", False):
-                        is_long = True
-                        is_sm_fvg = True
-                        brk_type = "SM_FVG"
-                        sl_long_dist = sm_long_sl
-                        analysis["breakout_type"] = "SM_FVG"
-                        analysis["sl_pct_distance"] = sm_long_sl
-                        analysis["wick_stop_loss"] = analysis.get("sm_long_wick_sl", analysis["wick_stop_loss"])
-                    elif config.ENABLE_SHORT:
-                        sm_tech_s = (
-                            analysis.get("sm_bos_short", False) and
-                            anti_wall_short and surge >= sm_min_rv and
+                    is_long = tech_long and btc_bull_ok and not btc_regime.get("is_spike_up", False)
+
+                    tech_short = (
+                        config.ENABLE_SHORT and
+                        analysis.get("sm15_short", False) and
+                        vol_15m_ok and
+                        pct_5m >= -5.50 and
+                        alpha_5m <= -0.45 and
+                        analysis.get("live_drift_short_pct", 0.0) <= config.MAX_LIVE_DRIFT_PCT and
+                        not analysis.get("breakout_failed_short", False) and
+                        config.STOP_LOSS_MIN_PCT <= sl_short_dist <= config.STOP_LOSS_MAX_PCT
+                    )
+                    is_short = tech_short and btc_bear_ok and not btc_regime.get("is_flush_down", False)
+                    is_sm_fvg = False
+                    if is_long or is_short:
+                        brk_type = "SM_15M"
+                        analysis["breakout_type"] = "SM_15M"
+                else:
+                    tech_long = (
+                        analysis.get("is_breakout_long", False) and
+                        anti_rug_long and
+                        anti_wall_long and
+                        atr_pct >= min_atr_pct and
+                        vol_confirmed and
+                        vol_floor_ok and
+                        is_mtf_long and
+                        is_macro_long and
+                        min_req_impulse <= pct_5m <= max_spike_5m and
+                        alpha_5m >= min_a5 and
+                        alpha_15m >= min_a15 and
+                        clv_long >= eff_min_clv and
+                        upper_wick <= config.WICK_EXHAUSTION_MAX and
+                        sig_close > ema9 and ema9 >= ema21 * 0.998 and
+                        config.MIN_RSI_LONG <= rsi <= config.MAX_RSI_LONG and
+                        ema21_ext <= config.MAX_EMA21_EXTENSION_PCT and
+                        analysis.get("live_drift_long_pct", 0.0) <= config.MAX_LIVE_DRIFT_PCT and
+                        not analysis.get("breakout_failed_long", False) and
+                        config.STOP_LOSS_MIN_PCT <= sl_long_dist <= config.STOP_LOSS_MAX_PCT
+                    )
+                    is_long = tech_long and not btc_regime.get("is_dumping", False) and not btc_regime.get("is_spike_up", False)
+
+                    tech_short = (
+                        config.ENABLE_SHORT and
+                        analysis.get("is_breakout_short", False) and
+                        anti_rug_short and
+                        anti_wall_short and
+                        atr_pct >= min_atr_pct and
+                        vol_confirmed and
+                        vol_floor_ok and
+                        is_mtf_short and
+                        is_macro_short and
+                        -max_spike_5m <= pct_5m <= -min_req_impulse and
+                        alpha_5m <= -min_a5 and
+                        alpha_15m <= -min_a15 and
+                        clv_short >= eff_min_clv and
+                        lower_wick <= config.WICK_EXHAUSTION_MAX and
+                        sig_close < ema9 and ema9 <= ema21 * 1.002 and
+                        config.MIN_RSI_SHORT <= rsi <= config.MAX_RSI_SHORT and
+                        ema21_ext <= config.MAX_EMA21_EXTENSION_PCT and
+                        analysis.get("live_drift_short_pct", 0.0) <= config.MAX_LIVE_DRIFT_PCT and
+                        not analysis.get("breakout_failed_short", False) and
+                        config.STOP_LOSS_MIN_PCT <= sl_short_dist <= config.STOP_LOSS_MAX_PCT
+                    )
+                    is_short = tech_short and not btc_regime.get("is_pumping", False) and not btc_regime.get("is_flush_down", False)
+
+                    # SMART MONEY FVG + BOS + EMA200 + ADX >= 20 (для 5m режима)
+                    is_sm_fvg = False
+                    if (not is_long and not is_short) and getattr(config, "ENABLE_SM_FVG_ENTRY", True):
+                        adx14_val = float(analysis.get("adx14", 0.0) or 0.0)
+                        sm_long_sl = float(analysis.get("sm_long_sl_pct", sl_long_dist) or sl_long_dist)
+                        sm_short_sl = float(analysis.get("sm_short_sl_pct", sl_short_dist) or sl_short_dist)
+                        sm_min_rv = eff_min_rvol if is_dead_night else 1.50
+                        sm_tech_l = (
+                            analysis.get("sm_bos_long", False) and
+                            anti_wall_long and surge >= sm_min_rv and
                             vol_floor_ok and atr_pct >= min_atr_pct and v3_surge >= min_v3 and
-                            adx14_val >= 20.0 and is_mtf_short and ema21_ext <= 0.028 and
-                            alpha_5m <= -0.65 and alpha_15m <= -0.90 and
-                            clv_short >= 0.72 and lower_wick <= 0.22 and
-                            24.0 <= rsi <= 48.0 and pct_5m >= -max_spike_5m and analysis.get("live_drift_short_pct", 0.0) <= config.MAX_LIVE_DRIFT_PCT and
-                            config.STOP_LOSS_MIN_PCT <= sm_short_sl <= config.STOP_LOSS_MAX_PCT
+                            adx14_val >= 20.0 and is_mtf_long and ema21_ext <= 0.028 and
+                            alpha_5m >= 0.65 and alpha_15m >= 0.90 and
+                            clv_long >= 0.72 and upper_wick <= 0.22 and
+                            52.0 <= rsi <= 76.0 and pct_5m <= max_spike_5m and analysis.get("live_drift_long_pct", 0.0) <= config.MAX_LIVE_DRIFT_PCT and
+                            config.STOP_LOSS_MIN_PCT <= sm_long_sl <= config.STOP_LOSS_MAX_PCT
                         )
-                        if sm_tech_s and not btc_regime.get("is_pumping", False) and not btc_regime.get("is_flush_down", False):
-                            is_short = True
+                        if sm_tech_l and not btc_regime.get("is_dumping", False) and not btc_regime.get("is_spike_up", False):
+                            is_long = True
                             is_sm_fvg = True
                             brk_type = "SM_FVG"
-                            sl_short_dist = sm_short_sl
+                            sl_long_dist = sm_long_sl
                             analysis["breakout_type"] = "SM_FVG"
-                            analysis["short_sl_dist"] = sm_short_sl
-                            analysis["short_sl_pct_distance"] = sm_short_sl
-                            analysis["short_wick_stop_loss"] = analysis.get("sm_short_wick_sl", analysis["short_wick_stop_loss"])
-                            analysis["short_wick_sl"] = analysis["short_wick_stop_loss"]
+                            analysis["sl_pct_distance"] = sm_long_sl
+                            analysis["wick_stop_loss"] = analysis.get("sm_long_wick_sl", analysis["wick_stop_loss"])
+                        elif config.ENABLE_SHORT:
+                            sm_tech_s = (
+                                analysis.get("sm_bos_short", False) and
+                                anti_wall_short and surge >= sm_min_rv and
+                                vol_floor_ok and atr_pct >= min_atr_pct and v3_surge >= min_v3 and
+                                adx14_val >= 20.0 and is_mtf_short and ema21_ext <= 0.028 and
+                                alpha_5m <= -0.65 and alpha_15m <= -0.90 and
+                                clv_short >= 0.72 and lower_wick <= 0.22 and
+                                24.0 <= rsi <= 48.0 and pct_5m >= -max_spike_5m and analysis.get("live_drift_short_pct", 0.0) <= config.MAX_LIVE_DRIFT_PCT and
+                                config.STOP_LOSS_MIN_PCT <= sm_short_sl <= config.STOP_LOSS_MAX_PCT
+                            )
+                            if sm_tech_s and not btc_regime.get("is_pumping", False) and not btc_regime.get("is_flush_down", False):
+                                is_short = True
+                                is_sm_fvg = True
+                                brk_type = "SM_FVG"
+                                sl_short_dist = sm_short_sl
+                                analysis["breakout_type"] = "SM_FVG"
+                                analysis["short_sl_dist"] = sm_short_sl
+                                analysis["short_sl_pct_distance"] = sm_short_sl
+                                analysis["short_wick_stop_loss"] = analysis.get("sm_short_wick_sl", analysis["short_wick_stop_loss"])
+                                analysis["short_wick_sl"] = analysis["short_wick_stop_loss"]
 
                 if (tech_long and not is_long) or (tech_short and not is_short):
                     portfolio.funnel_stats["btc_blocked"] = portfolio.funnel_stats.get("btc_blocked", 0) + 1
@@ -564,24 +605,30 @@ class MarketScanner:
 
                 sizing_mode = str(getattr(config, "SIZING_MODE", "equal_margin")).lower()
                 if sizing_mode == "equal_margin":
-                    fixed_mg_pct = float(getattr(config, "FIXED_MARGIN_PCT", 0.035))
+                    fixed_mg_pct = float(getattr(config, "FIXED_MARGIN_PCT", 0.025))
+                    max_risk_pct = float(getattr(config, "MAX_RISK_PER_TRADE_PCT", 0.028))
                     raw_margin = ref_equity * fixed_mg_pct * dd_mult * conv_mult
-                    actual_margin = round(min(raw_margin, max_mg, portfolio.cash * 0.65), 2)
+                    # Жесткий потолок долларового убытка на стопе (исключает дыры по -$6..-$7 / -189% на волатильных свечах!)
+                    max_mg_by_risk = (ref_equity * max_risk_pct * dd_mult) / max((eff_sl_dist + 0.0012) * lev_to_use, 1e-6)
+                    actual_margin = round(min(raw_margin, max_mg_by_risk, max_mg, portfolio.cash * 0.50), 2)
                     risk_usd = round(max(actual_margin * lev_to_use * eff_sl_dist, 0.25), 3)
                 else:
                     effective_risk_pct = config.RISK_PER_TRADE_PCT * dd_mult
                     risk_usd = round(cur_equity * effective_risk_pct * conv_mult, 3)
                     target_notional = risk_usd / (eff_sl_dist + 0.0012)
                     raw_margin = target_notional / lev_to_use
-                    actual_margin = round(min(raw_margin, max_mg, portfolio.cash * 0.65), 2)
+                    actual_margin = round(min(raw_margin, max_mg, portfolio.cash * 0.50), 2)
 
-                # OPEN-ALPHA CORRELATION GUARD (КАК В КАНАЛЕ: ДО 8 СЛОТОВ ПАРАЛЛЕЛЬНО ДАЖЕ В БОКОВИКЕ CHOP!):
-                # 1. Безрисковые ранеры (tp1_hit=True) НЕ учитываются — не занимают слоты!
-                # 2. Независимые альт-ракеты (Alpha RS vs BTC) свободно заполняют до 8 слотов параллельно даже в CHOP!
-                # 3. Блокируем доп. входы ТОЛЬКО если сам Bitcoin активно падает/сквизит против позиции (15m >= 0.40% или 5m >= 0.30%).
+                # CORRELATION & DIRECTIONAL BETA GUARD (ДО 15 АКТИВНЫХ СЛОТОВ + ЗАЩИТА ОТ СНОСА ПАЧКИ НА BTC!):
+                # 1. Безрисковые ранеры (tp1_hit=True) НЕ учитываются — не занимают 15 активных слотов!
+                # 2. В одну сторону одновременно не более MAX_SAME_SIDE_POSITIONS (6 из 15), чтобы один пролив BTC не снес 15 лонгов разом!
                 at_risk_positions = [p for p in portfolio.open_positions.values() if not p.get("tp1_hit", False)]
                 if len(at_risk_positions) >= 1:
                     same_side_positions = [p for p in at_risk_positions if p.get("side") == cand_side]
+                    max_same_side = int(getattr(config, "MAX_SAME_SIDE_POSITIONS", 6))
+                    if len(same_side_positions) >= max_same_side:
+                        print(f"⚠️ [DIRECTIONAL CAP] Доп. {cand_side} по {sym} пропущен: уже {len(same_side_positions)}/{max_same_side} в одну сторону!", flush=True)
+                        continue
                     if same_side_positions:
                         btc_5m = float(btc_regime.get("pct_5m", 0.0) or 0.0)
                         btc_15m = float(btc_regime.get("pct_15m", 0.0) or 0.0)

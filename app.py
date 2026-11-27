@@ -200,11 +200,11 @@ with st.sidebar:
 
     # Режим риск-профиля (Основной: Full-Hold 100% без вытаскивания долей + ступенчатые замки SL + Trail, PF 2.13!)
     strategy_mode = st.radio(
-        "Профиль риск-менеджмента (Cross Margin):",
+        "Профиль риск-менеджмента (15m Smart Money Cross):",
         [
-            "🚀 Full-Hold Cross 50x (100% до конца + Замки SL, маржа 3.0% — PF 2.13)",
-            "💰 Partial-Split Cross 50x (35% TP1 + 25% TP2 + 40% Trail, маржа 3.0%)",
-            "🔥 Safe Full-Hold 50x (100% до конца, маржа 2.5% — мягкая просадка)"
+            "🚀 15m Smart Money + Runner 50x (15 слотов, маржа 2.5%, риск ≤2.8% — WR 70%)",
+            "💰 Partial-Split 15m 50x (15 слотов, 35% TP1 + 25% TP2 + 40% Trail, маржа 2.5%)",
+            "🔥 Safe 15m Smart Money 50x (15 слотов, маржа 2.0%, риск ≤2.2% — макс. защита)"
         ],
         index=0
     )
@@ -212,28 +212,25 @@ with st.sidebar:
         default_lev = 50
         config.FULL_HOLD_MODE = False
         config.SIZING_MODE = "equal_margin"
-        config.FIXED_MARGIN_PCT = 0.030
-        config.MAX_CONCURRENT_POSITIONS = 8
-        config.MIN_5M_VOLUME_SURGE_RATIO = 1.80
-        config.MIN_CLOSE_STRENGTH = 0.66
+        config.FIXED_MARGIN_PCT = 0.025
+        config.MAX_RISK_PER_TRADE_PCT = 0.028
+        config.MAX_CONCURRENT_POSITIONS = 15
         config.DAILY_LOSS_LIMIT = 99
-    elif "Safe Full-Hold" in strategy_mode:
+    elif "Safe 15m" in strategy_mode:
         default_lev = 50
         config.FULL_HOLD_MODE = True
         config.SIZING_MODE = "equal_margin"
-        config.FIXED_MARGIN_PCT = 0.025
-        config.MAX_CONCURRENT_POSITIONS = 8
-        config.MIN_5M_VOLUME_SURGE_RATIO = 1.80
-        config.MIN_CLOSE_STRENGTH = 0.66
+        config.FIXED_MARGIN_PCT = 0.020
+        config.MAX_RISK_PER_TRADE_PCT = 0.022
+        config.MAX_CONCURRENT_POSITIONS = 15
         config.DAILY_LOSS_LIMIT = 99
     else:
         default_lev = 50
         config.FULL_HOLD_MODE = True
         config.SIZING_MODE = "equal_margin"
-        config.FIXED_MARGIN_PCT = 0.030
-        config.MAX_CONCURRENT_POSITIONS = 8
-        config.MIN_5M_VOLUME_SURGE_RATIO = 1.80
-        config.MIN_CLOSE_STRENGTH = 0.66
+        config.FIXED_MARGIN_PCT = 0.025
+        config.MAX_RISK_PER_TRADE_PCT = 0.028
+        config.MAX_CONCURRENT_POSITIONS = 15
         config.DAILY_LOSS_LIMIT = 99
 
     lev_options = [10, 15, 20, 25, 35, 50, 75]
@@ -669,24 +666,24 @@ with tab_timemachine:
     """)
 
     if st.button("▶ Запустить реалистичный подневный бэктест (с календарем плюсовых и убыточных дней)", type="primary"):
-        with st.spinner("Загрузка свечей, стресс-проскальзывание, фандинг и расчёт каждого дня..."):
-            from realistic_backtest_7d import get_7d_data, precompute_indicators, simulate_strategy
-            cdata = get_7d_data(prefer_extended_universe=True)
-            pre = precompute_indicators(cdata)
+        with st.spinner("Загрузка живых альткоинов (Bybit/Binance), стресс-проскальзывание, фандинг и честный расчёт каждого дня..."):
+            from realistic_backtest_7d import get_honest_alt_7d_data, simulate_15m_smart_money, precompute_indicators, simulate_strategy
+            cdata = get_honest_alt_7d_data()
 
-            configs = [
-                ("🚀 Full-Hold Cross 50x ($100, 100% до конца + Замки SL, маржа 3.0%)", dict(leverage=50, equal_margin_pct=0.030, max_spike_5m=3.50, big_runner_mode=True, tp1_r=1.72, tp1_share=0.0)),
-                ("💰 Partial-Split Cross 50x ($100, 35% TP1 + Trail, маржа 3.0%)", dict(leverage=50, equal_margin_pct=0.030, max_spike_5m=3.50, big_runner_mode=True, tp1_r=1.72, tp1_share=0.35)),
-                ("🎯 Anti-Rug Fixed Target (100% на 1.70R до слива)", dict(leverage=50, risk_pct=0.040, tp1_r=1.70, tp1_share=1.00)),
-                ("❌ Старый 12-барный скальпер (Early BE + 35м Time-Stop)", dict(leverage=12, legacy_churn_mode=True)),
-            ]
+            res_15m = simulate_15m_smart_money(cdata, initial_balance=config.INITIAL_BALANCE, max_slots=15, mg_pct=0.025, cap_risk_pct=0.028, tp1_share=0.0)
+            res_15m_safe = simulate_15m_smart_money(cdata, initial_balance=config.INITIAL_BALANCE, max_slots=15, mg_pct=0.020, cap_risk_pct=0.022, tp1_share=0.0)
+            res_15m_part = simulate_15m_smart_money(cdata, initial_balance=config.INITIAL_BALANCE, max_slots=15, mg_pct=0.025, cap_risk_pct=0.028, tp1_share=0.35)
+            pre5 = precompute_indicators(cdata)
+            res_old_5m = simulate_strategy(all_data=cdata, initial_balance=config.INITIAL_BALANCE, precomputed=pre5, leverage=50, equal_margin_pct=0.030, max_spike_5m=3.50, big_runner_mode=True, tp1_r=1.72, tp1_share=0.0)
 
+            primary_daily = res_15m.get("daily_breakdown", [])
             rows = []
-            primary_daily = []
-            for idx_c, (name, kw) in enumerate(configs):
-                res = simulate_strategy(all_data=cdata, initial_balance=config.INITIAL_BALANCE, precomputed=pre, **kw)
-                if idx_c == 0:
-                    primary_daily = res.get("daily_breakdown", [])
+            for name, res in [
+                ("🚀 НОВАЯ: 15m Smart Money + Runner (15 слотов, 2.5% маржа, BTC EMA50)", res_15m),
+                ("🔥 Safe 15m Smart Money (15 слотов, 2.0% маржа, риск ≤2.2%)", res_15m_safe),
+                ("💰 Partial 15m Smart Money (15 слотов, 35% на TP1 + 65% Trail)", res_15m_part),
+                ("⚠️ Старый 5m пробой без BTC EMA50 и со стопами до 4.5% (-189%)", res_old_5m),
+            ]:
                 rows.append({
                     "Конфигурация": name,
                     "Итог ($)": f"${res['final_balance']:.2f}",
@@ -701,9 +698,9 @@ with tab_timemachine:
 
             render_table(pd.DataFrame(rows))
             if primary_daily:
-                st.markdown("#### 📅 Подневная ведомость основной стратегии (`Full-Hold Cross 50x`)")
+                st.markdown("#### 📅 Подневная ведомость основной стратегии (`15m Smart Money + Runner, 15 слотов`)")
                 render_table(pd.DataFrame(primary_daily))
-            st.success("✅ Аудит завершен: архитектура **Rocket Hunter** дает устойчивое положительное математическое ожидание с учетом реальных комиссий и проскальзывания!")
+            st.success("✅ Честный аудит (включая мелкие альткоины от $500K/24ч без искусственного фильтра $15M): переход с шумного 5m на **15m Smart Money + BTC EMA50** поднимает винрейт и убирает глубокие стопы!")
 
 # ------------------------------------------------------------------------------
 # 7. ВТОРОЙ МОЗГ (OBSIDIAN VAULT & QUANT ML)

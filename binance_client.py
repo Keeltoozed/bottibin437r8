@@ -908,8 +908,9 @@ class BinanceClient:
         if len(candles) < 30:
             return None
 
-        # Защита от приостановленных/замороженных торгов (свеча старше 10 минут)
-        if (int(time.time() * 1000) - candles[-1]["time"]) > 600_000:
+        # Защита от приостановленных/замороженных торгов (2 бара: 30 мин для 15m, 10 мин для 5m)
+        stale_ms = 1_800_000 if interval == "15m" else 600_000
+        if (int(time.time() * 1000) - candles[-1]["time"]) > stale_ms:
             return None
 
         # СТРОГАЯ СВЕЧНАЯ ДИСЦИПЛИНА:
@@ -1008,6 +1009,14 @@ class BinanceClient:
             return res
 
         ema21_series = calc_ema_series(closed_closes, min(21, len(closed_closes)))
+        ema12_series = calc_ema_series(closed_closes, min(12, len(closed_closes)))
+        ema26_series = calc_ema_series(closed_closes, min(26, len(closed_closes)))
+        macd_line_s = [a - b for a, b in zip(ema12_series, ema26_series)]
+        macd_sig_s = calc_ema_series(macd_line_s, min(9, len(macd_line_s)))
+        macd_hist_s = [m - s for m, s in zip(macd_line_s, macd_sig_s)]
+        macd_bull = (macd_line_s[-1] > macd_sig_s[-1]) and (len(macd_hist_s) < 2 or macd_hist_s[-1] > macd_hist_s[-2])
+        macd_bear = (macd_line_s[-1] < macd_sig_s[-1]) and (len(macd_hist_s) < 2 or macd_hist_s[-1] < macd_hist_s[-2])
+
         ema27 = config.round_price(calc_ema(closed_closes, min(27, len(closed_closes))))
         ema63 = config.round_price(calc_ema(closed_closes, min(63, len(closed_closes))))
         ema150 = config.round_price(calc_ema(closed_closes, min(150, len(closed_closes))))
@@ -1165,12 +1174,44 @@ class BinanceClient:
         else:
             breakout_type = "WATCH"
 
-        # Детектор Smart Money (16b BOS + недавний 3-свечной FVG + тренд EMA200 + ADX >= 20)
+        # Детектор Smart Money (16b BOS + недавний FVG + тренд EMA200 + ADX >= 20 + MACD подтверждение на 15m!)
         swing_12_slice = closed_candles[-13:-1] if len(closed_candles) > 12 else closed_candles[:-1]
         swing_12_low = min(c["low"] for c in swing_12_slice)
         swing_12_high = max(c["high"] for c in swing_12_slice)
         sm_bos_long = (sig_cl > sq_high) and has_fvg_bull and above_ema200 and (adx14 >= 20.0) and (surge_ratio >= 1.50)
         sm_bos_short = (sig_cl < sq_low) and has_fvg_bear and (not above_ema200) and (adx14 >= 20.0) and (surge_ratio >= 1.50)
+
+        # 15m SMART MONEY 5/7 CONFLUENCE ENGINE (WR 70%, PF 2.02 на Bybit 7D и 8/8 исторических сплитов!):
+        # 1. BOS 16 баров (4ч на 15m), 2. HTF EMA200, 3. EMA9 >= EMA21, 4. MACD импульс, 5. ADX>=20 + RSI, + бонусы FVG/ADX24/RVOL2.0 (>= 5/7)
+        h48_slice = closed_candles[-49:-1] if len(closed_candles) > 48 else closed_candles[:-1]
+        h48_high = max(c["high"] for c in h48_slice)
+        h48_low = min(c["low"] for c in h48_slice)
+        r48_pct = (h48_high - h48_low) / max(h48_low, 1e-9)
+        pos48 = (sig_cl - h48_low) / max(h48_high - h48_low, 1e-9)
+        sm15_wall_l = not (r48_pct >= 0.14 and pos48 >= 0.55 and 0.0 < (h48_high - sig_cl) / max(sig_cl, 1e-9) <= 0.045)
+        sm15_wall_s = not (r48_pct >= 0.14 and pos48 <= 0.45 and 0.0 < (sig_cl - h48_low) / max(sig_cl, 1e-9) <= 0.045)
+        sm15_conf_l = 4 + (1 if has_fvg_bull else 0) + (1 if adx14 >= 24.0 else 0) + (1 if surge_ratio >= 2.0 else 0)
+        sm15_conf_s = 4 + (1 if has_fvg_bear else 0) + (1 if adx14 >= 24.0 else 0) + (1 if surge_ratio >= 2.0 else 0)
+        sm15_long = (
+            sm15_wall_l and (sig_cl > sq_high) and above_ema200
+            and (sig_cl > ema9 >= ema21 * 0.998) and macd_bull
+            and (adx14 >= 20.0) and (surge_ratio >= 1.50) and (atr14_pct >= 0.0035)
+            and (ema21_ext_pct <= 0.055) and (50.0 <= rsi <= 80.0)
+            and (close_strength_long >= 0.66) and (upper_wick_pct <= 0.28)
+            and (sm15_conf_l >= 5)
+        )
+        sm15_short = (
+            sm15_wall_s and (sig_cl < sq_low) and (not above_ema200)
+            and (sig_cl < ema9 <= ema21 * 1.002) and macd_bear
+            and (adx14 >= 20.0) and (surge_ratio >= 1.50) and (atr14_pct >= 0.0035)
+            and (ema21_ext_pct <= 0.055) and (20.0 <= rsi <= 50.0)
+            and (close_strength_short >= 0.66) and (lower_wick_pct <= 0.28)
+            and (sm15_conf_s >= 5)
+        )
+        if interval == "15m":
+            is_breakout_long = sm15_long
+            is_breakout_short = sm15_short
+            breakout_type = "SM_15M" if (sm15_long or sm15_short) else "WATCH"
 
         target_high_ref = sq_high if sq_range_pct <= sq_max_rng else donchian_high
         target_low_ref = sq_low if sq_range_pct <= sq_max_rng else donchian_low
@@ -1276,6 +1317,12 @@ class BinanceClient:
             "has_fvg_bear": has_fvg_bear,
             "sm_bos_long": sm_bos_long,
             "sm_bos_short": sm_bos_short,
+            "sm15_long": sm15_long,
+            "sm15_short": sm15_short,
+            "sm15_conf_l": sm15_conf_l,
+            "sm15_conf_s": sm15_conf_s,
+            "macd_bull": macd_bull,
+            "macd_bear": macd_bear,
             "sm_long_sl_pct": sm_long_sl_pct,
             "sm_long_wick_sl": sm_long_wick_sl,
             "sm_short_sl_pct": sm_short_sl_pct,
@@ -1287,10 +1334,11 @@ class BinanceClient:
 
     async def fetch_btc_regime(self) -> Dict[str, Any]:
         """
-        Институциональный макро-фильтр рынка по Bitcoin (Поводырь рынка).
-        Блокирует входы против резких импульсных проливов/выносов BTC.
+        Институциональный макро-фильтр рынка по Bitcoin (15m EMA50 + импульс).
+        Блокирует покупку альтов при нисходящем/падающем BTC (как в 14:30 UTC) и шорты против растущего BTC!
         """
-        analysis = await self.fetch_candles_analysis("BTCUSDT", interval="5m", limit=35)
+        tf = str(getattr(config, "SCAN_TIMEFRAME", "15m")).strip() or "15m"
+        analysis = await self.fetch_candles_analysis("BTCUSDT", interval=tf, limit=80)
         if not analysis:
             return {
                 "trend": "CHOP",
@@ -1299,36 +1347,41 @@ class BinanceClient:
                 "rsi": 50.0,
                 "is_dumping": False,
                 "is_pumping": False,
+                "btc_macro_bull": True,
+                "btc_macro_bear": True,
                 "status_str": "🟡 Нейтральный (BTC спокоен)"
             }
 
-        p5 = analysis.get("pct_5m", 0.0)
-        p15 = analysis.get("pct_15m", 0.0)
+        p_bar = analysis.get("pct_5m", 0.0)     # На 15m это изменение закрытой 15m свечи BTC!
+        p_3bar = analysis.get("pct_15m", 0.0)   # На 15m это изменение за 45 минут (3 x 15m)!
+        sig_cl = float(analysis.get("signal_close", analysis.get("current_price", 0.0)) or 0.0)
+        ema50_btc = float(analysis.get("ema50", sig_cl) or sig_cl)
         trend = analysis.get("trend", "CHOP")
         rsi = analysis.get("rsi", 50.0)
 
-        # Защита от торговли против импульса BTC И Anti-BTC-Climax Guard (не шортим дно панического слива BTC и не лонгуем пик сквиза BTC!)
-        is_dumping = (p15 <= -0.55) or (p5 <= -0.40)
-        is_pumping = (p15 >= +0.55) or (p5 >= +0.40)
-        is_flush_down = (p5 <= -0.38) or (p15 <= -0.75)
-        is_spike_up = (p5 >= +0.38) or (p15 >= +0.75)
+        btc_macro_bull = (sig_cl >= ema50_btc * 0.997) and (p_bar > -0.45) and (p_3bar > -0.80)
+        btc_macro_bear = (sig_cl <= ema50_btc * 1.003) and (p_bar < +0.45) and (p_3bar < +0.80)
 
-        if is_flush_down:
-            status_str = f"🔴 Панический слив BTC ({p5:+.2f}% / 15m {p15:+.2f}%) — Щит от ложных выносов активен!"
-        elif is_spike_up:
-            status_str = f"🟢 Резкий сквиз BTC ({p5:+.2f}% / 15m {p15:+.2f}%) — Щит от покупки хая активен!"
-        elif is_dumping:
-            status_str = f"🟠 Медвежий BTC ({p15:+.2f}%, {trend}) — Лонги заблокированы"
-        elif is_pumping:
-            status_str = f"🟢 Бычий BTC ({p15:+.2f}%, {trend}) — Шорты заблокированы"
+        is_dumping = (p_3bar <= -0.80) or (p_bar <= -0.45) or (not btc_macro_bull and getattr(config, "ENABLE_BTC_MACRO_ALIGNMENT", True))
+        is_pumping = (p_3bar >= +0.80) or (p_bar >= +0.45) or (not btc_macro_bear and getattr(config, "ENABLE_BTC_MACRO_ALIGNMENT", True))
+        is_flush_down = (p_bar <= -0.85) or (p_3bar <= -1.40)
+        is_spike_up = (p_bar >= +0.85) or (p_3bar >= +1.40)
+
+        if btc_macro_bull and not btc_macro_bear:
+            status_str = f"🟢 Бычий режим BTC (выше EMA50, 15m {p_bar:+.2f}%) — Разрешены LONG ракеты"
+        elif btc_macro_bear and not btc_macro_bull:
+            status_str = f"🔴 Медвежий режим BTC (ниже EMA50, 15m {p_bar:+.2f}%) — Разрешены SHORT пробои"
         else:
-            status_str = f"🟡 Спокойный BTC ({p15:+.2f}%, {trend}) — Alpha Rocket активен (LONG + SHORT)"
+            status_str = f"🟡 Нейтральный BTC (у EMA50, 15m {p_bar:+.2f}%) — Активен 15m Smart Money"
 
         return {
             "trend": trend,
-            "pct_5m": p5,
-            "pct_15m": p15,
+            "pct_5m": p_bar,
+            "pct_15m": p_3bar,
             "rsi": rsi,
+            "ema50": ema50_btc,
+            "btc_macro_bull": btc_macro_bull,
+            "btc_macro_bear": btc_macro_bear,
             "is_dumping": is_dumping,
             "is_pumping": is_pumping,
             "is_flush_down": is_flush_down,

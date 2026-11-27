@@ -205,17 +205,19 @@ Return ONLY valid JSON matching exact keys:
         clv_val = context.get("close_strength_long", 0.7) if cand_side == "LONG" else context.get("close_strength_short", 0.7)
         wick_val = context.get("upper_wick_pct", 0.1) if cand_side == "LONG" else context.get("lower_wick_pct", 0.1)
 
-        # A+ Quant Override: разрешаем подтвержденные 3H/Squeeze пробои И Smart Money (SM_FVG) с сильной Alpha vs BTC
+        # A+ Quant Override: разрешаем подтвержденные 15m Smart Money (SM_15M), 3H/Squeeze пробои и SM_FVG
         alpha_abs = abs(float(context.get("alpha_5m", p5m) or 0.0))
-        min_rvol_ov = 1.50 if brk_label == "SM_FVG" else config.MIN_5M_VOLUME_SURGE_RATIO
-        min_a5_ov = 0.65 if brk_label == "SM_FVG" else getattr(config, "MIN_ALPHA_5M_PCT", 0.80)
+        min_rvol_ov = 1.50 if brk_label in ("SM_FVG", "SM_15M") else config.MIN_5M_VOLUME_SURGE_RATIO
+        min_a5_ov = 0.45 if brk_label == "SM_15M" else (0.65 if brk_label == "SM_FVG" else getattr(config, "MIN_ALPHA_5M_PCT", 0.80))
+        max_ext_ov = 0.055 if brk_label == "SM_15M" else config.MAX_EMA21_EXTENSION_PCT
+        max_wick_ov = 0.28 if brk_label == "SM_15M" else config.WICK_EXHAUSTION_MAX
         if (
             eval_result.get("decision") != expected_decision and
             float(vol_surge) >= min_rvol_ov and
             float(clv_val) >= config.MIN_CLOSE_STRENGTH and
-            float(wick_val) <= config.WICK_EXHAUSTION_MAX and
+            float(wick_val) <= max_wick_ov and
             alpha_abs >= min_a5_ov and
-            float(context.get("ema21_ext_pct", 0)) <= config.MAX_EMA21_EXTENSION_PCT and
+            float(context.get("ema21_ext_pct", 0)) <= max_ext_ov and
             float(context.get(sl_key, 0)) <= config.MAX_ALLOWED_SL_PCT
         ):
             eval_result["decision"] = expected_decision

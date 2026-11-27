@@ -36,19 +36,24 @@ BINANCE_TESTNET_FUTURES_URL = "https://testnet.binancefuture.com"
 PAPER_TRADING = os.getenv("PAPER_TRADING", "true").lower() == "true"
 INITIAL_BALANCE = float(os.getenv("INITIAL_BALANCE", "100.0"))
 
-# Режим сайзинга: equal_margin ("как они" — равный залог маржи на каждую сделку!) или risk_parity
+# Режим сайзинга: equal_margin (с потолком риска MAX_RISK_PER_TRADE_PCT — без дыр по -150%..-189%!) или risk_parity
 SIZING_MODE = os.getenv("SIZING_MODE", "equal_margin")
-FIXED_MARGIN_PCT = float(os.getenv("FIXED_MARGIN_PCT", "0.030"))  # 3.0% от эквити ($3.00 маржа / $150.00 позиция @ 50x Cross при $100!)
+FIXED_MARGIN_PCT = float(os.getenv("FIXED_MARGIN_PCT", "0.025"))            # 2.5% от эквити ($2.50 маржа / $125 @ 50x на слот при 15 слотах!)
+MAX_RISK_PER_TRADE_PCT = float(os.getenv("MAX_RISK_PER_TRADE_PCT", "0.028")) # Жесткий потолок убытка на 1 стоп <= 2.8% депо (~$2.80 — никаких -$7 / -189%!)
 
 # Параметры Risk-Parity (используются только при SIZING_MODE=risk_parity) и защиты от просадки:
-RISK_PER_TRADE_PCT = float(os.getenv("RISK_PER_TRADE_PCT", "0.055"))
+RISK_PER_TRADE_PCT = float(os.getenv("RISK_PER_TRADE_PCT", "0.028"))
 CONVICTION_RISK_MULT = float(os.getenv("CONVICTION_RISK_MULT", "1.00"))
 DD_GUARD_THRESHOLD = float(os.getenv("DD_GUARD_THRESHOLD", "0.20"))
 DD_GUARD_RISK_MULT = float(os.getenv("DD_GUARD_RISK_MULT", "0.75"))
 TRADE_AMOUNT_USDT = float(os.getenv("TRADE_AMOUNT_USDT", "10.0"))
-MAX_CONCURRENT_POSITIONS = min(int(os.getenv("MAX_POSITIONS", "8")), 10)
+MAX_CONCURRENT_POSITIONS = min(int(os.getenv("MAX_POSITIONS", "15")), 20)    # 15 одновременных сделок (по запросу пользователя, как в ТГ-канале!)
+MAX_SAME_SIDE_POSITIONS = int(os.getenv("MAX_SAME_SIDE_POSITIONS", "6"))     # Защита от сноса 10-15 однонаправленных сделок на одном проливе BTC!
 LEVERAGE = int(os.getenv("LEVERAGE", "50"))
 ENABLE_SHORT = os.getenv("ENABLE_SHORT", "true").lower() == "true"
+SCAN_TIMEFRAME = os.getenv("SCAN_TIMEFRAME", "15m").strip()                  # 15m Smart Money таймфрейм (WR 70%, PF 2.02 на Bybit против 35% на шумном 5m!)
+ENABLE_BTC_MACRO_ALIGNMENT = os.getenv("ENABLE_BTC_MACRO_ALIGNMENT", "true").lower() == "true"  # LONG выше BTC EMA50, SHORT ниже BTC EMA50
+SKIP_DEAD_NIGHT_WINDOW = os.getenv("SKIP_DEAD_NIGHT_WINDOW", "true").lower() == "true"          # Пропуск новых входов в мертвую пилу 21:00–01:00 UTC
 
 # Предохранитель депозита (Circuit Breaker):
 # По запросу пользователя заморозка торговли при серии минусов ОТКЛЮЧЕНА (бот торгует непрерывно 24/7):
@@ -105,11 +110,11 @@ NIGHT_MIN_RVOL = float(os.getenv("NIGHT_MIN_RVOL", "2.10"))               # В �
 NIGHT_MIN_CLOSE_STRENGTH = float(os.getenv("NIGHT_MIN_CLOSE_STRENGTH", "0.72"))  # И плотное закрытие CLV >= 0.72 без теней
 LOSS_SYMBOL_QUARANTINE_MINUTES = int(os.getenv("LOSS_SYMBOL_QUARANTINE_MINUTES", "120"))  # 2ч карантина монеты после полного стопа
 
-# Волатильно-адаптивные границы стопа (простор под Big-Runner удержание: мин 1.1%, макс 4.5%, ATR x1.75 — не сносит шумом!):
+# Волатильно-адаптивные границы стопа (мин 1.15%, макс 2.20% — отсекает широкие стопы -150%..-189%, съедавшие профит!):
 STOP_LOSS_MIN_PCT = float(os.getenv("STOP_LOSS_MIN_PCT", "0.0110"))  # 1.10% мин стоп (защита от шумовых сбивов)
-STOP_LOSS_MAX_PCT = float(os.getenv("STOP_LOSS_MAX_PCT", "0.0450"))  # 4.50% макс стоп (контроль риска на Cross Margin!)
+STOP_LOSS_MAX_PCT = float(os.getenv("STOP_LOSS_MAX_PCT", "0.0220"))  # 2.20% макс стоп (блокирует раздутые стопы >110% @ 50x!)
 MAX_ALLOWED_SL_PCT = STOP_LOSS_MAX_PCT
-SL_ATR_MULT = float(os.getenv("SL_ATR_MULT", "1.75"))                # Структурный стоп не ближе 1.75 * ATR14
+SL_ATR_MULT = float(os.getenv("SL_ATR_MULT", "1.45"))                # Структурный стоп 1.45 * ATR14 на 15m свечах
 SIZING_SL_FLOOR_PCT = float(os.getenv("SIZING_SL_FLOOR_PCT", "0.0110"))
 MIN_MARGIN_USDT = float(os.getenv("MIN_MARGIN_USDT", "0.50"))
 MIN_MARGIN_EQUITY_PCT = float(os.getenv("MIN_MARGIN_EQUITY_PCT", "0.04"))
@@ -127,13 +132,13 @@ EARLY_BE_TRIGGER_PCT = float(os.getenv("EARLY_BE_TRIGGER_PCT", "9.99"))   # От
 EARLY_BE_TRIGGER_R = float(os.getenv("EARLY_BE_TRIGGER_R", "99.0"))
 EARLY_BE_LOCK_PCT = float(os.getenv("EARLY_BE_LOCK_PCT", "0.0022"))
 
-# Режим удержания позиции: FULL_HOLD_MODE=True (100% объема едет без вытаскиваний долей, TP1/TP2 двигают замок SL в плюс -> PF 2.13!)
+# Режим удержания позиции: FULL_HOLD_MODE=True (100% объема едет без вытаскиваний долей, ступени 1.15R / 1.65R / 2.50R+ Фибоначчи!)
 FULL_HOLD_MODE = os.getenv("FULL_HOLD_MODE", "true").lower() == "true"
-TARGET_1_R = float(os.getenv("TARGET_1_R", "1.90"))          # Ступень 1 (+1.90R): перенос стопа в гарантированный плюс +0.40R!
-TARGET_2_R = float(os.getenv("TARGET_2_R", "8.00"))          # Верхний ориентир супер-ракеты (+400%..+3000% @ 50x)
+TARGET_1_R = float(os.getenv("TARGET_1_R", "1.15"))          # Ступень 1 (+1.15R, как TP1 в Smart Money боте!): быстрый перенос SL в плюс +0.25R!
+TARGET_2_R = float(os.getenv("TARGET_2_R", "1.65"))          # Ступень 2 (+1.65R Фибо): подтягивание замка SL в жирный плюс +0.95R!
 TP1_PARTIAL_PCT = float(os.getenv("TP1_PARTIAL_PCT", "0.00")) # 0% в Full-Hold (все 100% маржи ловят ракету целиком!)
-POST_TP1_LOCK_R = float(os.getenv("POST_TP1_LOCK_R", "0.40"))
-MAX_RISK_FREE_RUNNERS = int(os.getenv("MAX_RISK_FREE_RUNNERS", "4"))  # Безрисковые ранеры (после TP1) не блокируют слоты для новых ракет!
+POST_TP1_LOCK_R = float(os.getenv("POST_TP1_LOCK_R", "0.25"))
+MAX_RISK_FREE_RUNNERS = int(os.getenv("MAX_RISK_FREE_RUNNERS", "5"))  # Безрисковые ранеры (после TP1) не блокируют 15 активных слотов!
 TP2_PARTIAL_OF_REMAINING = 1.00
 
 TP1_PCT = float(os.getenv("TP1_PCT", "0.0000"))
