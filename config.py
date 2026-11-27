@@ -97,6 +97,14 @@ MAX_PRE_BREAKOUT_EXT_PCT = float(os.getenv("MAX_PRE_BREAKOUT_EXT_PCT", "0.028"))
 MAX_3H_CLIMAX_RETURN_PCT = float(os.getenv("MAX_3H_CLIMAX_RETURN_PCT", "0.20"))    # Блок входа в выдохшуюся параболу (> +20% за 3 часа)
 MAX_LIVE_DRIFT_PCT = float(os.getenv("MAX_LIVE_DRIFT_PCT", "0.018"))
 
+# ANTI-DOUBLE-TOP / 12H WALL GUARD & NIGHT DEAD-ZONE FILTER (защита от 2-го круга в стену и ночной пилы):
+ENABLE_12H_WALL_GUARD = os.getenv("ENABLE_12H_WALL_GUARD", "true").lower() == "true"
+WALL_GUARD_MIN_12H_RANGE_PCT = float(os.getenv("WALL_GUARD_MIN_12H_RANGE_PCT", "0.13"))  # При размахе >= 13% за 12ч не бьемся в непробитый 12ч хай/лой!
+ENABLE_NIGHT_LIQUIDITY_GUARD = os.getenv("ENABLE_NIGHT_LIQUIDITY_GUARD", "true").lower() == "true"
+NIGHT_MIN_RVOL = float(os.getenv("NIGHT_MIN_RVOL", "2.10"))               # В мертвую сессию 21:00–01:00 UTC требуем RVOL >= 2.10x
+NIGHT_MIN_CLOSE_STRENGTH = float(os.getenv("NIGHT_MIN_CLOSE_STRENGTH", "0.72"))  # И плотное закрытие CLV >= 0.72 без теней
+LOSS_SYMBOL_QUARANTINE_MINUTES = int(os.getenv("LOSS_SYMBOL_QUARANTINE_MINUTES", "120"))  # 2ч карантина монеты после полного стопа
+
 # Волатильно-адаптивные границы стопа (простор под Big-Runner удержание: мин 1.1%, макс 4.5%, ATR x1.75 — не сносит шумом!):
 STOP_LOSS_MIN_PCT = float(os.getenv("STOP_LOSS_MIN_PCT", "0.0110"))  # 1.10% мин стоп (защита от шумовых сбивов)
 STOP_LOSS_MAX_PCT = float(os.getenv("STOP_LOSS_MAX_PCT", "0.0450"))  # 4.50% макс стоп (контроль риска на Cross Margin!)
@@ -149,10 +157,12 @@ SPOT_MIRROR_MIN_VOL_USDT = float(os.getenv("SPOT_MIRROR_MIN_VOL_USDT", "350000")
 SCAN_TICKERS_LIMIT = min(int(os.getenv("SCAN_TICKERS_LIMIT", "240")), 300)                # Топ-240 самых горячих из 400-500+ пар на глубокий анализ свечей!
 MIN_24H_TRADES_COUNT = int(os.getenv("MIN_24H_TRADES_COUNT", "1000"))
 SPOT_MIRROR_MIN_TRADES = int(os.getenv("SPOT_MIRROR_MIN_TRADES", "600"))
-MIN_AVG_5M_QUOTE_VOL = float(os.getenv("MIN_AVG_5M_QUOTE_VOL", "2500.0"))                 # $2.5K/5m база (+ >=$8K пробойная свеча) на fapi
-ALT_FUTURES_MIN_AVG_5M_VOL = float(os.getenv("ALT_FUTURES_MIN_AVG_5M_VOL", "600.0"))      # $600/5m база (+ >=$2.5K пробойная свеча) на Bybit/Gate/Bitget
+MIN_AVG_5M_QUOTE_VOL = float(os.getenv("MIN_AVG_5M_QUOTE_VOL", "3500.0"))                 # $3.5K/5m база (+ >=$8K пробойная свеча и без дыр <$600)
+ALT_FUTURES_MIN_AVG_5M_VOL = float(os.getenv("ALT_FUTURES_MIN_AVG_5M_VOL", "3500.0"))      # $3.5K/5m база на Bybit/Gate/Bitget (отсекает пустые стаканы $53-$940/5m!)
 BITGET_MIRROR_MIN_AVG_5M_VOL = ALT_FUTURES_MIN_AVG_5M_VOL
-SPOT_MIRROR_MIN_AVG_5M_VOL = float(os.getenv("SPOT_MIRROR_MIN_AVG_5M_VOL", "500.0"))
+SPOT_MIRROR_MIN_AVG_5M_VOL = float(os.getenv("SPOT_MIRROR_MIN_AVG_5M_VOL", "1200.0"))
+MIN_SIGNAL_5M_QUOTE_VOL = float(os.getenv("MIN_SIGNAL_5M_QUOTE_VOL", "8000.0"))            # Минимум $8K реального объема на сигнальной 5m свече
+MIN_RECENT_5M_BAR_VOL = float(os.getenv("MIN_RECENT_5M_BAR_VOL", "600.0"))                 # Запрет монет с мертвыми 5m свечами < $600 (защита от фейк-RVOL на 1 ордере!)
 MIN_V3_VOLUME_PERSISTENCE = float(os.getenv("MIN_V3_VOLUME_PERSISTENCE", "1.10"))         # Кумулятивный приток объема за 3 свечи >= 1.10x
 ENABLE_MTF_15M_FILTER = os.getenv("ENABLE_MTF_15M_FILTER", "true").lower() == "true"      # Строгая 15m лента EMA9 > EMA21 > EMA50
 MAX_24H_CHANGE_CAP = float(os.getenv("MAX_24H_CHANGE_CAP", "120.0"))

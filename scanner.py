@@ -171,25 +171,29 @@ class MarketScanner:
                 min_atr_pct = float(getattr(config, "MIN_ATR_PCT", 0.0025))
                 avg_5m_qvol = float(analysis.get("avg_5m_quote_vol", 0.0) or 0.0)
                 v3_surge = float(analysis.get("v3_surge", 1.0) or 1.0)
-                # Адаптация порога 5m объема под активное зеркало:
-                # fapi ($5K/5m база + >=$15K пробой), bybit/gate/bitget ($1K/5m + >=$4K), vision ($600/5m + >=$2.5K).
+                # Адаптация порога 5m объема и фильтра пустых свечей под активное зеркало:
+                # fapi/bybit/bitget/okx/gate ($3.5K/5m база + >=$8K пробой + ни одной мертвой свечи <$600 за 50м!),
+                # vision spot ($1.2K/5m + >=$2.8K пробой + мин. бар >=$250).
                 is_spot_mirror = binance_client.is_spot_mirror
                 m_name_now = binance_client.active_mirror_name
                 is_alt_futures = m_name_now in ("bybit", "bitget", "okx", "gate")
                 if is_spot_mirror:
-                    min_avg_vol = float(getattr(config, "SPOT_MIRROR_MIN_AVG_5M_VOL", 600.0))
+                    min_avg_vol = float(getattr(config, "SPOT_MIRROR_MIN_AVG_5M_VOL", 1200.0))
                 elif is_alt_futures:
-                    min_avg_vol = float(getattr(config, "ALT_FUTURES_MIN_AVG_5M_VOL", 1000.0))
+                    min_avg_vol = float(getattr(config, "ALT_FUTURES_MIN_AVG_5M_VOL", 3500.0))
                 else:
-                    min_avg_vol = float(getattr(config, "MIN_AVG_5M_QUOTE_VOL", 5000.0))
+                    min_avg_vol = float(getattr(config, "MIN_AVG_5M_QUOTE_VOL", 3500.0))
+                min_sig_vol = float(getattr(config, "MIN_SIGNAL_5M_QUOTE_VOL", 8000.0))
+                min_bar_vol = 250.0 if is_spot_mirror else float(getattr(config, "MIN_RECENT_5M_BAR_VOL", 600.0))
                 last_5m_qvol = float(analysis.get("last_quote_volume", 0.0) or 0.0)
+                min_recent_5m_qvol = float(analysis.get("min_recent_5m_qvol", avg_5m_qvol) or 0.0)
                 vol_24h_pair = float(t.get("volume_24h", 0.0) or 0.0)
                 if is_spot_mirror:
-                    vol_floor_ok = (avg_5m_qvol >= min_avg_vol) and (last_5m_qvol >= 2000.0)
+                    vol_floor_ok = (avg_5m_qvol >= min_avg_vol) and (last_5m_qvol >= 2800.0) and (min_recent_5m_qvol >= min_bar_vol)
                 elif is_alt_futures:
-                    vol_floor_ok = (vol_24h_pair >= 120000.0) and (avg_5m_qvol >= min_avg_vol) and (last_5m_qvol >= 2500.0)
+                    vol_floor_ok = (vol_24h_pair >= 350000.0) and (avg_5m_qvol >= min_avg_vol) and (last_5m_qvol >= min_sig_vol) and (min_recent_5m_qvol >= min_bar_vol)
                 else:
-                    vol_floor_ok = (avg_5m_qvol >= min_avg_vol) and (last_5m_qvol >= 8000.0)
+                    vol_floor_ok = (avg_5m_qvol >= min_avg_vol) and (last_5m_qvol >= min_sig_vol) and (min_recent_5m_qvol >= min_bar_vol)
                 min_v3 = float(getattr(config, "MIN_V3_VOLUME_PERSISTENCE", 1.10))
                 is_mtf_long = analysis.get("is_mtf_long_ok", False) if getattr(config, "ENABLE_MTF_15M_FILTER", True) else True
                 is_mtf_short = analysis.get("is_mtf_short_ok", False) if getattr(config, "ENABLE_MTF_15M_FILTER", True) else True
@@ -197,6 +201,8 @@ class MarketScanner:
                 is_macro_short = analysis.get("is_macro_trend_short", True)
                 anti_rug_long = analysis.get("anti_rug_long_ok", True)
                 anti_rug_short = analysis.get("anti_rug_short_ok", True)
+                anti_wall_long = analysis.get("anti_wall_long_ok", True)
+                anti_wall_short = analysis.get("anti_wall_short_ok", True)
                 brk_type = analysis.get("breakout_type", "STRUCT_3H")
 
                 # ОТНОСИТЕЛЬНАЯ СИЛА ПРОТИВ BTC (IDIOSYNCRATIC ALPHA RS):
@@ -209,19 +215,27 @@ class MarketScanner:
                 min_a5 = float(getattr(config, "MIN_ALPHA_5M_PCT", 0.80))
                 min_a15 = float(getattr(config, "MIN_ALPHA_15M_PCT", 1.00))
 
-                # Подтверждение институционального объема (RVOL >= 1.80x И 3-свечной приток >= 1.10x)
-                vol_confirmed = (surge >= config.MIN_5M_VOLUME_SURGE_RATIO) and (v3_surge >= min_v3)
+                # Ночной фильтр низкой ликвидности (21:00–01:00 UTC — мертвое окно закрытия США до открытия Азии):
+                # Не выключает радар, но требует более сильный пробойный импульс (RVOL >= 2.10x и плотный CLV >= 0.72)!
+                utc_hour = time.gmtime(now).tm_hour
+                is_dead_night = bool(getattr(config, "ENABLE_NIGHT_LIQUIDITY_GUARD", True)) and (utc_hour >= 21 or utc_hour < 1)
+                eff_min_rvol = max(config.MIN_5M_VOLUME_SURGE_RATIO, float(getattr(config, "NIGHT_MIN_RVOL", 2.10))) if is_dead_night else config.MIN_5M_VOLUME_SURGE_RATIO
+                eff_min_clv = max(config.MIN_CLOSE_STRENGTH, float(getattr(config, "NIGHT_MIN_CLOSE_STRENGTH", 0.72))) if is_dead_night else config.MIN_CLOSE_STRENGTH
+
+                # Подтверждение институционального объема (RVOL >= 1.80x / ночью 2.10x И 3-свечной приток >= 1.10x)
+                vol_confirmed = (surge >= eff_min_rvol) and (v3_surge >= min_v3)
 
                 # ==============================================================
-                # 4. ПРАВИЛА ВХОДА ALPHA ROCKET ENGINE (7/7 SPLITS VALIDATED)
+                # 4. ПРАВИЛА ВХОДА ALPHA ROCKET ENGINE (8/8 SPLITS VALIDATED)
                 # - STRUCT_3H (36 баров) / SQUEEZE_80M (16 баров <= 6.5%) / RUG_SHORT (слив после пампа >= +15%)
+                # - Anti-Double-Top 12H Wall Guard: запрет биться на 2-м круге в непробитый 12ч хай/лой
+                # - Dead-Book Filter: отсев тонких стаканов с пустыми 5m свечами < $600 (защита от фейк-RVOL)
                 # - Idiosyncratic Alpha RS vs BTC: |alpha_5m| >= 0.80% и |alpha_15m| >= 1.00%
-                # - Anti-BTC-Flush Guard: запрет шортить дно панической свечи BTC и покупать пик сквиза BTC
-                # - Anti-Rug Top Guard: вход только из свежего сжатия (за 15м до пробоя ext <= 2.8%)
                 # ==============================================================
                 tech_long = (
                     analysis.get("is_breakout_long", False) and
                     anti_rug_long and
+                    anti_wall_long and
                     atr_pct >= min_atr_pct and
                     vol_confirmed and
                     vol_floor_ok and
@@ -230,7 +244,7 @@ class MarketScanner:
                     min_req_impulse <= pct_5m <= max_spike_5m and
                     alpha_5m >= min_a5 and
                     alpha_15m >= min_a15 and
-                    clv_long >= config.MIN_CLOSE_STRENGTH and
+                    clv_long >= eff_min_clv and
                     upper_wick <= config.WICK_EXHAUSTION_MAX and
                     sig_close > ema9 and ema9 >= ema21 * 0.998 and
                     config.MIN_RSI_LONG <= rsi <= config.MAX_RSI_LONG and
@@ -245,6 +259,7 @@ class MarketScanner:
                     config.ENABLE_SHORT and
                     analysis.get("is_breakout_short", False) and
                     anti_rug_short and
+                    anti_wall_short and
                     atr_pct >= min_atr_pct and
                     vol_confirmed and
                     vol_floor_ok and
@@ -253,7 +268,7 @@ class MarketScanner:
                     -max_spike_5m <= pct_5m <= -min_req_impulse and
                     alpha_5m <= -min_a5 and
                     alpha_15m <= -min_a15 and
-                    clv_short >= config.MIN_CLOSE_STRENGTH and
+                    clv_short >= eff_min_clv and
                     lower_wick <= config.WICK_EXHAUSTION_MAX and
                     sig_close < ema9 and ema9 <= ema21 * 1.002 and
                     config.MIN_RSI_SHORT <= rsi <= config.MAX_RSI_SHORT and
@@ -264,14 +279,16 @@ class MarketScanner:
                 )
                 is_short = tech_short and not btc_regime.get("is_pumping", False) and not btc_regime.get("is_flush_down", False)
 
-                # SMART MONEY FVG + BOS + EMA200 + ADX >= 20 (дополнительный высокоточный трендовый вход, 8/8 GREEN +489%!)
+                # SMART MONEY FVG + BOS + EMA200 + ADX >= 20 (дополнительный высокоточный трендовый вход, 8/8 GREEN!)
                 is_sm_fvg = False
                 if (not is_long and not is_short) and getattr(config, "ENABLE_SM_FVG_ENTRY", True):
                     adx14_val = float(analysis.get("adx14", 0.0) or 0.0)
                     sm_long_sl = float(analysis.get("sm_long_sl_pct", sl_long_dist) or sl_long_dist)
                     sm_short_sl = float(analysis.get("sm_short_sl_pct", sl_short_dist) or sl_short_dist)
+                    sm_min_rv = eff_min_rvol if is_dead_night else 1.50
                     sm_tech_l = (
                         analysis.get("sm_bos_long", False) and
+                        anti_wall_long and surge >= sm_min_rv and
                         vol_floor_ok and atr_pct >= min_atr_pct and v3_surge >= min_v3 and
                         adx14_val >= 20.0 and is_mtf_long and ema21_ext <= 0.028 and
                         alpha_5m >= 0.65 and alpha_15m >= 0.90 and
@@ -290,6 +307,7 @@ class MarketScanner:
                     elif config.ENABLE_SHORT:
                         sm_tech_s = (
                             analysis.get("sm_bos_short", False) and
+                            anti_wall_short and surge >= sm_min_rv and
                             vol_floor_ok and atr_pct >= min_atr_pct and v3_surge >= min_v3 and
                             adx14_val >= 20.0 and is_mtf_short and ema21_ext <= 0.028 and
                             alpha_5m <= -0.65 and alpha_15m <= -0.90 and
@@ -332,17 +350,21 @@ class MarketScanner:
                             w_status = "⏳ 15m тренд не бычий (против тренда)"
                         elif watch_side == "SHORT" and not is_mtf_short:
                             w_status = "⏳ 15m тренд не медвежий (против тренда)"
+                        elif (watch_side == "LONG" and not anti_wall_long) or (watch_side == "SHORT" and not anti_wall_short):
+                            w_status = "🧱 Стена 12ч Double-Top/Дна (отсев 2-го круга)"
+                        elif min_recent_5m_qvol < min_bar_vol:
+                            w_status = f"🕳️ Дыры ликвидности (мин 5m ${min_recent_5m_qvol:.0f} < ${min_bar_vol:.0f})"
                         elif avg_5m_qvol < min_avg_vol:
                             w_status = f"💤 Тонкая монета (${avg_5m_qvol:.0f} < ${min_avg_vol:.0f})"
-                        elif surge < config.MIN_5M_VOLUME_SURGE_RATIO:
-                            w_status = f"📊 Пробой есть, ждем RVOL ({surge:.1f}x < {config.MIN_5M_VOLUME_SURGE_RATIO:.1f}x)"
+                        elif surge < eff_min_rvol:
+                            w_status = f"📊 Пробой есть, ждем RVOL ({surge:.1f}x < {eff_min_rvol:.1f}x)"
                         elif v3_surge < min_v3:
                             w_status = f"📊 Одиночный всплеск (RVOL 3b: {v3_surge:.2f}x < {min_v3:.2f}x)"
                         elif abs(pct_5m) > max_spike_5m:
                             w_status = f"🌋 Выдохшийся спайк 5m ({pct_5m:+.2f}% > {max_spike_5m:.1f}%)"
                         elif abs(pct_5m) < min_req_impulse:
                             w_status = f"⚡ Слабый импульс ({pct_5m:+.2f}% < {min_req_impulse:.2f}%)"
-                        elif clv_w < config.MIN_CLOSE_STRENGTH or wick_w > config.WICK_EXHAUSTION_MAX:
+                        elif clv_w < eff_min_clv or wick_w > config.WICK_EXHAUSTION_MAX:
                             w_status = "🕯️ Тень истощения (отсев ловушки)"
                         elif sl_d > config.STOP_LOSS_MAX_PCT:
                             w_status = f"📏 Широкий стоп ({sl_d*100:.2f}% > {config.STOP_LOSS_MAX_PCT*100:.1f}%)"

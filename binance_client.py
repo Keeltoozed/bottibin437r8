@@ -925,6 +925,8 @@ class BinanceClient:
         prior_20_vols = [c["quote_vol"] for c in closed_candles[-21:-1]]
         avg_vol = (sum(prior_20_vols) / len(prior_20_vols)) if prior_20_vols else 1.0
         surge_ratio = round(closed_signal_c["quote_vol"] / avg_vol, 2) if avg_vol > 0 else 1.0
+        recent_10_vols = [c["quote_vol"] for c in closed_candles[-11:-1]]
+        min_recent_5m_qvol = round(min(recent_10_vols), 1) if recent_10_vols else round(avg_vol, 1)
 
         # Анатомия сигнальной свечи и сила закрытия (Close Location Value — CLV)
         candle_range = max(closed_signal_c["high"] - closed_signal_c["low"], 1e-9)
@@ -1096,6 +1098,7 @@ class BinanceClient:
         struct_slice = closed_candles[-(lookback + 1):-1] if len(closed_candles) > lookback else closed_candles[:-1]
         sq_slice = closed_candles[-(sq_lb + 1):-1] if len(closed_candles) > sq_lb else closed_candles[:-1]
         h6_slice = closed_candles[-73:-1] if len(closed_candles) > 72 else closed_candles[:-1]
+        h12_slice = closed_candles[-145:-1] if len(closed_candles) > 144 else closed_candles[:-1]
 
         donchian_high = max(c["high"] for c in struct_slice)
         donchian_low = min(c["low"] for c in struct_slice)
@@ -1104,6 +1107,10 @@ class BinanceClient:
         sq_range_pct = (sq_high - sq_low) / max(sq_low, 1e-9)
         high_6h = max(c["high"] for c in h6_slice)
         low_6h = min(c["low"] for c in h6_slice)
+        high_12h = max(c["high"] for c in h12_slice)
+        low_12h = min(c["low"] for c in h12_slice)
+        range_12h_pct = round((high_12h - low_12h) / max(low_12h, 1e-9), 4)
+        pos_12h = round((sig_cl - low_12h) / max(high_12h - low_12h, 1e-9), 4)
 
         is_struct_long = (sig_cl > donchian_high) and (surge_ratio >= min_rvol)
         is_struct_short = (sig_cl < donchian_low) and (surge_ratio >= min_rvol)
@@ -1131,6 +1138,19 @@ class BinanceClient:
 
         is_breakout_long = is_struct_long or is_squeeze_long
         is_breakout_short = is_struct_short or is_squeeze_short or is_rug_short
+
+        # ANTI-DOUBLE-TOP / 12H EXHAUSTION WALL GUARD (PF 1.62 -> 1.87, MaxDD 43.7% -> 34.0%):
+        # Блокирует повторный заход "на втором круге" прямо под непробитый 12-часовой потолок пампа (Double Top, как IDOL)
+        # или шорт отскока прямо над непробитым 12-часовым дном после обвала (Higher Low squeeze, как MMT),
+        # но свободно пропускает истинный пробой 12ч хая/лоя И свежие развороты со дна (pos_12h < 0.52) / RUG_SHORT!
+        wall_min_rng = float(getattr(config, "WALL_GUARD_MIN_12H_RANGE_PCT", 0.13))
+        anti_wall_long_ok = True
+        anti_wall_short_ok = True
+        if getattr(config, "ENABLE_12H_WALL_GUARD", True) and range_12h_pct >= wall_min_rng:
+            if pos_12h >= 0.52 and sig_cl < high_12h * 0.995:
+                anti_wall_long_ok = False
+            if pos_12h <= 0.48 and sig_cl > low_12h * 1.005 and not is_rug_short:
+                anti_wall_short_ok = False
 
         if is_rug_short:
             breakout_type = "RUG_SHORT"
@@ -1226,6 +1246,12 @@ class BinanceClient:
             "is_mtf_short_ok": is_mtf_short_ok,
             "anti_rug_long_ok": anti_rug_long_ok,
             "anti_rug_short_ok": anti_rug_short_ok,
+            "anti_wall_long_ok": anti_wall_long_ok,
+            "anti_wall_short_ok": anti_wall_short_ok,
+            "high_12h": high_12h,
+            "low_12h": low_12h,
+            "range_12h_pct": range_12h_pct,
+            "pos_12h": pos_12h,
             "ext_prev3_pct": ext_prev3_pct,
             "ret_3h_pct": ret_3h_pct,
             "ema50": ema50,
@@ -1233,6 +1259,7 @@ class BinanceClient:
             "is_macro_trend_short": is_macro_trend_short,
             "v3_surge": v3_surge,
             "avg_5m_quote_vol": round(avg_vol, 1),
+            "min_recent_5m_qvol": min_recent_5m_qvol,
             "last_quote_volume": active_sig_c["quote_vol"],
             "rsi": rsi,
             "ema9": ema9,

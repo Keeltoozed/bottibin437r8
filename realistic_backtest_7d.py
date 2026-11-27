@@ -132,6 +132,8 @@ def precompute_indicators(data: Dict[str, List[Dict[str, float]]]) -> Dict[str, 
         h16, l16 = s_h.rolling(16, min_periods=16).max().values, s_l.rolling(16, min_periods=16).min().values
         h36, l36 = s_h.rolling(36, min_periods=36).max().values, s_l.rolling(36, min_periods=36).min().values
         h72, l72 = s_h.rolling(72, min_periods=72).max().values, s_l.rolling(72, min_periods=72).min().values
+        h144, l144 = s_h.rolling(144, min_periods=72).max().values, s_l.rolling(144, min_periods=72).min().values
+        min_qv10 = pd.Series(qv).shift(1).rolling(10, min_periods=3).min().bfill().values
 
         ext = np.abs(c - ema21) / np.maximum(ema21, 1e-9)
         ret_3h = pd.Series(c).pct_change(36).fillna(0.0).values
@@ -141,11 +143,12 @@ def precompute_indicators(data: Dict[str, List[Dict[str, float]]]) -> Dict[str, 
             all_times.update(t.tolist())
 
         ind[sym] = {
-            "t": t, "o": o, "h": h, "l": l, "c": c, "qv": qv, "vol_ma20": vol_ma20,
+            "t": t, "o": o, "h": h, "l": l, "c": c, "qv": qv, "vol_ma20": vol_ma20, "min_qv10": min_qv10,
             "ema9": ema9, "ema21": ema21, "ema50": ema50, "ema27": ema27, "ema63": ema63, "ema150": ema150,
             "atr_pct": atr_pct, "rvol": rvol, "v3_surge": v3_surge, "qvol_24h": qvol_24h,
             "rsi": rsi, "ext": ext, "ret_3h": ret_3h,
             "h12": h12, "l12": l12, "h16": h16, "l16": l16, "h36": h36, "l36": l36, "h72": h72, "l72": l72,
+            "h144": h144, "l144": l144,
             "time_idx": time_idx
         }
     return {"ind": ind, "ts": sorted(all_times)}
@@ -236,7 +239,8 @@ def simulate_strategy(
                     trades_r.append(pos["realized"] / pos["risk_usd"])
                     daily_map[d_str]["trades"] += 1
                     daily_map[d_str]["wins" if pos["realized"] > 0 else "losses"] += 1
-                    lockouts[sym] = idx + (18 if pos["realized"] < 0 else 2)
+                    loss_cd_b = 24 if big_runner_mode else 18
+                    lockouts[sym] = idx + (loss_cd_b if pos["realized"] < 0 else 2)
                     del open_pos[sym]
                     continue
 
@@ -316,7 +320,8 @@ def simulate_strategy(
                     trades_r.append(pos["realized"] / pos["risk_usd"])
                     daily_map[d_str]["trades"] += 1
                     daily_map[d_str]["wins" if pos["realized"] > 0 else "losses"] += 1
-                    lockouts[sym] = idx + (18 if pos["realized"] < 0 else 2)
+                    loss_cd_b = 24 if big_runner_mode else 18
+                    lockouts[sym] = idx + (loss_cd_b if pos["realized"] < 0 else 2)
                     del open_pos[sym]
                     continue
 
@@ -422,7 +427,13 @@ def simulate_strategy(
                         sl = min(max((max(hi, d["h"][k - 1]) * 1.001 - ep) / ep, 1.2 * atr_p, 0.0055), 0.0135)
                         cands.append((rvol * abs(pct_5m), sym, "SHORT", ep, sl))
                 else:
-                    if atr_p < 0.0025 or d["vol_ma20"][k] < 15000.0 or rvol < 1.80 or d["v3_surge"][k] < 1.10:
+                    dt_hr = datetime.datetime.utcfromtimestamp(ts_sec).hour
+                    is_night = big_runner_mode and (dt_hr >= 21 or dt_hr < 1)
+                    req_rvol = 2.10 if is_night else 1.80
+                    req_clv = 0.72 if is_night else 0.66
+                    if atr_p < 0.0025 or d["vol_ma20"][k] < 15000.0 or rvol < req_rvol or d["v3_surge"][k] < 1.10:
+                        continue
+                    if big_runner_mode and (d["qv"][k] < 8000.0 or d["min_qv10"][k] < 600.0):
                         continue
                     if d["ext"][k] > 0.048 or d["ext"][k - 3] > 0.028:
                         continue
@@ -439,11 +450,17 @@ def simulate_strategy(
                     min_imp = max(0.55, atr_p * 85.0)
                     sq_rng = (d["h16"][k] - d["l16"][k]) / max(d["l16"][k], 1e-9)
 
-                    brk_l = (cl > d["h36"][k]) or (sq_rng <= 0.065 and cl > d["h16"][k] and rvol >= 2.0)
+                    h12h, l12h = d["h144"][k], d["l144"][k]
+                    rng12h = (h12h - l12h) / max(l12h, 1e-9)
+                    pos12h = (cl - l12h) / max(h12h - l12h, 1e-9)
+                    wall_ok_l = not (big_runner_mode and rng12h >= 0.13 and pos12h >= 0.52 and cl < h12h * 0.995)
+                    wall_ok_s = not (big_runner_mode and rng12h >= 0.13 and pos12h <= 0.48 and cl > l12h * 1.005)
+
+                    brk_l = (cl > d["h36"][k]) or (sq_rng <= 0.065 and cl > d["h16"][k] and rvol >= max(2.0, req_rvol))
                     if (
-                        brk_l and mtf_l and cl >= ema50 * 0.996 and pct_5m >= min_imp
+                        wall_ok_l and brk_l and mtf_l and cl >= ema50 * 0.996 and pct_5m >= min_imp
                         and alpha_5m >= 0.80 and alpha_15m >= 1.00
-                        and clv_l >= 0.66 and uw <= 0.26 and cl > ema9 >= ema21 * 0.998
+                        and clv_l >= req_clv and uw <= 0.26 and cl > ema9 >= ema21 * 0.998
                         and 48.0 <= rsi <= 86.0 and d["ret_3h"][k] <= 0.20 and not btc_dump and not btc_spike
                     ):
                         _sl_floor = 0.0110 if big_runner_mode else 0.0080
@@ -455,12 +472,12 @@ def simulate_strategy(
 
                     pump_6h = (d["h72"][k] - d["l72"][k]) / max(d["l72"][k], 1e-9)
                     off_hi = (d["h72"][k] - cl) / max(d["h72"][k], 1e-9)
-                    is_rug_s = (pump_6h >= 0.15 and 0.03 <= off_hi <= 0.22 and cl < d["l16"][k] and cl < ema50 and rvol >= 2.0)
-                    brk_s = ((cl < d["l36"][k]) or (sq_rng <= 0.065 and cl < d["l16"][k] and rvol >= 2.0)) and mtf_s
+                    is_rug_s = (pump_6h >= 0.15 and 0.03 <= off_hi <= 0.22 and cl < d["l16"][k] and cl < ema50 and rvol >= max(2.0, req_rvol))
+                    brk_s = ((cl < d["l36"][k]) or (sq_rng <= 0.065 and cl < d["l16"][k] and rvol >= max(2.0, req_rvol))) and mtf_s and wall_ok_s
                     if (
                         (brk_s or is_rug_s) and cl <= ema50 * 1.004 and pct_5m <= -min_imp
                         and alpha_5m <= -0.80 and alpha_15m <= -1.00
-                        and clv_s >= 0.66 and lw <= 0.26 and cl < ema9 <= ema21 * 1.002
+                        and clv_s >= req_clv and lw <= 0.26 and cl < ema9 <= ema21 * 1.002
                         and 14.0 <= rsi <= 52.0 and d["ret_3h"][k] >= -0.20 and not btc_pump and not btc_flush
                     ):
                         _sl_floor = 0.0110 if big_runner_mode else 0.0080

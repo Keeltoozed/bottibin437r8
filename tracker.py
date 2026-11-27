@@ -415,9 +415,10 @@ class PortfolioTracker:
             self.daily_losses_count += 1
             self.circuit_breaker_override = False
 
-            # Умеренный карантин после полного стопа: защищает от мгновенного реванша,
-            # но не блокирует повторный вход в монету на весь день (чтобы не пропускать новые ракеты).
-            self.symbol_lockouts[symbol] = time.time() + (90 * 60)
+            # Карантин после полного стопа (120 мин по умолчанию): защищает от повторного входа в запиленную монету,
+            # но не блокирует монету на весь день, если позже начнется новая волна.
+            q_mins = int(getattr(config, "LOSS_SYMBOL_QUARANTINE_MINUTES", 120))
+            self.symbol_lockouts[symbol] = time.time() + (q_mins * 60)
             print(
                 f"🔒 [КАРАНТИН] {symbol} после полного стопа ${total_realized:+.2f}. "
                 f"(Дневных стопов: {self.daily_losses_count}/{getattr(config, 'DAILY_LOSS_LIMIT', 3)})",
