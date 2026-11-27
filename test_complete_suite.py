@@ -164,7 +164,7 @@ async def run_suite():
     assert portfolio.cash > 118.0, f"Баланс $100 должен мощно вырасти на большой ракете, получено ${portfolio.cash:.2f}"
 
     # 3B. ТЕСТ ЧЕСТНОГО CROSS MARGIN (2.5% = $2.50 / $125 @ 50x, ПОТОЛОК РИСКА <=2.8%, 15 СЛОТОВ) + LIVE PNL
-    assert config.SIZING_MODE == "equal_margin" and abs(config.FIXED_MARGIN_PCT - 0.025) < 1e-6 and abs(config.STOP_LOSS_MAX_PCT - 0.022) < 1e-6
+    assert config.SIZING_MODE == "equal_margin" and abs(config.FIXED_MARGIN_PCT - 0.025) < 1e-6 and abs(config.STOP_LOSS_MAX_PCT - 0.050) < 1e-6
     from exit_manager import exit_manager
     saved_cash = portfolio.cash
     portfolio.cash = 100.0

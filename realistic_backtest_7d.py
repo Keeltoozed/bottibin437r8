@@ -846,13 +846,13 @@ def simulate_15m_smart_money(
                     conf = 4 + (1 if d["fvg_b"][k] else 0) + (1 if adx >= 24 else 0) + (1 if rv >= 2.0 else 0)
                     if conf >= 5:
                         sl = max((ep - min(lo, d["l"][k - 1]) * 0.9985) / ep, 1.45 * atr_p, 0.0110)
-                        if sl <= 0.0220:
+                        if sl <= 0.0500:
                             cands.append((conf * rv * max(a15, 0.5), sym, "LONG", ep, sl))
                 elif btc_bear and ws_ok and cl < d["lb16"][k] and cl < d["ema200"][k] and cl < d["ema9"][k] <= d["ema21"][k] * 1.002 and macd_bear and a15 <= -0.45 and 20 <= rsi <= 50 and clv_s >= 0.66 and lw <= 0.28:
                     conf = 4 + (1 if d["fvg_s"][k] else 0) + (1 if adx >= 24 else 0) + (1 if rv >= 2.0 else 0)
                     if conf >= 5:
                         sl = max((max(hi, d["h"][k - 1]) * 1.0015 - ep) / ep, 1.45 * atr_p, 0.0110)
-                        if sl <= 0.0220:
+                        if sl <= 0.0500:
                             cands.append((conf * rv * max(abs(a15), 0.5), sym, "SHORT", ep, sl))
             cands.sort(reverse=True)
             for sc, sym, side, ep, sl_d in cands[:4]:

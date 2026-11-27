@@ -110,9 +110,9 @@ NIGHT_MIN_RVOL = float(os.getenv("NIGHT_MIN_RVOL", "2.10"))               # В �
 NIGHT_MIN_CLOSE_STRENGTH = float(os.getenv("NIGHT_MIN_CLOSE_STRENGTH", "0.72"))  # И плотное закрытие CLV >= 0.72 без теней
 LOSS_SYMBOL_QUARANTINE_MINUTES = int(os.getenv("LOSS_SYMBOL_QUARANTINE_MINUTES", "120"))  # 2ч карантина монеты после полного стопа
 
-# Волатильно-адаптивные границы стопа (мин 1.15%, макс 2.20% — отсекает широкие стопы -150%..-189%, съедавшие профит!):
-STOP_LOSS_MIN_PCT = float(os.getenv("STOP_LOSS_MIN_PCT", "0.0110"))  # 1.10% мин стоп (защита от шумовых сбивов)
-STOP_LOSS_MAX_PCT = float(os.getenv("STOP_LOSS_MAX_PCT", "0.0220"))  # 2.20% макс стоп (блокирует раздутые стопы >110% @ 50x!)
+# Волатильно-адаптивные индивидуальные границы стопа под каждую монету (мин 1.10%, макс 5.00% на 15m, а долларовый риск жестко ограничен MAX_RISK_PER_TRADE_PCT <= 2.8%!):
+STOP_LOSS_MIN_PCT = float(os.getenv("STOP_LOSS_MIN_PCT", "0.0110"))  # 1.10% мин стоп для спокойных пар
+STOP_LOSS_MAX_PCT = float(os.getenv("STOP_LOSS_MAX_PCT", "0.0500"))  # До 5.00% индивидуальный 15m свинговый стоп под волатильные ракеты (убыток в $ ограничен <=2.8% депо!)
 MAX_ALLOWED_SL_PCT = STOP_LOSS_MAX_PCT
 SL_ATR_MULT = float(os.getenv("SL_ATR_MULT", "1.45"))                # Структурный стоп 1.45 * ATR14 на 15m свечах
 SIZING_SL_FLOOR_PCT = float(os.getenv("SIZING_SL_FLOOR_PCT", "0.0110"))
