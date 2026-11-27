@@ -1143,13 +1143,17 @@ class BinanceClient:
         # Блокирует повторный заход "на втором круге" прямо под непробитый 12-часовой потолок пампа (Double Top, как IDOL)
         # или шорт отскока прямо над непробитым 12-часовым дном после обвала (Higher Low squeeze, как MMT),
         # но свободно пропускает истинный пробой 12ч хая/лоя И свежие развороты со дна (pos_12h < 0.52) / RUG_SHORT!
-        wall_min_rng = float(getattr(config, "WALL_GUARD_MIN_12H_RANGE_PCT", 0.13))
+        wall_min_rng = float(getattr(config, "WALL_GUARD_MIN_12H_RANGE_PCT", 0.14))
         anti_wall_long_ok = True
         anti_wall_short_ok = True
         if getattr(config, "ENABLE_12H_WALL_GUARD", True) and range_12h_pct >= wall_min_rng:
-            if pos_12h >= 0.52 and sig_cl < high_12h * 0.995:
+            dist_to_h12 = (high_12h - sig_cl) / max(sig_cl, 1e-9)
+            dist_to_l12 = (sig_cl - low_12h) / max(sig_cl, 1e-9)
+            max_wall_l = 0.090 if range_12h_pct >= 0.24 else max(0.035, 1.70 * atr14_pct * 1.75)
+            max_wall_s = 0.095 if range_12h_pct >= 0.24 else max(0.035, 1.70 * atr14_pct * 1.75)
+            if pos_12h >= 0.55 and 0.0 < dist_to_h12 <= max_wall_l:
                 anti_wall_long_ok = False
-            if pos_12h <= 0.48 and sig_cl > low_12h * 1.005 and not is_rug_short:
+            if pos_12h <= 0.45 and 0.0 < dist_to_l12 <= max_wall_s and not is_rug_short:
                 anti_wall_short_ok = False
 
         if is_rug_short:
@@ -1260,6 +1264,7 @@ class BinanceClient:
             "v3_surge": v3_surge,
             "avg_5m_quote_vol": round(avg_vol, 1),
             "min_recent_5m_qvol": min_recent_5m_qvol,
+            "prev_quote_volume": prev_closed_c["quote_vol"],
             "last_quote_volume": active_sig_c["quote_vol"],
             "rsi": rsi,
             "ema9": ema9,

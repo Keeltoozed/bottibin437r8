@@ -171,27 +171,31 @@ class MarketScanner:
                 min_atr_pct = float(getattr(config, "MIN_ATR_PCT", 0.0025))
                 avg_5m_qvol = float(analysis.get("avg_5m_quote_vol", 0.0) or 0.0)
                 v3_surge = float(analysis.get("v3_surge", 1.0) or 1.0)
-                # Адаптация порога 5m объема и фильтра пустых свечей под активное зеркало:
-                # fapi/bybit/bitget/okx/gate ($3.5K/5m база + >=$8K пробой + ни одной мертвой свечи <$600 за 50м!),
-                # vision spot ($1.2K/5m + >=$2.8K пробой + мин. бар >=$250).
+                # Адаптация порога 5m объема под активное зеркало:
+                # На Bitget/Bybit даже у монет с $3.5M объема (напр. JCTUSDT) и стартующих ракет (MOCAUSDT)
+                # встречаются пустые минутки в стакане, поэтому отсекаем ТОЛЬКО одиночный прокол тонкой монеты
+                # (когда avg_5m < $1500 И предыдущая закрытая свеча была пустой < $400, как у DOSUSDT $53!).
                 is_spot_mirror = binance_client.is_spot_mirror
                 m_name_now = binance_client.active_mirror_name
                 is_alt_futures = m_name_now in ("bybit", "bitget", "okx", "gate")
                 if is_spot_mirror:
-                    min_avg_vol = float(getattr(config, "SPOT_MIRROR_MIN_AVG_5M_VOL", 1200.0))
+                    min_avg_vol = float(getattr(config, "SPOT_MIRROR_MIN_AVG_5M_VOL", 600.0))
                 elif is_alt_futures:
-                    min_avg_vol = float(getattr(config, "ALT_FUTURES_MIN_AVG_5M_VOL", 3500.0))
+                    min_avg_vol = float(getattr(config, "ALT_FUTURES_MIN_AVG_5M_VOL", 650.0))
                 else:
-                    min_avg_vol = float(getattr(config, "MIN_AVG_5M_QUOTE_VOL", 3500.0))
+                    min_avg_vol = float(getattr(config, "MIN_AVG_5M_QUOTE_VOL", 3000.0))
                 min_sig_vol = float(getattr(config, "MIN_SIGNAL_5M_QUOTE_VOL", 8000.0))
-                min_bar_vol = 250.0 if is_spot_mirror else float(getattr(config, "MIN_RECENT_5M_BAR_VOL", 600.0))
+                alt_sig_vol = float(getattr(config, "ALT_FUTURES_MIN_SIGNAL_5M_VOL", 3500.0))
+                min_bar_vol = float(getattr(config, "MIN_RECENT_5M_BAR_VOL", 400.0))
                 last_5m_qvol = float(analysis.get("last_quote_volume", 0.0) or 0.0)
+                prev_5m_qvol = float(analysis.get("prev_quote_volume", avg_5m_qvol) or 0.0)
                 min_recent_5m_qvol = float(analysis.get("min_recent_5m_qvol", avg_5m_qvol) or 0.0)
                 vol_24h_pair = float(t.get("volume_24h", 0.0) or 0.0)
+                thin_single_wick_trap = (avg_5m_qvol < 1500.0 and prev_5m_qvol < min_bar_vol)
                 if is_spot_mirror:
-                    vol_floor_ok = (avg_5m_qvol >= min_avg_vol) and (last_5m_qvol >= 2800.0) and (min_recent_5m_qvol >= min_bar_vol)
+                    vol_floor_ok = (avg_5m_qvol >= min_avg_vol) and (last_5m_qvol >= 2000.0) and (not thin_single_wick_trap)
                 elif is_alt_futures:
-                    vol_floor_ok = (vol_24h_pair >= 350000.0) and (avg_5m_qvol >= min_avg_vol) and (last_5m_qvol >= min_sig_vol) and (min_recent_5m_qvol >= min_bar_vol)
+                    vol_floor_ok = (vol_24h_pair >= 120000.0) and (avg_5m_qvol >= min_avg_vol) and (last_5m_qvol >= alt_sig_vol) and (not thin_single_wick_trap)
                 else:
                     vol_floor_ok = (avg_5m_qvol >= min_avg_vol) and (last_5m_qvol >= min_sig_vol) and (min_recent_5m_qvol >= min_bar_vol)
                 min_v3 = float(getattr(config, "MIN_V3_VOLUME_PERSISTENCE", 1.10))
@@ -352,8 +356,8 @@ class MarketScanner:
                             w_status = "⏳ 15m тренд не медвежий (против тренда)"
                         elif (watch_side == "LONG" and not anti_wall_long) or (watch_side == "SHORT" and not anti_wall_short):
                             w_status = "🧱 Стена 12ч Double-Top/Дна (отсев 2-го круга)"
-                        elif min_recent_5m_qvol < min_bar_vol:
-                            w_status = f"🕳️ Дыры ликвидности (мин 5m ${min_recent_5m_qvol:.0f} < ${min_bar_vol:.0f})"
+                        elif thin_single_wick_trap:
+                            w_status = f"🕳️ Одиночный прокол пустого стакана (пред. 5m ${prev_5m_qvol:.0f})"
                         elif avg_5m_qvol < min_avg_vol:
                             w_status = f"💤 Тонкая монета (${avg_5m_qvol:.0f} < ${min_avg_vol:.0f})"
                         elif surge < eff_min_rvol:

@@ -453,8 +453,9 @@ def simulate_strategy(
                     h12h, l12h = d["h144"][k], d["l144"][k]
                     rng12h = (h12h - l12h) / max(l12h, 1e-9)
                     pos12h = (cl - l12h) / max(h12h - l12h, 1e-9)
-                    wall_ok_l = not (big_runner_mode and rng12h >= 0.13 and pos12h >= 0.52 and cl < h12h * 0.995)
-                    wall_ok_s = not (big_runner_mode and rng12h >= 0.13 and pos12h <= 0.48 and cl > l12h * 1.005)
+                    mw = 0.090 if rng12h >= 0.24 else max(0.035, 1.70 * atr_p * 1.75)
+                    wall_ok_l = not (big_runner_mode and rng12h >= 0.14 and pos12h >= 0.55 and 0.0 < (h12h - cl) / max(cl, 1e-9) <= mw)
+                    wall_ok_s = not (big_runner_mode and rng12h >= 0.14 and pos12h <= 0.45 and 0.0 < (cl - l12h) / max(cl, 1e-9) <= mw)
 
                     brk_l = (cl > d["h36"][k]) or (sq_rng <= 0.065 and cl > d["h16"][k] and rvol >= max(2.0, req_rvol))
                     if (

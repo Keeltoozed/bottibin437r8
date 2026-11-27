@@ -62,7 +62,7 @@ async def run_suite():
     assert sol_analysis is not None and "is_breakout_long" in sol_analysis and "close_strength_long" in sol_analysis
     assert "adx14" in sol_analysis and "ema200" in sol_analysis and "has_fvg_bull" in sol_analysis
     assert "high_12h" in sol_analysis and "anti_wall_long_ok" in sol_analysis and "min_recent_5m_qvol" in sol_analysis
-    assert config.ALT_FUTURES_MIN_AVG_5M_VOL >= 3500.0 and config.MIN_RECENT_5M_BAR_VOL >= 600.0 and config.ENABLE_12H_WALL_GUARD is True
+    assert config.ALT_FUTURES_MIN_AVG_5M_VOL >= 650.0 and config.MIN_RECENT_5M_BAR_VOL >= 400.0 and config.ENABLE_12H_WALL_GUARD is True
     assert config.INITIAL_BALANCE == 100.0 and config.LEVERAGE == 50 and config.MAX_CONCURRENT_POSITIONS == 8 and config.TTL_HOURS == 24
     assert binance_client.last_full_market_count >= 250, f"Полный скринер должен покрывать >= 250 пар, получено {binance_client.last_full_market_count}"
     print(f"  ✓ Скринер охватил {binance_client.last_full_market_count} пар рынка → топ-{len(tickers)} в разборе; SOLUSDT корректен (CLV={sol_analysis['close_strength_long']}, ADX={sol_analysis['adx14']}, 50x/8slots)")
