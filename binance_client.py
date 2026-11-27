@@ -1310,6 +1310,8 @@ class BinanceClient:
             "rsi": rsi,
             "ema9": ema9,
             "ema21": ema21,
+            "ema63": ema63,
+            "ema150": ema150,
             "ema200": ema200,
             "above_ema200": above_ema200,
             "adx14": adx14,
@@ -1334,11 +1336,11 @@ class BinanceClient:
 
     async def fetch_btc_regime(self) -> Dict[str, Any]:
         """
-        Институциональный макро-фильтр рынка по Bitcoin (15m EMA50 + импульс).
-        Блокирует покупку альтов при нисходящем/падающем BTC (как в 14:30 UTC) и шорты против растущего BTC!
+        Институциональный макро-фильтр рынка по Bitcoin (EMA63 на 5m = 15m EMA21 + импульс).
+        Блокирует покупку альтов при падающем BTC (как в 14:30 UTC) и шорты против растущего BTC!
         """
-        tf = str(getattr(config, "SCAN_TIMEFRAME", "15m")).strip() or "15m"
-        analysis = await self.fetch_candles_analysis("BTCUSDT", interval=tf, limit=80)
+        tf = str(getattr(config, "SCAN_TIMEFRAME", "5m")).strip() or "5m"
+        analysis = await self.fetch_candles_analysis("BTCUSDT", interval=tf, limit=100)
         if not analysis:
             return {
                 "trend": "CHOP",
@@ -1352,34 +1354,38 @@ class BinanceClient:
                 "status_str": "🟡 Нейтральный (BTC спокоен)"
             }
 
-        p_bar = analysis.get("pct_5m", 0.0)     # На 15m это изменение закрытой 15m свечи BTC!
-        p_3bar = analysis.get("pct_15m", 0.0)   # На 15m это изменение за 45 минут (3 x 15m)!
+        p5 = analysis.get("pct_5m", 0.0)
+        p15 = analysis.get("pct_15m", 0.0)
         sig_cl = float(analysis.get("signal_close", analysis.get("current_price", 0.0)) or 0.0)
-        ema50_btc = float(analysis.get("ema50", sig_cl) or sig_cl)
+        ema_ref = float(analysis.get("ema63" if tf == "5m" else "ema50", sig_cl) or sig_cl)
         trend = analysis.get("trend", "CHOP")
         rsi = analysis.get("rsi", 50.0)
 
-        btc_macro_bull = (sig_cl >= ema50_btc * 0.997) and (p_bar > -0.45) and (p_3bar > -0.80)
-        btc_macro_bear = (sig_cl <= ema50_btc * 1.003) and (p_bar < +0.45) and (p_3bar < +0.80)
+        btc_macro_bull = (sig_cl >= ema_ref * 0.998)
+        btc_macro_bear = (sig_cl <= ema_ref * 1.002)
 
-        is_dumping = (p_3bar <= -0.80) or (p_bar <= -0.45) or (not btc_macro_bull and getattr(config, "ENABLE_BTC_MACRO_ALIGNMENT", True))
-        is_pumping = (p_3bar >= +0.80) or (p_bar >= +0.45) or (not btc_macro_bear and getattr(config, "ENABLE_BTC_MACRO_ALIGNMENT", True))
-        is_flush_down = (p_bar <= -0.85) or (p_3bar <= -1.40)
-        is_spike_up = (p_bar >= +0.85) or (p_3bar >= +1.40)
+        is_dumping = (p15 <= -0.55) or (p5 <= -0.40)
+        is_pumping = (p15 >= +0.55) or (p5 >= +0.40)
+        is_flush_down = (p5 <= -0.38) or (p15 <= -0.75)
+        is_spike_up = (p5 >= +0.38) or (p15 >= +0.75)
 
-        if btc_macro_bull and not btc_macro_bear:
-            status_str = f"🟢 Бычий режим BTC (выше EMA50, 15m {p_bar:+.2f}%) — Разрешены LONG ракеты"
+        if is_flush_down:
+            status_str = f"🔴 Панический слив BTC ({p5:+.2f}% / 15m {p15:+.2f}%) — Щит от ложных выносов активен!"
+        elif is_spike_up:
+            status_str = f"🟢 Резкий сквиз BTC ({p5:+.2f}% / 15m {p15:+.2f}%) — Щит от покупки хая активен!"
+        elif btc_macro_bull and not btc_macro_bear:
+            status_str = f"🟢 Бычий режим BTC (выше 15m EMA21, {p15:+.2f}%) — Активен охотник LONG + RUG_SHORT"
         elif btc_macro_bear and not btc_macro_bull:
-            status_str = f"🔴 Медвежий режим BTC (ниже EMA50, 15m {p_bar:+.2f}%) — Разрешены SHORT пробои"
+            status_str = f"🔴 Медвежий режим BTC (ниже 15m EMA21, {p15:+.2f}%) — Активен охотник SHORT"
         else:
-            status_str = f"🟡 Нейтральный BTC (у EMA50, 15m {p_bar:+.2f}%) — Активен 15m Smart Money"
+            status_str = f"🟡 Спокойный BTC ({p15:+.2f}%, у 15m EMA21) — Alpha Rocket активен (15 слотов)"
 
         return {
             "trend": trend,
-            "pct_5m": p_bar,
-            "pct_15m": p_3bar,
+            "pct_5m": p5,
+            "pct_15m": p15,
             "rsi": rsi,
-            "ema50": ema50_btc,
+            "ema_ref": ema_ref,
             "btc_macro_bull": btc_macro_bull,
             "btc_macro_bear": btc_macro_bear,
             "is_dumping": is_dumping,

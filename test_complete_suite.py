@@ -58,14 +58,14 @@ async def run_suite():
     print(f"  ✓ Статус Bitcoin: {btc_reg['status_str']}")
     tickers = await binance_client.fetch_top_tickers(min_vol_usdt=config.MIN_24H_VOLUME_USDT, limit=config.SCAN_TICKERS_LIMIT)
     assert len(tickers) >= 30, f"Радар вернул слишком мало пар: {len(tickers)}"
-    sol_analysis = await binance_client.fetch_candles_analysis("SOLUSDT", interval="15m", limit=200)
+    sol_analysis = await binance_client.fetch_candles_analysis("SOLUSDT", interval="5m", limit=200)
     assert sol_analysis is not None and "is_breakout_long" in sol_analysis and "close_strength_long" in sol_analysis
-    assert "adx14" in sol_analysis and "ema200" in sol_analysis and "has_fvg_bull" in sol_analysis and "sm15_long" in sol_analysis and "macd_bull" in sol_analysis
+    assert "adx14" in sol_analysis and "ema200" in sol_analysis and "has_fvg_bull" in sol_analysis and "ema63" in sol_analysis
     assert "high_12h" in sol_analysis and "anti_wall_long_ok" in sol_analysis and "min_recent_5m_qvol" in sol_analysis
-    assert config.ALT_FUTURES_MIN_AVG_5M_VOL >= 650.0 and config.MIN_RECENT_5M_BAR_VOL >= 400.0 and config.ENABLE_12H_WALL_GUARD is True
-    assert config.INITIAL_BALANCE == 100.0 and config.LEVERAGE == 50 and config.MAX_CONCURRENT_POSITIONS == 15 and config.SCAN_TIMEFRAME == "15m" and config.TTL_HOURS == 24
+    assert config.ALT_FUTURES_MIN_AVG_5M_VOL >= 2500.0 and config.ENABLE_12H_WALL_GUARD is True
+    assert config.INITIAL_BALANCE == 100.0 and config.LEVERAGE == 50 and config.MAX_CONCURRENT_POSITIONS == 15 and config.MAX_SAME_SIDE_POSITIONS == 15 and config.TTL_HOURS == 24
     assert binance_client.last_full_market_count >= 250, f"Полный скринер должен покрывать >= 250 пар, получено {binance_client.last_full_market_count}"
-    print(f"  ✓ Скринер охватил {binance_client.last_full_market_count} пар рынка → топ-{len(tickers)} в разборе; SOLUSDT 15m корректен (CLV={sol_analysis['close_strength_long']}, ADX={sol_analysis['adx14']}, 50x/15slots)")
+    print(f"  ✓ Скринер охватил {binance_client.last_full_market_count} пар рынка → топ-{len(tickers)} в разборе; SOLUSDT корректен (CLV={sol_analysis['close_strength_long']}, ADX={sol_analysis['adx14']}, 50x/15slots)")
 
     # 3. ТЕСТ ДИНАМИЧЕСКОГО 3-STAGE ВЫХОДА (TP1 + TP2 + TRAIL + СВОБОДНЫЙ СЛОТ)
     print("\n[ТЕСТ 3/8] Проверка динамического 3-ступенчатого выхода (TP1 + TP2 + Parabolic Trail + 4 слота)...")
@@ -84,7 +84,7 @@ async def run_suite():
         {"breakout_type": "SQUEEZE_80M", "atr14_pct": 0.008, "adx14": 24.0, "has_fvg_bull": True},
         side="LONG", sl_dist=0.012
     )
-    assert fh_plan["profile"] == "EXPLOSIVE_FVG" and fh_plan["tp1_r"] == 1.90 and fh_plan["tp2_r"] == 3.00 and fh_plan["tp1_share"] == 0.0 and fh_plan["tp2_share"] == 0.0
+    assert fh_plan["profile"] == "EXPLOSIVE_FVG" and fh_plan["tp1_r"] == 1.62 and fh_plan["tp2_r"] == 2.55 and fh_plan["tp1_share"] == 0.0 and fh_plan["tp2_share"] == 0.0
 
     # Проверяем основную стратегию Full-Hold 100% (Lock1 -> Lock2 -> все 100% объема ловят ракету +12%!)
     assert portfolio.open_position("FULLHOLDUSDT", "LONG", 10.0, 3.00, 9.88, 10.228, 10.360, "FullHold 100% Test", leverage=50, atr_pct=0.008, risk_usd=1.80, exit_plan=fh_plan)
@@ -108,12 +108,12 @@ async def run_suite():
         {"breakout_type": "SQUEEZE_80M", "atr14_pct": 0.008, "adx14": 24.0, "has_fvg_bull": True},
         side="LONG", sl_dist=0.012
     )
-    assert dyn_plan["profile"] == "EXPLOSIVE_FVG" and dyn_plan["tp1_r"] == 1.90 and dyn_plan["tp2_r"] == 3.00 and dyn_plan["tp1_share"] == 0.35
+    assert dyn_plan["profile"] == "EXPLOSIVE_FVG" and dyn_plan["tp1_r"] == 1.62 and dyn_plan["tp2_r"] == 2.55 and dyn_plan["tp1_share"] == 0.35
     rug_plan = market_scanner.compute_dynamic_exit_plan(
         {"breakout_type": "RUG_SHORT", "atr14_pct": 0.015, "adx14": 22.0, "has_fvg_bear": True},
         side="SHORT", sl_dist=0.025
     )
-    assert rug_plan["profile"] == "FAST_RUG_DUMP" and rug_plan["tp1_r"] == 1.45 and rug_plan["tp2_r"] == 2.25
+    assert rug_plan["profile"] == "FAST_RUG_DUMP" and rug_plan["tp1_r"] == 1.25 and rug_plan["tp2_r"] == 1.95
     config.FULL_HOLD_MODE = True
 
     opened = portfolio.open_position(
@@ -163,19 +163,19 @@ async def run_suite():
     print(f"  ✓ Большая ракета схвачена 3-шаговым выходом 1 сделкой: PnL ${rec['realized_pnl']:+.2f} ({rec['roi_pct']:+.1f}%) | {rec['reason']}")
     assert portfolio.cash > 118.0, f"Баланс $100 должен мощно вырасти на большой ракете, получено ${portfolio.cash:.2f}"
 
-    # 3B. ТЕСТ ЧЕСТНОГО CROSS MARGIN (2.5% = $2.50 / $125 @ 50x, ПОТОЛОК РИСКА <=2.8%, 15 СЛОТОВ) + LIVE PNL
-    assert config.SIZING_MODE == "equal_margin" and abs(config.FIXED_MARGIN_PCT - 0.025) < 1e-6 and abs(config.STOP_LOSS_MAX_PCT - 0.050) < 1e-6
+    # 3B. ТЕСТ ЧЕСТНОГО CROSS MARGIN (3.5% = $3.50 @ 50x, ПОТОЛОК РИСКА <=3.8%, 15 СЛОТОВ) + LIVE PNL
+    assert config.SIZING_MODE == "equal_margin" and abs(config.FIXED_MARGIN_PCT - 0.035) < 1e-6 and abs(config.STOP_LOSS_MAX_PCT - 0.045) < 1e-6
     from exit_manager import exit_manager
     saved_cash = portfolio.cash
     portfolio.cash = 100.0
     portfolio.open_positions.clear()
     eq_m = round((portfolio.cash) * config.FIXED_MARGIN_PCT, 2)
-    assert eq_m == 2.50, f"Equal margin от $100 должен быть ровно $2.50 (под 15 слотов), получено {eq_m}"
+    assert eq_m == 3.50, f"Equal margin от $100 должен быть ровно $3.50 (15 слотов), получено {eq_m}"
     portfolio.open_position("POPCATUSDT", "LONG", 0.02775, eq_m, 0.027198, 0.028661, 0.029197, "EqualMargin Test", leverage=50)
     portfolio.update_position_prices({"POPCATUSDT": 0.02775 * 1.0010})  # +0.10% (+5.0% грязными @ 50x - 2.5% комиссия входа = +2.5%!)
     pop_pos = portfolio.open_positions["POPCATUSDT"]
-    assert pop_pos["margin_usdt"] == 2.50 and pop_pos["pnl_pct"] > 2.0, f"При +0.10% на 50x нереализованный PnL должен быть зеленым (>+2%), получено {pop_pos['pnl_pct']}%"
-    assert exit_manager._compute_big_runner_trail("LONG", 1.028, 1.00, 0.015, 0.006, 2.3, 1.006, trail_start_r=2.5) == 1.006, "До 2.5R трейл не должен душить позицию!"
+    assert pop_pos["margin_usdt"] == 3.50 and pop_pos["pnl_pct"] > 2.0, f"При +0.10% на 50x нереализованный PnL должен быть зеленым (>+2%), получено {pop_pos['pnl_pct']}%"
+    assert exit_manager._compute_big_runner_trail("LONG", 1.028, 1.00, 0.015, 0.006, 2.3, 1.006, trail_start_r=2.8) == 1.006, "До 2.8R трейл не должен душить позицию!"
     portfolio.open_positions.clear()
 
     # Проверяем честное Cross-Margin списание при стопе -3.0% на 50x ($3 маржа -> -$4.50 убытка - $0.177 комиссии = -$4.677, т.е. с кэша $100 списывается > $3.00!)

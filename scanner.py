@@ -48,13 +48,13 @@ class MarketScanner:
         if brk_type == "SM_15M":
             return {"profile": "SMART_MONEY_15M", "tp1_r": 1.15, "tp1_share": sh1, "tp1_lock_r": 0.25, "tp2_r": 1.65, "tp2_share": sh2_std, "tp2_lock_r": 0.95, "trail_r": 2.50}
         elif brk_type == "RUG_SHORT":
-            return {"profile": "FAST_RUG_DUMP", "tp1_r": 1.45, "tp1_share": sh1, "tp1_lock_r": 0.25, "tp2_r": 2.25, "tp2_share": sh2_rug, "tp2_lock_r": 1.10, "trail_r": 3.10}
+            return {"profile": "FAST_RUG_DUMP", "tp1_r": 1.25, "tp1_share": sh1, "tp1_lock_r": 0.25, "tp2_r": 1.95, "tp2_share": sh2_rug, "tp2_lock_r": 1.10, "trail_r": 2.80}
         elif brk_type == "SQUEEZE_80M" or (has_fvg and adx14 >= 20.0):
-            return {"profile": "EXPLOSIVE_FVG", "tp1_r": 1.90, "tp1_share": sh1, "tp1_lock_r": 0.40, "tp2_r": 3.00, "tp2_share": sh2_std, "tp2_lock_r": 1.55, "trail_r": 3.10}
+            return {"profile": "EXPLOSIVE_FVG", "tp1_r": 1.62, "tp1_share": sh1, "tp1_lock_r": 0.35, "tp2_r": 2.55, "tp2_share": sh2_std, "tp2_lock_r": 1.30, "trail_r": 2.80}
         elif atr_pct >= 0.012 or sl_dist >= 0.030:
-            return {"profile": "HIGH_VOL_SWING", "tp1_r": 1.55, "tp1_share": sh1, "tp1_lock_r": 0.30, "tp2_r": 2.30, "tp2_share": sh2_std, "tp2_lock_r": 1.15, "trail_r": 3.10}
+            return {"profile": "HIGH_VOL_SWING", "tp1_r": 1.35, "tp1_share": sh1, "tp1_lock_r": 0.30, "tp2_r": 2.00, "tp2_share": sh2_std, "tp2_lock_r": 1.10, "trail_r": 2.80}
         else:
-            return {"profile": "STD_TREND_FIB", "tp1_r": 1.72, "tp1_share": sh1, "tp1_lock_r": 0.35, "tp2_r": 2.60, "tp2_share": sh2_std, "tp2_lock_r": 1.32, "trail_r": 3.10}
+            return {"profile": "STD_TREND_FIB", "tp1_r": 1.46, "tp1_share": sh1, "tp1_lock_r": 0.35, "tp2_r": 2.21, "tp2_share": sh2_std, "tp2_lock_r": 1.25, "trail_r": 2.80}
 
     async def scan_market_once(self, force: bool = False) -> List[Dict[str, Any]]:
         """Один параллельный проход сканирования рынка строго на закрытии 5m свечи (защита от HTTP 418/429)."""
@@ -66,20 +66,16 @@ class MarketScanner:
         # Стратегия работает строго по закрытым 5-минутным свечам!
         # Полный скан 80-100 пар запускается 1 раз в начале каждой новой 5m свечи (через 3с после закрытия бара),
         # а не 25 раз подряд за те же 5 минут — полностью исключает HTTP 418/429 бан на Render!
-        # УМНАЯ ЗАЩИТА ОТ ЛИМИТОВ API: скан запускается ровно 1 раз после закрытия сигнальной свечи (15m или 5m)!
-        scan_tf = str(getattr(config, "SCAN_TIMEFRAME", "15m")).strip() or "15m"
+        # УМНАЯ ЗАЩИТА ОТ ЛИМИТОВ API: при самом первом старте контейнера (last_universe_count == 0) сканируем СРАЗУ (чтобы не было Радар: 0 пар!),
+        # а далее ровно 1 раз после закрытия каждой новой свечи!
+        scan_tf = str(getattr(config, "SCAN_TIMEFRAME", "5m")).strip() or "5m"
         bar_sec = 900 if scan_tf == "15m" else 300
         cur_bar = int(now) // bar_sec
         sec_into_bar = now % float(bar_sec)
-        if not force and self._last_scanned_bar == cur_bar and portfolio.last_universe_count > 0:
+        is_first_boot_scan = (portfolio.last_universe_count == 0 and self._last_scanned_bar == 0)
+        if not force and not is_first_boot_scan and self._last_scanned_bar == cur_bar and portfolio.last_universe_count > 0:
             return []
-        if not force and self._last_scanned_bar > 0 and sec_into_bar < 3.0:
-            return []
-
-        # Пропуск мертвого ночного окна (21:00–01:00 UTC = закрытие США до старта Азии), открытые сделки сопровождаются 24/7!
-        utc_hr_now = time.gmtime(now).tm_hour
-        if not force and getattr(config, "SKIP_DEAD_NIGHT_WINDOW", True) and (utc_hr_now >= 21 or utc_hr_now < 1):
-            portfolio.btc_regime_str = "🌙 Ночная пауза входов (21:00–01:00 UTC, защита от тонкой пилы; сопровождение активно)"
+        if not force and not is_first_boot_scan and self._last_scanned_bar > 0 and sec_into_bar < 3.0:
             return []
 
         pause_until = getattr(portfolio, "pause_until", 0.0)
@@ -204,11 +200,11 @@ class MarketScanner:
                 vol_24h_pair = float(t.get("volume_24h", 0.0) or 0.0)
                 thin_single_wick_trap = (avg_5m_qvol < 1500.0 and prev_5m_qvol < min_bar_vol)
                 if is_spot_mirror:
-                    vol_floor_ok = (avg_5m_qvol >= min_avg_vol) and (last_5m_qvol >= 2000.0) and (not thin_single_wick_trap)
+                    vol_floor_ok = (vol_24h_pair >= 750000.0) and (avg_5m_qvol >= min_avg_vol) and (last_5m_qvol >= 2000.0)
                 elif is_alt_futures:
-                    vol_floor_ok = (vol_24h_pair >= 120000.0) and (avg_5m_qvol >= min_avg_vol) and (last_5m_qvol >= alt_sig_vol) and (not thin_single_wick_trap)
+                    vol_floor_ok = (vol_24h_pair >= 1200000.0) and (avg_5m_qvol >= min_avg_vol) and (last_5m_qvol >= alt_sig_vol)
                 else:
-                    vol_floor_ok = (avg_5m_qvol >= min_avg_vol) and (last_5m_qvol >= min_sig_vol) and (min_recent_5m_qvol >= min_bar_vol)
+                    vol_floor_ok = (vol_24h_pair >= 1200000.0) and (avg_5m_qvol >= min_avg_vol) and (last_5m_qvol >= min_sig_vol)
                 min_v3 = float(getattr(config, "MIN_V3_VOLUME_PERSISTENCE", 1.10))
                 is_mtf_long = analysis.get("is_mtf_long_ok", False) if getattr(config, "ENABLE_MTF_15M_FILTER", True) else True
                 is_mtf_short = analysis.get("is_mtf_short_ok", False) if getattr(config, "ENABLE_MTF_15M_FILTER", True) else True
@@ -277,6 +273,8 @@ class MarketScanner:
                         brk_type = "SM_15M"
                         analysis["breakout_type"] = "SM_15M"
                 else:
+                    btc_bull_5m = bool(btc_regime.get("btc_macro_bull", True)) if getattr(config, "ENABLE_BTC_MACRO_ALIGNMENT", True) else True
+                    btc_bear_5m = bool(btc_regime.get("btc_macro_bear", True)) if getattr(config, "ENABLE_BTC_MACRO_ALIGNMENT", True) else True
                     tech_long = (
                         analysis.get("is_breakout_long", False) and
                         anti_rug_long and
@@ -298,7 +296,7 @@ class MarketScanner:
                         not analysis.get("breakout_failed_long", False) and
                         config.STOP_LOSS_MIN_PCT <= sl_long_dist <= config.STOP_LOSS_MAX_PCT
                     )
-                    is_long = tech_long and not btc_regime.get("is_dumping", False) and not btc_regime.get("is_spike_up", False)
+                    is_long = tech_long and btc_bull_5m and not btc_regime.get("is_dumping", False) and not btc_regime.get("is_spike_up", False)
 
                     tech_short = (
                         config.ENABLE_SHORT and
@@ -322,7 +320,7 @@ class MarketScanner:
                         not analysis.get("breakout_failed_short", False) and
                         config.STOP_LOSS_MIN_PCT <= sl_short_dist <= config.STOP_LOSS_MAX_PCT
                     )
-                    is_short = tech_short and not btc_regime.get("is_pumping", False) and not btc_regime.get("is_flush_down", False)
+                    is_short = tech_short and (btc_bear_5m or brk_type == "RUG_SHORT") and not btc_regime.get("is_pumping", False) and not btc_regime.get("is_flush_down", False)
 
                     # SMART MONEY FVG + BOS + EMA200 + ADX >= 20 (для 5m режима)
                     is_sm_fvg = False
@@ -341,7 +339,7 @@ class MarketScanner:
                             52.0 <= rsi <= 76.0 and pct_5m <= max_spike_5m and analysis.get("live_drift_long_pct", 0.0) <= config.MAX_LIVE_DRIFT_PCT and
                             config.STOP_LOSS_MIN_PCT <= sm_long_sl <= config.STOP_LOSS_MAX_PCT
                         )
-                        if sm_tech_l and not btc_regime.get("is_dumping", False) and not btc_regime.get("is_spike_up", False):
+                        if sm_tech_l and btc_bull_5m and not btc_regime.get("is_dumping", False) and not btc_regime.get("is_spike_up", False):
                             is_long = True
                             is_sm_fvg = True
                             brk_type = "SM_FVG"
@@ -360,7 +358,7 @@ class MarketScanner:
                                 24.0 <= rsi <= 48.0 and pct_5m >= -max_spike_5m and analysis.get("live_drift_short_pct", 0.0) <= config.MAX_LIVE_DRIFT_PCT and
                                 config.STOP_LOSS_MIN_PCT <= sm_short_sl <= config.STOP_LOSS_MAX_PCT
                             )
-                            if sm_tech_s and not btc_regime.get("is_pumping", False) and not btc_regime.get("is_flush_down", False):
+                            if sm_tech_s and btc_bear_5m and not btc_regime.get("is_pumping", False) and not btc_regime.get("is_flush_down", False):
                                 is_short = True
                                 is_sm_fvg = True
                                 brk_type = "SM_FVG"

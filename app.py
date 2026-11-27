@@ -200,11 +200,11 @@ with st.sidebar:
 
     # Режим риск-профиля (Основной: Full-Hold 100% без вытаскивания долей + ступенчатые замки SL + Trail, PF 2.13!)
     strategy_mode = st.radio(
-        "Профиль риск-менеджмента (15m Smart Money Cross):",
+        "Профиль риск-менеджмента (15 слотов Cross Margin):",
         [
-            "🚀 15m Smart Money + Runner 50x (15 слотов, маржа 2.5%, риск ≤2.8% — WR 70%)",
-            "💰 Partial-Split 15m 50x (15 слотов, 35% TP1 + 25% TP2 + 40% Trail, маржа 2.5%)",
-            "🔥 Safe 15m Smart Money 50x (15 слотов, маржа 2.0%, риск ≤2.2% — макс. защита)"
+            "🚀 15-Slot Rocket Hunter 50x (15 слотов, 100% до конца, маржа 3.5%, риск ≤3.8%)",
+            "💰 Partial-Split 15-Slot 50x (15 слотов, 35% TP1 + 25% TP2 + 40% Trail, маржа 3.5%)",
+            "🔥 Safe 15-Slot Rocket 50x (15 слотов, маржа 2.5%, риск ≤2.8% — мягкая просадка)"
         ],
         index=0
     )
@@ -212,24 +212,24 @@ with st.sidebar:
         default_lev = 50
         config.FULL_HOLD_MODE = False
         config.SIZING_MODE = "equal_margin"
-        config.FIXED_MARGIN_PCT = 0.025
-        config.MAX_RISK_PER_TRADE_PCT = 0.028
+        config.FIXED_MARGIN_PCT = 0.035
+        config.MAX_RISK_PER_TRADE_PCT = 0.038
         config.MAX_CONCURRENT_POSITIONS = 15
         config.DAILY_LOSS_LIMIT = 99
-    elif "Safe 15m" in strategy_mode:
+    elif "Safe 15-Slot" in strategy_mode:
         default_lev = 50
         config.FULL_HOLD_MODE = True
         config.SIZING_MODE = "equal_margin"
-        config.FIXED_MARGIN_PCT = 0.020
-        config.MAX_RISK_PER_TRADE_PCT = 0.022
+        config.FIXED_MARGIN_PCT = 0.025
+        config.MAX_RISK_PER_TRADE_PCT = 0.028
         config.MAX_CONCURRENT_POSITIONS = 15
         config.DAILY_LOSS_LIMIT = 99
     else:
         default_lev = 50
         config.FULL_HOLD_MODE = True
         config.SIZING_MODE = "equal_margin"
-        config.FIXED_MARGIN_PCT = 0.025
-        config.MAX_RISK_PER_TRADE_PCT = 0.028
+        config.FIXED_MARGIN_PCT = 0.035
+        config.MAX_RISK_PER_TRADE_PCT = 0.038
         config.MAX_CONCURRENT_POSITIONS = 15
         config.DAILY_LOSS_LIMIT = 99
 
@@ -667,22 +667,22 @@ with tab_timemachine:
 
     if st.button("▶ Запустить реалистичный подневный бэктест (с календарем плюсовых и убыточных дней)", type="primary"):
         with st.spinner("Загрузка живых альткоинов (Bybit/Binance), стресс-проскальзывание, фандинг и честный расчёт каждого дня..."):
-            from realistic_backtest_7d import get_honest_alt_7d_data, simulate_15m_smart_money, precompute_indicators, simulate_strategy
+            from realistic_backtest_7d import get_honest_alt_7d_data, precompute_indicators, simulate_strategy, simulate_15m_smart_money
             cdata = get_honest_alt_7d_data()
-
-            res_15m = simulate_15m_smart_money(cdata, initial_balance=config.INITIAL_BALANCE, max_slots=15, mg_pct=0.025, cap_risk_pct=0.028, tp1_share=0.0)
-            res_15m_safe = simulate_15m_smart_money(cdata, initial_balance=config.INITIAL_BALANCE, max_slots=15, mg_pct=0.020, cap_risk_pct=0.022, tp1_share=0.0)
-            res_15m_part = simulate_15m_smart_money(cdata, initial_balance=config.INITIAL_BALANCE, max_slots=15, mg_pct=0.025, cap_risk_pct=0.028, tp1_share=0.35)
             pre5 = precompute_indicators(cdata)
-            res_old_5m = simulate_strategy(all_data=cdata, initial_balance=config.INITIAL_BALANCE, precomputed=pre5, leverage=50, equal_margin_pct=0.030, max_spike_5m=3.50, big_runner_mode=True, tp1_r=1.72, tp1_share=0.0)
 
-            primary_daily = res_15m.get("daily_breakdown", [])
+            res_main = simulate_strategy(all_data=cdata, initial_balance=config.INITIAL_BALANCE, precomputed=pre5, leverage=50, equal_margin_pct=0.035, max_spike_5m=3.50, big_runner_mode=True, tp1_r=1.46, tp1_share=0.0, max_slots_override=15, btc_ema63_align=True, cap_risk_pct=0.038)
+            res_part = simulate_strategy(all_data=cdata, initial_balance=config.INITIAL_BALANCE, precomputed=pre5, leverage=50, equal_margin_pct=0.035, max_spike_5m=3.50, big_runner_mode=True, tp1_r=1.46, tp1_share=0.35, max_slots_override=15, btc_ema63_align=True, cap_risk_pct=0.038)
+            res_15m = simulate_15m_smart_money(cdata, initial_balance=config.INITIAL_BALANCE, max_slots=15, mg_pct=0.025, cap_risk_pct=0.028, tp1_share=0.0)
+            res_unprotected = simulate_strategy(all_data=cdata, initial_balance=config.INITIAL_BALANCE, precomputed=pre5, leverage=50, equal_margin_pct=0.030, max_spike_5m=3.50, big_runner_mode=True, tp1_r=1.85, tp1_share=0.0, max_slots_override=15, btc_ema63_align=False, cap_risk_pct=0.0)
+
+            primary_daily = res_main.get("daily_breakdown", [])
             rows = []
             for name, res in [
-                ("🚀 НОВАЯ: 15m Smart Money + Runner (15 слотов, 2.5% маржа, BTC EMA50)", res_15m),
-                ("🔥 Safe 15m Smart Money (15 слотов, 2.0% маржа, риск ≤2.2%)", res_15m_safe),
-                ("💰 Partial 15m Smart Money (15 слотов, 35% на TP1 + 65% Trail)", res_15m_part),
-                ("⚠️ Старый 5m пробой без BTC EMA50 и со стопами до 4.5% (-189%)", res_old_5m),
+                ("🚀 ОСНОВНАЯ: 15-Slot 5m Rocket + BTC EMA21(15m) + Потолок риска 3.8%", res_main),
+                ("💰 Partial-Split 15-Slot 5m (35% TP1 + 65% Trail, риск ≤3.8%)", res_part),
+                ("🛡️ Консервативный 15m Smart Money (15 слотов, 2.5% маржа)", res_15m),
+                ("⚠️ Без макро-щита BTC и без потолка стопа (-189% дыры)", res_unprotected),
             ]:
                 rows.append({
                     "Конфигурация": name,

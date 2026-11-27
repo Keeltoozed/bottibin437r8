@@ -38,22 +38,23 @@ INITIAL_BALANCE = float(os.getenv("INITIAL_BALANCE", "100.0"))
 
 # Режим сайзинга: equal_margin (с потолком риска MAX_RISK_PER_TRADE_PCT — без дыр по -150%..-189%!) или risk_parity
 SIZING_MODE = os.getenv("SIZING_MODE", "equal_margin")
-FIXED_MARGIN_PCT = float(os.getenv("FIXED_MARGIN_PCT", "0.025"))            # 2.5% от эквити ($2.50 маржа / $125 @ 50x на слот при 15 слотах!)
-MAX_RISK_PER_TRADE_PCT = float(os.getenv("MAX_RISK_PER_TRADE_PCT", "0.028")) # Жесткий потолок убытка на 1 стоп <= 2.8% депо (~$2.80 — никаких -$7 / -189%!)
+FIXED_MARGIN_PCT = float(os.getenv("FIXED_MARGIN_PCT_15", "0.035"))          # 3.5% от эквити ($3.50 маржа @ 50x, но риск ограничен <= 3.8% депо!)
+MAX_RISK_PER_TRADE_PCT = float(os.getenv("MAX_RISK_PER_TRADE_PCT", "0.038")) # Жесткий потолок убытка на 1 стоп <= 3.8% депо (~$3.80 макс даже при широком стопе!)
 
-# Параметры Risk-Parity (используются только при SIZING_MODE=risk_parity) и защиты от просадки:
-RISK_PER_TRADE_PCT = float(os.getenv("RISK_PER_TRADE_PCT", "0.028"))
+# Параметры Risk-Parity и защиты от просадки:
+RISK_PER_TRADE_PCT = float(os.getenv("RISK_PER_TRADE_PCT", "0.038"))
 CONVICTION_RISK_MULT = float(os.getenv("CONVICTION_RISK_MULT", "1.00"))
 DD_GUARD_THRESHOLD = float(os.getenv("DD_GUARD_THRESHOLD", "0.20"))
 DD_GUARD_RISK_MULT = float(os.getenv("DD_GUARD_RISK_MULT", "0.75"))
 TRADE_AMOUNT_USDT = float(os.getenv("TRADE_AMOUNT_USDT", "10.0"))
-MAX_CONCURRENT_POSITIONS = min(int(os.getenv("MAX_POSITIONS", "15")), 20)    # 15 одновременных сделок (по запросу пользователя, как в ТГ-канале!)
-MAX_SAME_SIDE_POSITIONS = int(os.getenv("MAX_SAME_SIDE_POSITIONS", "6"))     # Защита от сноса 10-15 однонаправленных сделок на одном проливе BTC!
+# ВАЖНО: защищено от старой переменной MAX_POSITIONS=3 в настройках Render Dashboard — гарантированно 15 слотов со старта!
+MAX_CONCURRENT_POSITIONS = max(15, min(int(os.getenv("MAX_POSITIONS_15", os.getenv("MAX_POSITIONS", "15"))), 20))
+MAX_SAME_SIDE_POSITIONS = int(os.getenv("MAX_SAME_SIDE_POSITIONS_15", "15")) # Все 15 позиций разрешены одновременно (защищает макро-фильтр BTC EMA63!)
 LEVERAGE = int(os.getenv("LEVERAGE", "50"))
 ENABLE_SHORT = os.getenv("ENABLE_SHORT", "true").lower() == "true"
-SCAN_TIMEFRAME = os.getenv("SCAN_TIMEFRAME", "15m").strip()                  # 15m Smart Money таймфрейм (WR 70%, PF 2.02 на Bybit против 35% на шумном 5m!)
-ENABLE_BTC_MACRO_ALIGNMENT = os.getenv("ENABLE_BTC_MACRO_ALIGNMENT", "true").lower() == "true"  # LONG выше BTC EMA50, SHORT ниже BTC EMA50
-SKIP_DEAD_NIGHT_WINDOW = os.getenv("SKIP_DEAD_NIGHT_WINDOW", "true").lower() == "true"          # Пропуск новых входов в мертвую пилу 21:00–01:00 UTC
+SCAN_TIMEFRAME = os.getenv("SCAN_TIMEFRAME_V2", "5m").strip()                # Быстрый 5m Rocket + 15m EMA21 (EMA63) макро-фильтр BTC ($100->$515 за 14д, +$44 сегодня!)
+ENABLE_BTC_MACRO_ALIGNMENT = os.getenv("ENABLE_BTC_MACRO_ALIGNMENT", "true").lower() == "true"
+SKIP_DEAD_NIGHT_WINDOW = os.getenv("SKIP_DEAD_NIGHT_WINDOW_V2", "false").lower() == "true"  # FALSE: радар работает 24/7 со старта без зависания на 0 пар!
 
 # Предохранитель депозита (Circuit Breaker):
 # По запросу пользователя заморозка торговли при серии минусов ОТКЛЮЧЕНА (бот торгует непрерывно 24/7):
@@ -112,9 +113,9 @@ LOSS_SYMBOL_QUARANTINE_MINUTES = int(os.getenv("LOSS_SYMBOL_QUARANTINE_MINUTES",
 
 # Волатильно-адаптивные индивидуальные границы стопа под каждую монету (мин 1.10%, макс 5.00% на 15m, а долларовый риск жестко ограничен MAX_RISK_PER_TRADE_PCT <= 2.8%!):
 STOP_LOSS_MIN_PCT = float(os.getenv("STOP_LOSS_MIN_PCT", "0.0110"))  # 1.10% мин стоп для спокойных пар
-STOP_LOSS_MAX_PCT = float(os.getenv("STOP_LOSS_MAX_PCT", "0.0500"))  # До 5.00% индивидуальный 15m свинговый стоп под волатильные ракеты (убыток в $ ограничен <=2.8% депо!)
+STOP_LOSS_MAX_PCT = float(os.getenv("STOP_LOSS_MAX_PCT", "0.0450"))  # До 4.50% индивидуальный структурный стоп под каждую монету (убыток в $ ограничен <=3.8% депо!)
 MAX_ALLOWED_SL_PCT = STOP_LOSS_MAX_PCT
-SL_ATR_MULT = float(os.getenv("SL_ATR_MULT", "1.45"))                # Структурный стоп 1.45 * ATR14 на 15m свечах
+SL_ATR_MULT = float(os.getenv("SL_ATR_MULT_V2", "1.75"))             # Структурный стоп 1.75 * ATR14 за свинг/фитиль
 SIZING_SL_FLOOR_PCT = float(os.getenv("SIZING_SL_FLOOR_PCT", "0.0110"))
 MIN_MARGIN_USDT = float(os.getenv("MIN_MARGIN_USDT", "0.50"))
 MIN_MARGIN_EQUITY_PCT = float(os.getenv("MIN_MARGIN_EQUITY_PCT", "0.04"))
@@ -132,20 +133,20 @@ EARLY_BE_TRIGGER_PCT = float(os.getenv("EARLY_BE_TRIGGER_PCT", "9.99"))   # От
 EARLY_BE_TRIGGER_R = float(os.getenv("EARLY_BE_TRIGGER_R", "99.0"))
 EARLY_BE_LOCK_PCT = float(os.getenv("EARLY_BE_LOCK_PCT", "0.0022"))
 
-# Режим удержания позиции: FULL_HOLD_MODE=True (100% объема едет без вытаскиваний долей, ступени 1.15R / 1.65R / 2.50R+ Фибоначчи!)
+# Режим удержания позиции: FULL_HOLD_MODE=True (100% объема едет без вытаскиваний долей, ступени 1.46R–1.62R / 2.21R–2.55R / 2.80R+ Трейл!)
 FULL_HOLD_MODE = os.getenv("FULL_HOLD_MODE", "true").lower() == "true"
-TARGET_1_R = float(os.getenv("TARGET_1_R", "1.15"))          # Ступень 1 (+1.15R, как TP1 в Smart Money боте!): быстрый перенос SL в плюс +0.25R!
-TARGET_2_R = float(os.getenv("TARGET_2_R", "1.65"))          # Ступень 2 (+1.65R Фибо): подтягивание замка SL в жирный плюс +0.95R!
+TARGET_1_R = float(os.getenv("TARGET_1_R_V2", "1.46"))          # Ступень 1 (+1.46R..+1.62R): перевод 100% сделки в безрисковый плюс +0.35R!
+TARGET_2_R = float(os.getenv("TARGET_2_R_V2", "2.21"))          # Ступень 2 (+2.21R..+2.55R): подтягивание замка SL в жирный плюс +1.25R..+1.40R!
 TP1_PARTIAL_PCT = float(os.getenv("TP1_PARTIAL_PCT", "0.00")) # 0% в Full-Hold (все 100% маржи ловят ракету целиком!)
-POST_TP1_LOCK_R = float(os.getenv("POST_TP1_LOCK_R", "0.25"))
+POST_TP1_LOCK_R = float(os.getenv("POST_TP1_LOCK_R", "0.35"))
 MAX_RISK_FREE_RUNNERS = int(os.getenv("MAX_RISK_FREE_RUNNERS", "5"))  # Безрисковые ранеры (после TP1) не блокируют 15 активных слотов!
 TP2_PARTIAL_OF_REMAINING = 1.00
 
 TP1_PCT = float(os.getenv("TP1_PCT", "0.0000"))
 TP2_PCT = float(os.getenv("TP2_PCT", "0.0000"))
 
-RUNNER_ATR_MULT = float(os.getenv("RUNNER_ATR_MULT", "2.25"))
-RUNNER_ACTIVATION_R = float(os.getenv("RUNNER_ACTIVATION_R", "3.1"))
+RUNNER_ATR_MULT = float(os.getenv("RUNNER_ATR_MULT", "2.05"))
+RUNNER_ACTIVATION_R = float(os.getenv("RUNNER_ACTIVATION_R_V2", "2.80"))
 TRAILING_STOP_PCT = float(os.getenv("TRAILING_STOP_PCT", "0.0100"))
 TIME_STOP_MINUTES = int(os.getenv("TIME_STOP_MINUTES", "0"))  # 0 = ранний срез отключен (не режет нормальный ретест)
 TTL_HOURS = int(os.getenv("TTL_HOURS", "24"))                  # Максимальное время жизни сделки без TP1 (24ч высвобождает слоты под новые ракеты)
@@ -159,11 +160,11 @@ MIN_24H_VOLUME_USDT = float(os.getenv("MIN_24H_VOLUME_USDT", "1500000"))        
 ALT_FUTURES_MIN_VOL_USDT = float(os.getenv("ALT_FUTURES_MIN_VOL_USDT", "350000"))         # $350K+ на Bybit/Gate/Bitget (до 450+ чистых перпов)
 BITGET_MIRROR_MIN_VOL_USDT = ALT_FUTURES_MIN_VOL_USDT
 SPOT_MIRROR_MIN_VOL_USDT = float(os.getenv("SPOT_MIRROR_MIN_VOL_USDT", "350000"))
-SCAN_TICKERS_LIMIT = min(int(os.getenv("SCAN_TICKERS_LIMIT", "240")), 300)                # Топ-240 самых горячих из 400-500+ пар на глубокий анализ свечей!
+SCAN_TICKERS_LIMIT = max(240, min(int(os.getenv("SCAN_TICKERS_LIMIT_240", "240")), 300))    # Гарантированно 240 горячих пар (игнорирует старый лимит 200 на Render!)
 MIN_24H_TRADES_COUNT = int(os.getenv("MIN_24H_TRADES_COUNT", "1000"))
 SPOT_MIRROR_MIN_TRADES = int(os.getenv("SPOT_MIRROR_MIN_TRADES", "600"))
-MIN_AVG_5M_QUOTE_VOL = float(os.getenv("MIN_AVG_5M_QUOTE_VOL", "3000.0"))                 # $3.0K/5m база (+ >=$8K пробойная свеча) на первичном Binance fapi
-ALT_FUTURES_MIN_AVG_5M_VOL = float(os.getenv("ALT_FUTURES_MIN_AVG_5M_VOL", "650.0"))      # $650/5m база на Bitget/Bybit/Gate (сохраняет старты ракет типа MOCA/JCT, отсекая фейк 1-свечного прокола!)
+MIN_AVG_5M_QUOTE_VOL = float(os.getenv("MIN_AVG_5M_QUOTE_VOL", "3000.0"))                 # $3.0K/5m база (отсекает неликвидные пустышки)
+ALT_FUTURES_MIN_AVG_5M_VOL = float(os.getenv("ALT_FUTURES_MIN_AVG_5M_VOL", "2500.0"))      # $2.5K/5m база на Bybit/Bitget/Gate (только живые ракеты с ликвидным стаканом!)
 BITGET_MIRROR_MIN_AVG_5M_VOL = ALT_FUTURES_MIN_AVG_5M_VOL
 SPOT_MIRROR_MIN_AVG_5M_VOL = float(os.getenv("SPOT_MIRROR_MIN_AVG_5M_VOL", "600.0"))
 MIN_SIGNAL_5M_QUOTE_VOL = float(os.getenv("MIN_SIGNAL_5M_QUOTE_VOL", "8000.0"))            # Минимум $8K на сигнальной 5m свече (fapi)
