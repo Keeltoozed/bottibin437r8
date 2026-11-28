@@ -67,11 +67,11 @@ class MarketScanner:
         elif brk_type == "RUG_SHORT":
             return {"profile": "FAST_RUG_DUMP", "tp1_r": 1.25, "tp1_share": sh1, "tp1_lock_r": 0.25, "tp2_r": 1.95, "tp2_share": sh2_rug, "tp2_lock_r": 1.10, "trail_r": 2.80, "early_be_r": eff_early_be}
         elif brk_type == "SQUEEZE_80M" or (has_fvg and adx14 >= 20.0):
-            return {"profile": "EXPLOSIVE_FVG", "tp1_r": 1.46, "tp1_share": sh1, "tp1_lock_r": 0.35, "tp2_r": 2.25, "tp2_share": sh2_std, "tp2_lock_r": 1.32, "trail_r": 2.80, "early_be_r": eff_early_be}
+            return {"profile": "EXPLOSIVE_FVG", "tp1_r": 1.46, "tp1_share": sh1, "tp1_lock_r": 0.45, "tp2_r": 2.25, "tp2_share": sh2_std, "tp2_lock_r": 1.32, "trail_r": 3.20, "early_be_r": eff_early_be}
         elif atr_pct >= 0.012 or sl_dist >= 0.030:
-            return {"profile": "HIGH_VOL_SWING", "tp1_r": 1.35, "tp1_share": sh1, "tp1_lock_r": 0.30, "tp2_r": 2.00, "tp2_share": sh2_std, "tp2_lock_r": 1.15, "trail_r": 2.80, "early_be_r": eff_early_be}
+            return {"profile": "HIGH_VOL_SWING", "tp1_r": 1.35, "tp1_share": sh1, "tp1_lock_r": 0.45, "tp2_r": 2.00, "tp2_share": sh2_std, "tp2_lock_r": 1.15, "trail_r": 3.20, "early_be_r": eff_early_be}
         else:
-            return {"profile": "STD_TREND_FIB", "tp1_r": 1.46, "tp1_share": sh1, "tp1_lock_r": 0.35, "tp2_r": 2.25, "tp2_share": sh2_std, "tp2_lock_r": 1.32, "trail_r": 2.80, "early_be_r": eff_early_be}
+            return {"profile": "STD_TREND_FIB", "tp1_r": 1.35, "tp1_share": sh1, "tp1_lock_r": 0.45, "tp2_r": 2.25, "tp2_share": sh2_std, "tp2_lock_r": 1.32, "trail_r": 3.20, "early_be_r": eff_early_be}
 
     async def scan_market_once(self, force: bool = False) -> List[Dict[str, Any]]:
         """Один параллельный проход сканирования рынка строго на закрытии 5m свечи (защита от HTTP 418/429)."""

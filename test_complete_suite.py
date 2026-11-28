@@ -167,17 +167,17 @@ async def run_suite():
     assert portfolio.cash > 118.0, f"Баланс $100 должен мощно вырасти на большой ракете, получено ${portfolio.cash:.2f}"
 
     # 3B. ТЕСТ ЧЕСТНОГО CROSS MARGIN (3.5% = $3.50 @ 50x, ПОТОЛОК РИСКА <=3.8%, НЕЗАЖАТЫЙ СТОП <=3.80%, 15 СЛОТОВ) + LIVE PNL
-    assert config.SIZING_MODE == "equal_margin" and abs(config.FIXED_MARGIN_PCT - 0.035) < 1e-6 and abs(config.STOP_LOSS_MAX_PCT - 0.0380) < 1e-6
+    assert config.SIZING_MODE == "equal_margin" and abs(config.FIXED_MARGIN_PCT - 0.042) < 1e-6 and abs(config.STOP_LOSS_MAX_PCT - 0.0380) < 1e-6
     from exit_manager import exit_manager
     saved_cash = portfolio.cash
     portfolio.cash = 100.0
     portfolio.open_positions.clear()
     eq_m = round((portfolio.cash) * config.FIXED_MARGIN_PCT, 2)
-    assert eq_m == 3.50, f"Equal margin от $100 должен быть ровно $3.50 (15 слотов), получено {eq_m}"
+    assert eq_m == 4.20, f"Equal margin от $100 должен быть ровно $4.20 (15 слотов), получено {eq_m}"
     portfolio.open_position("POPCATUSDT", "LONG", 0.02775, eq_m, 0.027198, 0.028661, 0.029197, "EqualMargin Test", leverage=50)
     portfolio.update_position_prices({"POPCATUSDT": 0.02775 * 1.0010})  # +0.10% (+5.0% грязными @ 50x - 2.5% комиссия входа = +2.5%!)
     pop_pos = portfolio.open_positions["POPCATUSDT"]
-    assert pop_pos["margin_usdt"] == 3.50 and pop_pos["pnl_pct"] > 2.0, f"При +0.10% на 50x нереализованный PnL должен быть зеленым (>+2%), получено {pop_pos['pnl_pct']}%"
+    assert pop_pos["margin_usdt"] == 4.20 and pop_pos["pnl_pct"] > 2.0, f"При +0.10% на 50x нереализованный PnL должен быть зеленым (>+2%), получено {pop_pos['pnl_pct']}%"
     assert exit_manager._compute_big_runner_trail("LONG", 1.028, 1.00, 0.015, 0.006, 2.3, 1.006, trail_start_r=2.8) == 1.006, "До 2.8R трейл не должен душить позицию!"
     portfolio.open_positions.clear()
 

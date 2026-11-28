@@ -40,8 +40,8 @@ INITIAL_BALANCE = float(os.getenv("INITIAL_BALANCE", "100.0"))
 
 # Режим сайзинга: equal_margin (с потолком риска MAX_RISK_PER_TRADE_PCT — без дыр по -150%..-189%!) или risk_parity
 SIZING_MODE = os.getenv("SIZING_MODE", "equal_margin")
-FIXED_MARGIN_PCT = float(os.getenv("FIXED_MARGIN_PCT_15", "0.035"))          # 3.5% от эквити ($3.50 маржа @ 50x, но риск ограничен <= 3.8% депо!)
-MAX_RISK_PER_TRADE_PCT = float(os.getenv("MAX_RISK_PER_TRADE_PCT", "0.038")) # Жесткий потолок убытка на 1 стоп <= 3.8% депо (~$3.80 макс даже при широком стопе!)
+FIXED_MARGIN_PCT = float(os.getenv("FIXED_MARGIN_PCT_15", "0.042"))          # 4.2% от эквити ($4.20 маржа @ 50x, риск ограничен <= 4.2% депо!)
+MAX_RISK_PER_TRADE_PCT = float(os.getenv("MAX_RISK_PER_TRADE_PCT", "0.042")) # Жесткий потолок убытка на 1 стоп <= 4.2% депо (~$4.20 макс даже при широком стопе!)
 
 # Параметры Risk-Parity и защиты от просадки:
 RISK_PER_TRADE_PCT = float(os.getenv("RISK_PER_TRADE_PCT", "0.038"))
@@ -73,7 +73,7 @@ BREAKOUT_LOOKBACK_BARS = int(os.getenv("BREAKOUT_LOOKBACK_BARS", "36"))   # Пр
 SQUEEZE_LOOKBACK_BARS = int(os.getenv("SQUEEZE_LOOKBACK_BARS", "16"))     # Быстрый старт из 80-мин сжатия (диапазон <= 6.5%)
 SQUEEZE_MAX_RANGE_PCT = float(os.getenv("SQUEEZE_MAX_RANGE_PCT", "0.065"))
 SQUEEZE_MIN_RVOL = float(os.getenv("SQUEEZE_MIN_RVOL", "2.00"))
-ENABLE_RUG_HUNTER_SHORT = os.getenv("ENABLE_RUG_HUNTER_SHORT", "true").lower() == "true"  # Перехват сливов после пампа >= +15%
+ENABLE_RUG_HUNTER_SHORT = os.getenv("ENABLE_RUG_HUNTER_SHORT", "false").lower() == "true"  # Перехват сливов после пампа >= +15%
 RUG_PUMP_MIN_PCT = float(os.getenv("RUG_PUMP_MIN_PCT", "0.15"))
 RUG_SUPPORT_BARS = int(os.getenv("RUG_SUPPORT_BARS", "16"))
 
@@ -178,10 +178,10 @@ MAX_24H_CHANGE_CAP = float(os.getenv("MAX_24H_CHANGE_CAP", "120.0"))
 STRICT_WHITELIST_ONLY = os.getenv("STRICT_WHITELIST_ONLY", "false").lower() == "true"     # FALSE: динамический поиск настоящих ракет по всему рынку!
 CHOP_MIN_VOLUME_SURGE = float(os.getenv("CHOP_MIN_VOLUME_SURGE", "2.00"))
 # МУЛЬТИ-ТАЙМФРЕЙМОВЫЙ QUANT ML ФИЛЬТР + HIGH-WR TREND PULLBACK SNIPER (обучено на 932 335 свечах 75 фьючерсов):
-ML_MIN_FILTER_PROB = float(os.getenv("ML_MIN_FILTER_PROB_V2", "0.450"))       # Отсев токсичного хвоста ложных пробоев (< 45.0%)
+ML_MIN_FILTER_PROB = float(os.getenv("ML_MIN_FILTER_PROB_V2", "0.000"))       # Отсев токсичного хвоста ложных пробоев (0.0 = отключен, мягкий ранжир через score)
 ML_PULLBACK_MIN_PROB = float(os.getenv("ML_PULLBACK_MIN_PROB", "0.484"))      # Порог ML для снайперских откатов к EMA21 (WR 69–75%!)
-ML_TOP_ROCKET_PROB = float(os.getenv("ML_TOP_ROCKET_PROB", "0.495"))          # Порог топ-ракет (100% Full-Hold без раннего БУ; ниже — щит +0.92R!)
-ML_MEDIUM_BE_TRIGGER_R = float(os.getenv("ML_MEDIUM_BE_TRIGGER_R", "0.92"))   # На средних ML-сигналах при +0.92R переводим SL в гарантированный плюс!
+ML_TOP_ROCKET_PROB = float(os.getenv("ML_TOP_ROCKET_PROB", "9.90"))          # Порог топ-ракет (9.9 = отключен, tier-split выключен)
+ML_MEDIUM_BE_TRIGGER_R = float(os.getenv("ML_MEDIUM_BE_TRIGGER_R", "99.0"))   # Shield отключен (99.0 = никогда не срабатывает; shield разрушает большие трейды!)
 ENABLE_TREND_PULLBACK = os.getenv("ENABLE_TREND_PULLBACK", "true").lower() == "true"  # Снайпер отката к EMA21 в тренде в свободные слоты (WR 70%+)
 PULLBACK_MAX_SLOTS = int(os.getenv("PULLBACK_MAX_SLOTS", "8"))                # До 8 слотов под откаты (оставляя минимум 7 слотов под взрывные ракеты!)
 ML_CONFIDENCE_THRESHOLD = float(os.getenv("ML_CONFIDENCE_THRESHOLD_V2", "0.484"))
