@@ -115,7 +115,7 @@ LOSS_SYMBOL_QUARANTINE_MINUTES = int(os.getenv("LOSS_SYMBOL_QUARANTINE_MINUTES",
 
 # Волатильно-адаптивные индивидуальные границы стопа под каждую монету (мин 1.10%, макс 5.00% на 15m, а долларовый риск жестко ограничен MAX_RISK_PER_TRADE_PCT <= 2.8%!):
 STOP_LOSS_MIN_PCT = float(os.getenv("STOP_LOSS_MIN_PCT", "0.0110"))  # 1.10% мин стоп для спокойных пар
-STOP_LOSS_MAX_PCT = float(os.getenv("STOP_LOSS_MAX_PCT", "0.0450"))  # До 4.50% индивидуальный структурный стоп под каждую монету (убыток в $ ограничен <=3.8% депо!)
+STOP_LOSS_MAX_PCT = float(os.getenv("STOP_LOSS_MAX_PCT_V2", "0.0380"))  # Макс 3.80% ЧЕСТНЫЙ незажатый стоп (11W/3L дней и $615 на 14д, монеты с фитилем >3.80% отсекаются!)
 MAX_ALLOWED_SL_PCT = STOP_LOSS_MAX_PCT
 SL_ATR_MULT = float(os.getenv("SL_ATR_MULT_V2", "1.75"))             # Структурный стоп 1.75 * ATR14 за свинг/фитиль
 SIZING_SL_FLOOR_PCT = float(os.getenv("SIZING_SL_FLOOR_PCT", "0.0110"))

@@ -1232,20 +1232,22 @@ class BinanceClient:
         min_allowed_sl = float(getattr(config, "STOP_LOSS_MIN_PCT", 0.0080))
         sl_atr_mult = float(getattr(config, "SL_ATR_MULT", 1.55))
 
-        true_long_sl_pct = round(min(max(raw_sl_pct, sl_atr_mult * atr14_pct, min_allowed_sl), max_allowed_sl), 4)
+        # ВАЖНО: НЕ зажимаем (не режем min(..., max_allowed_sl)) широкий стоп в воздухе внутри свечи!
+        # Возвращаем честную структурную дистанцию до фитиля/свинга, чтобы scanner.py отсекал раздутые свечи > STOP_LOSS_MAX_PCT (3.65%)!
+        true_long_sl_pct = round(max(raw_sl_pct, sl_atr_mult * atr14_pct, min_allowed_sl), 4)
         wick_stop_loss = config.round_price(current_price * (1.0 - true_long_sl_pct))
         sm_raw_sl_l = (current_price - swing_12_low * (1.0 - config.WICK_BUFFER_PCT)) / max(current_price, 1e-9)
-        sm_long_sl_pct = round(min(max(sm_raw_sl_l, sl_atr_mult * atr14_pct, min_allowed_sl), max_allowed_sl), 4)
+        sm_long_sl_pct = round(max(sm_raw_sl_l, sl_atr_mult * atr14_pct, min_allowed_sl), 4)
         sm_long_wick_sl = config.round_price(current_price * (1.0 - sm_long_sl_pct))
 
         recent_wick_high = max(prev_closed_c["high"], active_sig_c["high"])
         raw_short_sl = config.round_price(recent_wick_high * (1.0 + config.WICK_BUFFER_PCT))
         raw_short_sl_pct = (raw_short_sl - current_price) / max(current_price, 1e-9)
 
-        true_short_sl_pct = round(min(max(raw_short_sl_pct, sl_atr_mult * atr14_pct, min_allowed_sl), max_allowed_sl), 4)
+        true_short_sl_pct = round(max(raw_short_sl_pct, sl_atr_mult * atr14_pct, min_allowed_sl), 4)
         short_wick_stop_loss = config.round_price(current_price * (1.0 + true_short_sl_pct))
         sm_raw_sl_s = (swing_12_high * (1.0 + config.WICK_BUFFER_PCT) - current_price) / max(current_price, 1e-9)
-        sm_short_sl_pct = round(min(max(sm_raw_sl_s, sl_atr_mult * atr14_pct, min_allowed_sl), max_allowed_sl), 4)
+        sm_short_sl_pct = round(max(sm_raw_sl_s, sl_atr_mult * atr14_pct, min_allowed_sl), 4)
         sm_short_wick_sl = config.round_price(current_price * (1.0 + sm_short_sl_pct))
 
         ref_close_trend = closed_signal_c["close"]
@@ -1365,8 +1367,8 @@ class BinanceClient:
         trend = analysis.get("trend", "CHOP")
         rsi = analysis.get("rsi", 50.0)
 
-        btc_macro_bull = (sig_cl >= ema_ref * 0.998)
-        btc_macro_bear = (sig_cl <= ema_ref * 1.002)
+        btc_macro_bull = (sig_cl >= ema_ref * 0.999)
+        btc_macro_bear = (sig_cl <= ema_ref * 1.001)
 
         is_dumping = (p15 <= -0.55) or (p5 <= -0.40)
         is_pumping = (p15 >= +0.55) or (p5 >= +0.40)

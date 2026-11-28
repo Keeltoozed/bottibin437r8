@@ -37,8 +37,8 @@ services:
         value: "1.75"
       - key: STOP_LOSS_MIN_PCT
         value: "0.0110"
-      - key: STOP_LOSS_MAX_PCT
-        value: "0.0450"
+      - key: STOP_LOSS_MAX_PCT_V2
+        value: "0.0380"
       - key: LEVERAGE
         value: "50"
       - key: RISK_PER_TRADE_PCT

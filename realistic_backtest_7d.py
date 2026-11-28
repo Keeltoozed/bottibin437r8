@@ -243,8 +243,8 @@ def simulate_strategy(
                 btc_flush = bp5 <= -0.38 or bp15 <= -0.75
                 btc_spike = bp5 >= 0.38 or bp15 >= 0.75
                 if big_runner_mode and btc_ema63_align:
-                    btc_bull_m = btc_d["c"][k] >= btc_d["ema63"][k] * 0.998
-                    btc_bear_m = btc_d["c"][k] <= btc_d["ema63"][k] * 1.002
+                    btc_bull_m = btc_d["c"][k] >= btc_d["ema63"][k] * 0.999
+                    btc_bear_m = btc_d["c"][k] <= btc_d["ema63"][k] * 1.001
 
         unreal = 0.0
         for sym in list(open_pos.keys()):
@@ -474,7 +474,7 @@ def simulate_strategy(
                 if idx is None or idx < 160 or idx < lockouts.get(sym, 0):
                     continue
                 k = idx - 1
-                if d["qvol_24h"][k] < 1_200_000.0:
+                if d["qvol_24h"][k] < 1_500_000.0:
                     continue
                 cl, lo, hi, op = d["c"][k], d["l"][k], d["h"][k], d["o"][k]
                 pct_5m = (cl - d["c"][k - 1]) / d["c"][k - 1] * 100.0
@@ -528,7 +528,7 @@ def simulate_strategy(
 
                     _sl_floor = 0.0110 if big_runner_mode else 0.0080
                     _sl_atr_m = 1.75 if big_runner_mode else 1.55
-                    _sl_cap = 0.0450 if big_runner_mode else 0.0360
+                    _sl_cap = 0.0380 if big_runner_mode else 0.0360
                     picked = None
 
                     if rvol >= req_rvol and d["ext"][k] <= 0.048 and d["ext"][k - 3] <= 0.028:
@@ -539,11 +539,13 @@ def simulate_strategy(
                             and clv_l >= req_clv and uw <= 0.26 and cl > ema9 >= ema21 * 0.998
                             and 48.0 <= rsi <= 86.0 and d["ret_3h"][k] <= 0.20 and not btc_dump and not btc_spike
                         ):
-                            sl = min(max((ep - min(lo, d["l"][k - 1]) * 0.9985) / ep, _sl_atr_m * atr_p, _sl_floor), _sl_cap)
-                            fvg = bool(d["fvg_b"][k] and adx >= 20.0)
-                            t1 = (1.62 if fvg else (1.35 if sl >= 0.024 else 1.46)) if big_runner_mode else tp1_r
-                            t2 = (2.55 if fvg else (2.00 if sl >= 0.024 else 2.21))
-                            picked = (rvol * alpha_5m * clv_l * (1.25 if fvg else 1.0), "LONG", ep, sl, t1, t2)
+                            raw_sl = max((ep - min(lo, d["l"][k - 1]) * 0.9985) / ep, _sl_atr_m * atr_p, _sl_floor)
+                            sl = raw_sl if big_runner_mode else min(raw_sl, _sl_cap)
+                            if sl <= _sl_cap:
+                                fvg = bool(d["fvg_b"][k] and adx >= 20.0)
+                                t1 = (1.46 if fvg else (1.35 if sl >= 0.030 else 1.46)) if big_runner_mode else tp1_r
+                                t2 = (2.25 if fvg else (2.00 if sl >= 0.030 else 2.25))
+                                picked = (rvol * alpha_5m * clv_l * (1.25 if fvg else 1.0), "LONG", ep, sl, t1, t2)
 
                         pump_6h = (d["h72"][k] - d["l72"][k]) / max(d["l72"][k], 1e-9)
                         off_hi = (d["h72"][k] - cl) / max(d["h72"][k], 1e-9)
@@ -555,21 +557,25 @@ def simulate_strategy(
                             and clv_s >= req_clv and lw <= 0.26 and cl < ema9 <= ema21 * 1.002
                             and 14.0 <= rsi <= 52.0 and d["ret_3h"][k] >= -0.20 and not btc_pump and not btc_flush
                         ):
-                            sl = min(max((max(hi, d["h"][k - 1]) * 1.0015 - ep) / ep, _sl_atr_m * atr_p, _sl_floor), _sl_cap)
-                            fvg = bool(d["fvg_s"][k] and adx >= 20.0)
-                            t1 = (1.25 if is_rug_s else (1.62 if fvg else (1.35 if sl >= 0.024 else 1.46))) if big_runner_mode else tp1_r
-                            t2 = (1.95 if is_rug_s else (2.55 if fvg else (2.00 if sl >= 0.024 else 2.21)))
-                            picked = (rvol * abs(alpha_5m) * clv_s * (1.25 if fvg else 1.0), "SHORT", ep, sl, t1, t2)
+                            raw_sl = max((max(hi, d["h"][k - 1]) * 1.0015 - ep) / ep, _sl_atr_m * atr_p, _sl_floor)
+                            sl = raw_sl if big_runner_mode else min(raw_sl, _sl_cap)
+                            if sl <= _sl_cap:
+                                fvg = bool(d["fvg_s"][k] and adx >= 20.0)
+                                t1 = (1.25 if is_rug_s else (1.46 if fvg else (1.35 if sl >= 0.030 else 1.46))) if big_runner_mode else tp1_r
+                                t2 = (1.95 if is_rug_s else (2.25 if fvg else (2.00 if sl >= 0.030 else 2.25)))
+                                picked = (rvol * abs(alpha_5m) * clv_s * (1.25 if fvg else 1.0), "SHORT", ep, sl, t1, t2)
 
                     if big_runner_mode and not picked and adx >= 20.0 and rvol >= (req_rvol if is_night else 1.50) and d["ext"][k] <= 0.032:
                         sm_htf_l = mtf_l or (cl >= ema63 * 0.998 and macd_b)
                         sm_htf_s = mtf_s or (cl <= ema63 * 1.002 and macd_s)
                         if eff_btc_l and wall_ok_l and sm_htf_l and not btc_dump and not btc_spike and d["fvg_b"][k] and cl > d["h16"][k] and alpha_5m >= 0.65 and alpha_15m >= 0.90 and clv_l >= 0.70 and uw <= 0.24 and 50.0 <= rsi <= 78.0:
-                            sl = min(max((ep - d["l12"][k] * 0.9985) / ep, _sl_atr_m * atr_p, _sl_floor), _sl_cap)
-                            picked = (rvol * alpha_5m * clv_l * 0.90, "LONG", ep, sl, 1.62, 2.55)
+                            sl = max((ep - d["l12"][k] * 0.9985) / ep, _sl_atr_m * atr_p, _sl_floor)
+                            if sl <= _sl_cap:
+                                picked = (rvol * alpha_5m * clv_l * 0.90, "LONG", ep, sl, 1.46, 2.25)
                         elif eff_btc_s and wall_ok_s and sm_htf_s and not btc_pump and not btc_flush and d["fvg_s"][k] and cl < d["l16"][k] and alpha_5m <= -0.65 and alpha_15m <= -0.90 and clv_s >= 0.70 and lw <= 0.24 and 22.0 <= rsi <= 50.0:
-                            sl = min(max((d["h12"][k] * 1.0015 - ep) / ep, _sl_atr_m * atr_p, _sl_floor), _sl_cap)
-                            picked = (rvol * abs(alpha_5m) * clv_s * 0.90, "SHORT", ep, sl, 1.62, 2.55)
+                            sl = max((d["h12"][k] * 1.0015 - ep) / ep, _sl_atr_m * atr_p, _sl_floor)
+                            if sl <= _sl_cap:
+                                picked = (rvol * abs(alpha_5m) * clv_s * 0.90, "SHORT", ep, sl, 1.46, 2.25)
 
                     if picked:
                         cands.append((picked[0], sym, picked[1], picked[2], picked[3], picked[4], picked[5]))

@@ -50,11 +50,11 @@ class MarketScanner:
         elif brk_type == "RUG_SHORT":
             return {"profile": "FAST_RUG_DUMP", "tp1_r": 1.25, "tp1_share": sh1, "tp1_lock_r": 0.25, "tp2_r": 1.95, "tp2_share": sh2_rug, "tp2_lock_r": 1.10, "trail_r": 2.80}
         elif brk_type == "SQUEEZE_80M" or (has_fvg and adx14 >= 20.0):
-            return {"profile": "EXPLOSIVE_FVG", "tp1_r": 1.62, "tp1_share": sh1, "tp1_lock_r": 0.35, "tp2_r": 2.55, "tp2_share": sh2_std, "tp2_lock_r": 1.30, "trail_r": 2.80}
+            return {"profile": "EXPLOSIVE_FVG", "tp1_r": 1.46, "tp1_share": sh1, "tp1_lock_r": 0.35, "tp2_r": 2.25, "tp2_share": sh2_std, "tp2_lock_r": 1.25, "trail_r": 2.80}
         elif atr_pct >= 0.012 or sl_dist >= 0.030:
             return {"profile": "HIGH_VOL_SWING", "tp1_r": 1.35, "tp1_share": sh1, "tp1_lock_r": 0.30, "tp2_r": 2.00, "tp2_share": sh2_std, "tp2_lock_r": 1.10, "trail_r": 2.80}
         else:
-            return {"profile": "STD_TREND_FIB", "tp1_r": 1.46, "tp1_share": sh1, "tp1_lock_r": 0.35, "tp2_r": 2.21, "tp2_share": sh2_std, "tp2_lock_r": 1.25, "trail_r": 2.80}
+            return {"profile": "STD_TREND_FIB", "tp1_r": 1.46, "tp1_share": sh1, "tp1_lock_r": 0.35, "tp2_r": 2.25, "tp2_share": sh2_std, "tp2_lock_r": 1.25, "trail_r": 2.80}
 
     async def scan_market_once(self, force: bool = False) -> List[Dict[str, Any]]:
         """Один параллельный проход сканирования рынка строго на закрытии 5m свечи (защита от HTTP 418/429)."""
@@ -152,7 +152,7 @@ class MarketScanner:
                     return None
 
                 # 3. Структурный свечной анализ (по умолчанию 15m Smart Money 5/7: BOS + EMA200 + MACD + ADX + FVG, 200 свечей = 50ч!)
-                analysis = await binance_client.fetch_candles_analysis(sym, interval=scan_tf, limit=205)
+                analysis = await binance_client.fetch_candles_analysis(sym, interval=scan_tf, limit=250)
                 if not analysis:
                     return None
 
@@ -202,9 +202,9 @@ class MarketScanner:
                 if is_spot_mirror:
                     vol_floor_ok = (vol_24h_pair >= 750000.0) and (avg_5m_qvol >= min_avg_vol) and (last_5m_qvol >= 2000.0)
                 elif is_alt_futures:
-                    vol_floor_ok = (vol_24h_pair >= 1200000.0) and (avg_5m_qvol >= min_avg_vol) and (last_5m_qvol >= alt_sig_vol)
+                    vol_floor_ok = (vol_24h_pair >= 1500000.0) and (avg_5m_qvol >= min_avg_vol) and (last_5m_qvol >= alt_sig_vol)
                 else:
-                    vol_floor_ok = (vol_24h_pair >= 1200000.0) and (avg_5m_qvol >= min_avg_vol) and (last_5m_qvol >= min_sig_vol)
+                    vol_floor_ok = (vol_24h_pair >= 1500000.0) and (avg_5m_qvol >= min_avg_vol) and (last_5m_qvol >= min_sig_vol)
                 min_v3 = float(getattr(config, "MIN_V3_VOLUME_PERSISTENCE", 1.10))
                 is_mtf_long = analysis.get("is_mtf_long_ok", False) if getattr(config, "ENABLE_MTF_15M_FILTER", True) else True
                 is_mtf_short = analysis.get("is_mtf_short_ok", False) if getattr(config, "ENABLE_MTF_15M_FILTER", True) else True

@@ -84,7 +84,7 @@ async def run_suite():
         {"breakout_type": "SQUEEZE_80M", "atr14_pct": 0.008, "adx14": 24.0, "has_fvg_bull": True},
         side="LONG", sl_dist=0.012
     )
-    assert fh_plan["profile"] == "EXPLOSIVE_FVG" and fh_plan["tp1_r"] == 1.62 and fh_plan["tp2_r"] == 2.55 and fh_plan["tp1_share"] == 0.0 and fh_plan["tp2_share"] == 0.0
+    assert fh_plan["profile"] == "EXPLOSIVE_FVG" and fh_plan["tp1_r"] == 1.46 and fh_plan["tp2_r"] == 2.25 and fh_plan["tp1_share"] == 0.0 and fh_plan["tp2_share"] == 0.0
 
     # Проверяем основную стратегию Full-Hold 100% (Lock1 -> Lock2 -> все 100% объема ловят ракету +12%!)
     assert portfolio.open_position("FULLHOLDUSDT", "LONG", 10.0, 3.00, 9.88, 10.228, 10.360, "FullHold 100% Test", leverage=50, atr_pct=0.008, risk_usd=1.80, exit_plan=fh_plan)
@@ -108,7 +108,7 @@ async def run_suite():
         {"breakout_type": "SQUEEZE_80M", "atr14_pct": 0.008, "adx14": 24.0, "has_fvg_bull": True},
         side="LONG", sl_dist=0.012
     )
-    assert dyn_plan["profile"] == "EXPLOSIVE_FVG" and dyn_plan["tp1_r"] == 1.62 and dyn_plan["tp2_r"] == 2.55 and dyn_plan["tp1_share"] == 0.35
+    assert dyn_plan["profile"] == "EXPLOSIVE_FVG" and dyn_plan["tp1_r"] == 1.46 and dyn_plan["tp2_r"] == 2.25 and dyn_plan["tp1_share"] == 0.35
     rug_plan = market_scanner.compute_dynamic_exit_plan(
         {"breakout_type": "RUG_SHORT", "atr14_pct": 0.015, "adx14": 22.0, "has_fvg_bear": True},
         side="SHORT", sl_dist=0.025
@@ -163,8 +163,8 @@ async def run_suite():
     print(f"  ✓ Большая ракета схвачена 3-шаговым выходом 1 сделкой: PnL ${rec['realized_pnl']:+.2f} ({rec['roi_pct']:+.1f}%) | {rec['reason']}")
     assert portfolio.cash > 118.0, f"Баланс $100 должен мощно вырасти на большой ракете, получено ${portfolio.cash:.2f}"
 
-    # 3B. ТЕСТ ЧЕСТНОГО CROSS MARGIN (3.5% = $3.50 @ 50x, ПОТОЛОК РИСКА <=3.8%, 15 СЛОТОВ) + LIVE PNL
-    assert config.SIZING_MODE == "equal_margin" and abs(config.FIXED_MARGIN_PCT - 0.035) < 1e-6 and abs(config.STOP_LOSS_MAX_PCT - 0.045) < 1e-6
+    # 3B. ТЕСТ ЧЕСТНОГО CROSS MARGIN (3.5% = $3.50 @ 50x, ПОТОЛОК РИСКА <=3.8%, НЕЗАЖАТЫЙ СТОП <=3.80%, 15 СЛОТОВ) + LIVE PNL
+    assert config.SIZING_MODE == "equal_margin" and abs(config.FIXED_MARGIN_PCT - 0.035) < 1e-6 and abs(config.STOP_LOSS_MAX_PCT - 0.0380) < 1e-6
     from exit_manager import exit_manager
     saved_cash = portfolio.cash
     portfolio.cash = 100.0

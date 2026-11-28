@@ -79,10 +79,32 @@ class ExitManager:
 
                 symbols = list(positions.keys())
                 price_map = {}
+                # Мгновенный пакетный опрос всех 15+ позиций за ОДИН запрос (0.15с вместо 5-7с последовательного цикла — не пропускает быстрые импульсы TP1/Lock1!)
+                await binance_client.fetch_all_book_tickers()
+                books_now = getattr(binance_client, "_book_tickers_cache", {}) or {}
                 for sym in symbols:
-                    p = await binance_client.fetch_price(sym)
-                    if p and p > 0:
-                        price_map[sym] = p
+                    ba = books_now.get(sym)
+                    if ba and ba[0] > 0 and ba[1] > 0:
+                        price_map[sym] = (ba[0] + ba[1]) * 0.5
+                    else:
+                        p = await binance_client.fetch_price(sym)
+                        if p and p > 0:
+                            price_map[sym] = p
+
+                # Каждые 20с дополнительно подтягиваем High/Low свечи по активным сделкам, чтобы не пропустить быстрый прокол Lock1/Lock2 между тиками!
+                if (now - getattr(self, "_last_hl_sync", 0.0)) >= 20.0:
+                    self._last_hl_sync = now
+                    for sym in symbols:
+                        pos_hl = portfolio.open_positions.get(sym)
+                        if not pos_hl:
+                            continue
+                        hl = await binance_client.fetch_recent_high_low(sym, limit=2)
+                        if hl:
+                            _, bar_h, bar_l = hl
+                            if bar_h > pos_hl.get("highest_price", pos_hl["entry_price"]):
+                                pos_hl["highest_price"] = bar_h
+                            if bar_l < pos_hl.get("lowest_price", pos_hl["entry_price"]):
+                                pos_hl["lowest_price"] = bar_l
 
                 if price_map:
                     portfolio.update_position_prices(price_map)
@@ -168,8 +190,9 @@ class ExitManager:
                                 pos["breakeven_set"] = True
                                 portfolio.save()
 
-                        # Stage 1 (TP1 / Lock1): перенос SL в плюс (100% безрисковая в Full-Hold или фиксация доли в Partial)
-                        if not pos["tp1_hit"] and cur_price >= tp1:
+                        # Stage 1 (TP1 / Lock1): перенос SL в плюс (учитывает и пик свечи highest в Full-Hold, чтобы не пропустить быстрый сквиз типа ELSA +3.84%!)
+                        hit_tp1_l = (cur_price >= tp1) or (tp1_share <= 0.001 and highest >= tp1)
+                        if not pos["tp1_hit"] and hit_tp1_l:
                             pos["tp1_hit"] = True
                             pos["wick_sl"] = config.round_price(max(pos["wick_sl"], entry + tp1_lock * risk_dist))
                             pos["breakeven_set"] = True
@@ -186,7 +209,8 @@ class ExitManager:
                             print(f"🛡️ [STEP-LOCK 1] {sym}: пробит {tp1_r_val:.2f}R ({pos['pnl_pct']:+.1f}%) | 100% объема в ракете, SL в плюс {pos['wick_sl']}!", flush=True)
 
                         # Stage 2 (TP2 / Lock2): вторая ступень замка профита (+1.1R..+1.55R) на все 100% (или добор кэша в Partial)
-                        if pos["tp1_hit"] and not pos.get("tp2_hit", False) and cur_price >= tp2:
+                        hit_tp2_l = (cur_price >= tp2) or (tp2_share <= 0.001 and highest >= tp2)
+                        if pos["tp1_hit"] and not pos.get("tp2_hit", False) and hit_tp2_l:
                             pos["tp2_hit"] = True
                             pos["wick_sl"] = config.round_price(max(pos["wick_sl"], entry + tp2_lock * risk_dist))
                             if tp2_share > 0.001:
@@ -256,8 +280,9 @@ class ExitManager:
                                 pos["breakeven_set"] = True
                                 portfolio.save()
 
-                        # Stage 1 (TP1 / Lock1): перенос SL в плюс (100% безрисковая в Full-Hold или фиксация доли в Partial)
-                        if not pos["tp1_hit"] and cur_price <= tp1:
+                        # Stage 1 (TP1 / Lock1): перенос SL в плюс (учитывает и пик шорта lowest в Full-Hold, чтобы не пропустить быстрый пролив!)
+                        hit_tp1_s = (cur_price <= tp1) or (tp1_share <= 0.001 and lowest <= tp1)
+                        if not pos["tp1_hit"] and hit_tp1_s:
                             pos["tp1_hit"] = True
                             pos["wick_sl"] = config.round_price(min(pos["wick_sl"], entry - tp1_lock * risk_dist))
                             pos["breakeven_set"] = True
@@ -274,7 +299,8 @@ class ExitManager:
                             print(f"🛡️ [STEP-LOCK 1] {sym}: пробит {tp1_r_val:.2f}R ({pos['pnl_pct']:+.1f}%) | 100% объема в ракете, SL в плюс {pos['wick_sl']}!", flush=True)
 
                         # Stage 2 (TP2 / Lock2): вторая ступень замка профита на все 100% (или добор кэша в Partial)
-                        if pos["tp1_hit"] and not pos.get("tp2_hit", False) and cur_price <= tp2:
+                        hit_tp2_s = (cur_price <= tp2) or (tp2_share <= 0.001 and lowest <= tp2)
+                        if pos["tp1_hit"] and not pos.get("tp2_hit", False) and hit_tp2_s:
                             pos["tp2_hit"] = True
                             pos["wick_sl"] = config.round_price(min(pos["wick_sl"], entry - tp2_lock * risk_dist))
                             if tp2_share > 0.001:
