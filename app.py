@@ -671,18 +671,18 @@ with tab_timemachine:
             cdata = get_honest_alt_7d_data()
             pre5 = precompute_indicators(cdata)
 
-            res_main = simulate_strategy(all_data=cdata, initial_balance=config.INITIAL_BALANCE, precomputed=pre5, leverage=50, equal_margin_pct=0.035, max_spike_5m=3.50, big_runner_mode=True, tp1_r=1.46, tp1_share=0.0, max_slots_override=15, btc_ema63_align=True, cap_risk_pct=0.038)
-            res_part = simulate_strategy(all_data=cdata, initial_balance=config.INITIAL_BALANCE, precomputed=pre5, leverage=50, equal_margin_pct=0.035, max_spike_5m=3.50, big_runner_mode=True, tp1_r=1.46, tp1_share=0.35, max_slots_override=15, btc_ema63_align=True, cap_risk_pct=0.038)
+            res_main = simulate_strategy(all_data=cdata, initial_balance=config.INITIAL_BALANCE, precomputed=pre5, leverage=50, equal_margin_pct=0.035, max_spike_5m=3.50, big_runner_mode=True, tp1_r=1.46, tp1_share=0.0, max_slots_override=15, btc_ema63_align=True, cap_risk_pct=0.038, use_ml_hybrid=True)
+            res_base = simulate_strategy(all_data=cdata, initial_balance=config.INITIAL_BALANCE, precomputed=pre5, leverage=50, equal_margin_pct=0.035, max_spike_5m=3.50, big_runner_mode=True, tp1_r=1.46, tp1_share=0.0, max_slots_override=15, btc_ema63_align=True, cap_risk_pct=0.038, use_ml_hybrid=False)
+            res_part = simulate_strategy(all_data=cdata, initial_balance=config.INITIAL_BALANCE, precomputed=pre5, leverage=50, equal_margin_pct=0.035, max_spike_5m=3.50, big_runner_mode=True, tp1_r=1.46, tp1_share=0.35, max_slots_override=15, btc_ema63_align=True, cap_risk_pct=0.038, use_ml_hybrid=False)
             res_15m = simulate_15m_smart_money(cdata, initial_balance=config.INITIAL_BALANCE, max_slots=15, mg_pct=0.025, cap_risk_pct=0.028, tp1_share=0.0)
-            res_unprotected = simulate_strategy(all_data=cdata, initial_balance=config.INITIAL_BALANCE, precomputed=pre5, leverage=50, equal_margin_pct=0.030, max_spike_5m=3.50, big_runner_mode=True, tp1_r=1.85, tp1_share=0.0, max_slots_override=15, btc_ema63_align=False, cap_risk_pct=0.0)
 
             primary_daily = res_main.get("daily_breakdown", [])
             rows = []
             for name, res in [
-                ("🚀 ОСНОВНАЯ: 15-Slot 5m Rocket + BTC EMA21(15m) + Потолок риска 3.8%", res_main),
+                ("🚀 ОСНОВНАЯ: Dual Multi-Scale ML + Pullback Sniper + 3-Tier Shield (15 слотов)", res_main),
+                ("⚡ Базовая без ML-фильтра и откатов (15-Slot 5m Rocket Full-Hold)", res_base),
                 ("💰 Partial-Split 15-Slot 5m (35% TP1 + 65% Trail, риск ≤3.8%)", res_part),
                 ("🛡️ Консервативный 15m Smart Money (15 слотов, 2.5% маржа)", res_15m),
-                ("⚠️ Без макро-щита BTC и без потолка стопа (-189% дыры)", res_unprotected),
             ]:
                 rows.append({
                     "Конфигурация": name,
@@ -698,9 +698,9 @@ with tab_timemachine:
 
             render_table(pd.DataFrame(rows))
             if primary_daily:
-                st.markdown("#### 📅 Подневная ведомость основной стратегии (`15m Smart Money + Runner, 15 слотов`)")
+                st.markdown("#### 📅 Подневная ведомость основной стратегии (`Dual Multi-Scale ML + Pullback Sniper + 3-Tier Shield, 15 слотов`)")
                 render_table(pd.DataFrame(primary_daily))
-            st.success("✅ Честный аудит (включая мелкие альткоины от $500K/24ч без искусственного фильтра $15M): переход с шумного 5m на **15m Smart Money + BTC EMA50** поднимает винрейт и убирает глубокие стопы!")
+            st.success("✅ Честный аудит на реальных альткоинах (включая мелкие пары от $500K/24ч): мульти-таймфреймовая модель ML + откатный снайпер `EMA21` + адаптивный щит `0.92R` повышают процент прибыльных сделок!")
 
 # ------------------------------------------------------------------------------
 # 7. ВТОРОЙ МОЗГ (OBSIDIAN VAULT & QUANT ML)
@@ -711,18 +711,18 @@ with tab_brain:
 
     b_col1, b_col2 = st.columns(2)
     with b_col1:
-        st.markdown("### ⚡ Квантовая модель (Dual XGBoost Alpha)")
-        ml_status = "🟢 Активна (Dual: LONG + SHORT)" if (ml_engine.model_long is not None or ml_engine.model is not None) else "🟡 Ожидает обучения"
+        st.markdown("### ⚡ Квантовая модель (Dual Multi-Scale 5m+15m Ensemble)")
+        ml_status = "🟢 Активна (LogReg + RF + ExtraTrees + XGBoost | 45d Futures)" if (ml_engine.model_long is not None or ml_engine.model is not None) else "🟡 Ожидает обучения"
         st.info(f"**Статус модели:** {ml_status}")
         
         m_c1, m_c2 = st.columns(2)
         with m_c1:
-            st.metric("Винрейт LONG (XGBoost)", f"{getattr(ml_engine, 'winrate_long', 75.0):.1f}%")
+            st.metric("Винрейт LONG (OOS)", f"{getattr(ml_engine, 'winrate_long', 62.0):.1f}%")
         with m_c2:
-            st.metric("Винрейт SHORT (XGBoost)", f"{getattr(ml_engine, 'winrate_short', 88.2):.1f}%")
+            st.metric("Винрейт SHORT (OOS)", f"{getattr(ml_engine, 'winrate_short', 60.0):.1f}%")
             
         st.metric("Профит-фактор (Profit Factor)", f"{ml_engine.profit_factor:.2f}")
-        st.caption(f"Обучена на 30 топ-парах Binance Futures (30 факторов Order Flow) с вычетом комиссий биржи. Порог уверенности: {int(ml_engine.threshold * 100)}%.")
+        st.caption(f"Обучена Walk-Forward на 932 335 свечах 75 крипто-фьючерсов (32 мульти-таймфреймовых признака 5m+15m). Фильтр входа ≥ {ml_engine.reject_threshold*100:.1f}%, Порог топ-ракет ≥ {ml_engine.top_rocket_threshold*100:.1f}%.")
 
     with b_col2:
         st.markdown("### 📓 База знаний Obsidian Vault")

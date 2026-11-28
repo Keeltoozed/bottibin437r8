@@ -153,6 +153,8 @@ class ExitManager:
                     tp2_share = float(ep.get("tp2_share", 0.0))
                     tp2_lock = float(ep.get("tp2_lock_r", 0.95))
                     trail_r_val = float(ep.get("trail_r", 2.50))
+                    eff_early_be_r = min(early_be_r, float(ep.get("early_be_r", 99.0)))
+                    fee_plus_dist = max(entry * 0.0026, 0.15 * risk_dist)
 
                     if should_log:
                         print(
@@ -183,12 +185,16 @@ class ExitManager:
                             portfolio.close_position(sym, cur_price, reason=reason_label, partial_pct=1.0)
                             continue
 
-                        if not pos["tp1_hit"] and early_be_r < 90.0 and (mfe_pct >= early_be_pct or mfe_r >= early_be_r):
-                            be_price = config.round_price(entry * (1.0 + early_be_lock))
+                        if not pos["tp1_hit"] and not pos.get("breakeven_set") and (
+                            (early_be_pct < 5.0 and mfe_pct >= early_be_pct) or (eff_early_be_r < 90.0 and mfe_r >= eff_early_be_r)
+                        ):
+                            be_price = config.round_price(max(entry * (1.0 + early_be_lock), entry + fee_plus_dist))
                             if be_price > pos["wick_sl"]:
                                 pos["wick_sl"] = be_price
                                 pos["breakeven_set"] = True
+                                pos.setdefault("partial_notes", []).append("Shield(БУ+)")
                                 portfolio.save()
+                                print(f"🛡️ [ML SHIELD] {sym}: MFE {mfe_r:.2f}R ≥ {eff_early_be_r:.2f}R | Стоп перенесен в чистый плюс {pos['wick_sl']}!", flush=True)
 
                         # Stage 1 (TP1 / Lock1): перенос SL в плюс (учитывает и пик свечи highest в Full-Hold, чтобы не пропустить быстрый сквиз типа ELSA +3.84%!)
                         hit_tp1_l = (cur_price >= tp1) or (tp1_share <= 0.001 and highest >= tp1)
@@ -243,8 +249,8 @@ class ExitManager:
                                 )
                                 continue
 
-                        # Жесткий TTL (по умолчанию 24ч): закрывает зависшую без TP1 сделку и освобождает слот для свежей ракеты!
-                        if ttl_sec > 0 and not pos["tp1_hit"] and elapsed_sec >= ttl_sec:
+                        # Жесткий TTL (по умолчанию 24ч): закрывает зависшую без TP1/Shield сделку и освобождает слот для свежей ракеты!
+                        if ttl_sec > 0 and not pos["tp1_hit"] and not pos.get("breakeven_set", False) and elapsed_sec >= ttl_sec:
                             portfolio.close_position(
                                 sym, cur_price,
                                 reason=f"⏱️ TTL {int(ttl_sec//3600)}ч (высвобождение слота)",
@@ -273,12 +279,16 @@ class ExitManager:
                             portfolio.close_position(sym, cur_price, reason=reason_label, partial_pct=1.0)
                             continue
 
-                        if not pos["tp1_hit"] and early_be_r < 90.0 and (mfe_pct >= early_be_pct or mfe_r >= early_be_r):
-                            be_price = config.round_price(entry * (1.0 - early_be_lock))
+                        if not pos["tp1_hit"] and not pos.get("breakeven_set") and (
+                            (early_be_pct < 5.0 and mfe_pct >= early_be_pct) or (eff_early_be_r < 90.0 and mfe_r >= eff_early_be_r)
+                        ):
+                            be_price = config.round_price(min(entry * (1.0 - early_be_lock), entry - fee_plus_dist))
                             if be_price < pos["wick_sl"]:
                                 pos["wick_sl"] = be_price
                                 pos["breakeven_set"] = True
+                                pos.setdefault("partial_notes", []).append("Shield(БУ+)")
                                 portfolio.save()
+                                print(f"🛡️ [ML SHIELD] {sym}: MFE {mfe_r:.2f}R ≥ {eff_early_be_r:.2f}R | Стоп перенесен в чистый плюс {pos['wick_sl']}!", flush=True)
 
                         # Stage 1 (TP1 / Lock1): перенос SL в плюс (учитывает и пик шорта lowest в Full-Hold, чтобы не пропустить быстрый пролив!)
                         hit_tp1_s = (cur_price <= tp1) or (tp1_share <= 0.001 and lowest <= tp1)
@@ -333,7 +343,7 @@ class ExitManager:
                                 )
                                 continue
 
-                        if ttl_sec > 0 and not pos["tp1_hit"] and elapsed_sec >= ttl_sec:
+                        if ttl_sec > 0 and not pos["tp1_hit"] and not pos.get("breakeven_set", False) and elapsed_sec >= ttl_sec:
                             portfolio.close_position(
                                 sym, cur_price,
                                 reason=f"⏱️ TTL {int(ttl_sec//3600)}ч (высвобождение слота)",

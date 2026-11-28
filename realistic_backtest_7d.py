@@ -165,6 +165,9 @@ def precompute_indicators(data: Dict[str, List[Dict[str, float]]]) -> Dict[str, 
         ret_3h = pd.Series(c).pct_change(36).fillna(0.0).values
 
         time_idx = {int(ts): idx for idx, ts in enumerate(t)}
+        pb_l4 = pd.Series(l).rolling(4, min_periods=2).min().bfill().values
+        pb_h4 = pd.Series(h).rolling(4, min_periods=2).max().bfill().values
+        max_rvol_18 = pd.Series(rvol).shift(1).rolling(18, min_periods=3).max().bfill().values
         if sym != "BTCUSDT":
             all_times.update(t.tolist())
 
@@ -177,9 +180,53 @@ def precompute_indicators(data: Dict[str, List[Dict[str, float]]]) -> Dict[str, 
             "rsi": rsi, "ext": ext, "ret_3h": ret_3h,
             "h12": h12, "l12": l12, "h16": h16, "l16": l16, "h36": h36, "l36": l36, "h72": h72, "l72": l72,
             "h144": h144, "l144": l144,
+            "pb_l4": pb_l4, "pb_h4": pb_h4, "max_rvol_18": max_rvol_18,
             "time_idx": time_idx
         }
     return {"ind": ind, "ts": sorted(all_times)}
+
+
+def _attach_ml_probs(all_data: Dict[str, Any], pre: Dict[str, Any]) -> None:
+    """Батч-инференс обученной Multi-Scale ML модели (ml_engine) без Train-Serve Skew."""
+    from quant_features import FEATURE_COLS_LONG, FEATURE_COLS_SHORT, compute_quant_features_dataframe
+    from ml_engine import ml_engine
+
+    ind = pre["ind"]
+    if ml_engine.model_long is None or ml_engine.model_short is None:
+        for d in ind.values():
+            n = len(d["c"])
+            d["ml_l"] = np.full(n, 0.50)
+            d["ml_s"] = np.full(n, 0.50)
+        return
+
+    cols_l = ml_engine.feature_cols_long or FEATURE_COLS_LONG
+    cols_s = ml_engine.feature_cols_short or FEATURE_COLS_SHORT
+    for sym, d in ind.items():
+        if sym == "BTCUSDT" or "ml_l" in d:
+            continue
+        cdls = all_data.get(sym)
+        if not cdls or len(cdls) != len(d["c"]):
+            n = len(d["c"])
+            d["ml_l"] = np.full(n, 0.50)
+            d["ml_s"] = np.full(n, 0.50)
+            continue
+        df_c = pd.DataFrame([
+            {
+                "time": c["time"], "open": float(c["open"]), "high": float(c["high"]),
+                "low": float(c["low"]), "close": float(c["close"]),
+                "volume": float(c.get("volume", float(c.get("quote_vol", 0.0)) / max(float(c["close"]), 1e-9))),
+                "quote_vol": float(c.get("quote_vol", 0.0)),
+            }
+            for c in cdls
+        ])
+        fdf = compute_quant_features_dataframe(df_c)
+        if fdf.empty or any(col not in fdf.columns for col in cols_l):
+            n = len(d["c"])
+            d["ml_l"] = np.full(n, 0.50)
+            d["ml_s"] = np.full(n, 0.50)
+        else:
+            d["ml_l"] = ml_engine.model_long.predict_proba(fdf[cols_l].values)[:, 1]
+            d["ml_s"] = ml_engine.model_short.predict_proba(fdf[cols_s].values)[:, 1]
 
 
 def simulate_strategy(
@@ -197,9 +244,12 @@ def simulate_strategy(
     max_slots_override: int = 0,
     btc_ema63_align: bool = True,
     cap_risk_pct: float = 0.038,
+    use_ml_hybrid: bool = False,
     **kwargs
 ) -> Dict[str, Any]:
     pre = precomputed if precomputed is not None else precompute_indicators(all_data)
+    if use_ml_hybrid:
+        _attach_ml_probs(all_data, pre)
     ind = pre["ind"]
     ts_list = pre["ts"][180:]
 
@@ -282,6 +332,11 @@ def simulate_strategy(
                 pos["hi"] = max(pos["hi"], h)
                 mfe_r = (pos["hi"] - entry) / rd
 
+                if use_ml_hybrid and not pos.get("be_hit", False) and mfe_r >= pos.get("be_r", 99.0):
+                    pos["be_hit"] = True
+                    fee_plus = max(entry * 0.0026, 0.15 * rd)
+                    pos["sl"] = max(pos["sl"], entry + fee_plus)
+
                 if legacy_churn_mode:
                     if mfe_r >= 0.85:
                         pos["sl"] = max(pos["sl"], entry * 1.0020)
@@ -344,7 +399,7 @@ def simulate_strategy(
                             trail_p = pos["sl"]
                     pos["sl"] = max(pos["sl"], trail_p)
 
-                if big_runner_mode and not pos["tp1_hit"] and pos["bars"] >= 288:
+                if big_runner_mode and not pos["tp1_hit"] and not pos.get("be_hit", False) and pos["bars"] >= 288:
                     fee = pos["mg"] * lev * stop_cost
                     total_comm += fee
                     pnl = pos["mg"] * ((cl - entry) / entry) * lev - fee
@@ -378,6 +433,11 @@ def simulate_strategy(
 
                 pos["lo"] = min(pos["lo"], l)
                 mfe_r = (entry - pos["lo"]) / rd
+
+                if use_ml_hybrid and not pos.get("be_hit", False) and mfe_r >= pos.get("be_r", 99.0):
+                    pos["be_hit"] = True
+                    fee_plus = max(entry * 0.0026, 0.15 * rd)
+                    pos["sl"] = min(pos["sl"], entry - fee_plus)
 
                 if legacy_churn_mode:
                     if mfe_r >= 0.85:
@@ -441,7 +501,7 @@ def simulate_strategy(
                             trail_p = pos["sl"]
                     pos["sl"] = min(pos["sl"], trail_p)
 
-                if big_runner_mode and not pos["tp1_hit"] and pos["bars"] >= 288:
+                if big_runner_mode and not pos["tp1_hit"] and not pos.get("be_hit", False) and pos["bars"] >= 288:
                     fee = pos["mg"] * lev * stop_cost
                     total_comm += fee
                     pnl = pos["mg"] * ((entry - cl) / entry) * lev - fee
@@ -462,7 +522,7 @@ def simulate_strategy(
         peak_eq = max(peak_eq, eq)
         max_dd = max(max_dd, (peak_eq - eq) / peak_eq if peak_eq > 0 else 0.0)
 
-        at_risk = sum(1 for p in open_pos.values() if not p["tp1_hit"])
+        at_risk = sum(1 for p in open_pos.values() if not (p["tp1_hit"] or p.get("be_hit", False)))
         max_at_risk = max_slots_override if max_slots_override > 0 else (2 if legacy_churn_mode else (15 if big_runner_mode else 2))
         max_slots = (max_slots_override + 5) if max_slots_override > 0 else (2 if legacy_churn_mode else (20 if big_runner_mode else 4))
         if at_risk < max_at_risk and len(open_pos) < max_slots and cash >= 1.2:
@@ -578,13 +638,50 @@ def simulate_strategy(
                                 picked = (rvol * abs(alpha_5m) * clv_s * 0.90, "SHORT", ep, sl, 1.46, 2.25)
 
                     if picked:
-                        cands.append((picked[0], sym, picked[1], picked[2], picked[3], picked[4], picked[5]))
+                        if use_ml_hybrid:
+                            mlp = float(d["ml_l"][k] if picked[1] == "LONG" else d["ml_s"][k])
+                            if mlp < float(getattr(config, "ML_MIN_FILTER_PROB", 0.450)):
+                                picked = None
+                            else:
+                                be_v = 99.0 if mlp >= float(getattr(config, "ML_TOP_ROCKET_PROB", 0.495)) else float(getattr(config, "ML_MEDIUM_BE_TRIGGER_R", 0.92))
+                                picked = (picked[0] * ((mlp / 0.50) ** 1.5), picked[1], picked[2], picked[3], picked[4], picked[5], be_v, mlp >= float(getattr(config, "ML_TOP_ROCKET_PROB", 0.495)), "RK")
+                    if not picked and use_ml_hybrid and not is_night and d["adx"][k] >= 22.0 and d["max_rvol_18"][k] >= 2.25:
+                        if (
+                            btc_bull_m and not btc_dump and ema21 > ema63 > ema150 and cl > d["ema200"][k]
+                            and d["pb_l4"][k] <= ema21 * 1.004 and d["pb_l4"][k] >= ema63 * 0.996
+                            and cl > op and cl > ema9 and cl > d["h"][k - 1] and clv_l >= 0.72 and uw <= 0.22
+                            and 1.15 <= rvol <= 3.50 and 45.0 <= rsi <= 68.0 and alpha_5m >= 0.35
+                            and d["ml_l"][k] >= float(getattr(config, "ML_PULLBACK_MIN_PROB", 0.484))
+                        ):
+                            sl_pb = max((ep - d["pb_l4"][k] * 0.9985) / ep, 1.55 * atr_p, _sl_floor)
+                            if sl_pb <= 0.0280:
+                                sc_pb = 0.75 * rvol * clv_l * ((d["ml_l"][k] / 0.50) ** 1.5)
+                                picked = (sc_pb, "LONG", ep, sl_pb, 1.00, 1.85, 0.85, False, "PB")
+                        elif (
+                            btc_bear_m and not btc_pump and ema21 < ema63 < ema150 and cl < d["ema200"][k]
+                            and d["pb_h4"][k] >= ema21 * 0.996 and d["pb_h4"][k] <= ema63 * 1.004
+                            and cl < op and cl < ema9 and cl < d["l"][k - 1] and clv_s >= 0.72 and lw <= 0.22
+                            and 1.15 <= rvol <= 3.50 and 32.0 <= rsi <= 55.0 and alpha_5m <= -0.35
+                            and d["ml_s"][k] >= float(getattr(config, "ML_PULLBACK_MIN_PROB", 0.484))
+                        ):
+                            sl_pb = max((d["pb_h4"][k] * 1.0015 - ep) / ep, 1.55 * atr_p, _sl_floor)
+                            if sl_pb <= 0.0280:
+                                sc_pb = 0.75 * rvol * clv_s * ((d["ml_s"][k] / 0.50) ** 1.5)
+                                picked = (sc_pb, "SHORT", ep, sl_pb, 1.00, 1.85, 0.85, False, "PB")
+
+                    if picked:
+                        if len(picked) == 6:
+                            cands.append((picked[0], sym, picked[1], picked[2], picked[3], picked[4], picked[5], 99.0, True, "RK"))
+                        else:
+                            cands.append((picked[0], sym, picked[1], picked[2], picked[3], picked[4], picked[5], picked[6], picked[7], picked[8]))
 
             cands.sort(reverse=True)
-            for score, sym, side, ep, sl_dist, t1_r_v, t2_r_v in cands[:10]:
-                at_r_now = [p for p in open_pos.values() if not p["tp1_hit"]]
+            for score, sym, side, ep, sl_dist, t1_r_v, t2_r_v, be_r_v, is_top_rk, kind_v in cands[:10]:
+                at_r_now = [p for p in open_pos.values() if not (p["tp1_hit"] or p.get("be_hit", False))]
                 if len(at_r_now) >= max_at_risk or len(open_pos) >= max_slots:
                     break
+                if kind_v == "PB" and len(at_r_now) >= int(getattr(config, "PULLBACK_MAX_SLOTS", 8)):
+                    continue
                 same_s = [p for p in at_r_now if p["side"] == side]
                 if big_runner_mode and same_s:
                     if side == "LONG" and (bp15 <= -0.35 or bp5 <= -0.25):
@@ -596,7 +693,8 @@ def simulate_strategy(
                 dd_mult = 0.75 if cur_dd >= 0.20 else 1.0
                 if equal_margin_pct > 0.0:
                     max_liq_mg = 1500.0 / max(leverage, 1)
-                    base_mg = cur_eq * equal_margin_pct * dd_mult
+                    eff_mg_pct = (0.036 if is_top_rk else 0.033) if use_ml_hybrid else equal_margin_pct
+                    base_mg = cur_eq * eff_mg_pct * dd_mult
                     if cap_risk_pct > 0.0:
                         base_mg = min(base_mg, (cur_eq * cap_risk_pct * dd_mult) / ((sl_dist + stop_cost) * max(leverage, 1)))
                     mg = round(min(base_mg, max_liq_mg, cur_eq * 0.25, cash * 0.40), 2)
@@ -615,7 +713,7 @@ def simulate_strategy(
                     "side": side, "entry": ep, "mg": mg, "init_mg": mg, "lev": leverage,
                     "sl": ep - rd if side == "LONG" else ep + rd,
                     "rd": rd, "risk_usd": max(risk_usd, 0.05),
-                    "tp1_r": t1_r_v, "tp2_r": t2_r_v,
+                    "tp1_r": t1_r_v, "tp2_r": t2_r_v, "be_r": be_r_v, "be_hit": False,
                     "tp1_hit": False, "bars": 0, "hi": ep, "lo": ep, "realized": -fee_in
                 }
 

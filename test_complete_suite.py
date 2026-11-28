@@ -50,7 +50,10 @@ async def run_suite():
     assert feat_row is not None and not feat_row.empty
     extracted_rvol = float(feat_row["rvol"].iloc[0])
     assert extracted_rvol > 2.5, f"Ожидался RVOL закрытой свечи > 2.5x, получено {extracted_rvol:.2f}x (баг незакрытой свечи!)"
-    print(f"  ✓ ML оценивает закрытый сигнальный бар (RVOL={extracted_rvol:.2f}x), игнорируя пустую живую свечу!")
+    ml_ok = ml_engine.evaluate_candidate({"symbol": "TESTUSDT", "candidate_side": "LONG", "candles": synthetic_candles, "pct_5m": 1.45, "volume_surge_ratio": extracted_rvol, "rsi": 62.0})
+    ml_bad = ml_engine.evaluate_candidate({"symbol": "ACEUSDT", "candidate_side": "LONG", "candles": synthetic_candles, "pct_5m": -5.78, "volume_surge_ratio": 4.88, "rsi": 35.0})
+    assert ml_ok["ml_active"] and 0.1 < ml_ok["ml_probability"] < 0.99 and ml_bad["ml_probability"] < 0.30, f"Некорректный ML-скоринг: ok={ml_ok}, bad={ml_bad}"
+    print(f"  ✓ ML оценивает закрытый сигнальный бар (RVOL={extracted_rvol:.2f}x, prob={ml_ok['ml_probability']*100:.1f}%), игнорируя пустую живую свечу и блокируя встречный слив ({ml_bad['ml_probability']*100:.1f}%)!")
 
     # 2. ТЕСТ СТРУКТУРНОГО АНАЛИЗА BINANCE И РАДАРА 180 ПАР
     print("\n[ТЕСТ 2/8] Проверка подключения к Binance, BTC-щита и радара пробоев...")

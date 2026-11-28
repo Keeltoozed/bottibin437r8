@@ -1178,6 +1178,45 @@ class BinanceClient:
         swing_12_slice = closed_candles[-13:-1] if len(closed_candles) > 12 else closed_candles[:-1]
         swing_12_low = min(c["low"] for c in swing_12_slice)
         swing_12_high = max(c["high"] for c in swing_12_slice)
+
+        # Детектор снайперского трендового отката к EMA21 после импульса (70%+ WR Pullback Resumption):
+        prior_20_qvols = [c["quote_vol"] for c in closed_candles[-21:-1]]
+        max_prior_rvol_20 = round(max(prior_20_qvols) / avg_vol, 2) if (prior_20_qvols and avg_vol > 0) else surge_ratio
+        pb_slice_4 = closed_candles[-4:] if len(closed_candles) >= 4 else closed_candles
+        pb_low_4 = min(c["low"] for c in pb_slice_4)
+        pb_high_4 = max(c["high"] for c in pb_slice_4)
+        is_pullback_long = (
+            len(closed_candles) >= 30
+            and max_prior_rvol_20 >= 2.25
+            and ema21 > ema63 > ema150
+            and sig_cl > ema200
+            and pb_low_4 <= ema21 * 1.004
+            and pb_low_4 >= ema63 * 0.996
+            and sig_cl > closed_signal_c["open"]
+            and sig_cl > ema9
+            and sig_cl > prev_closed_c["high"]
+            and close_strength_long >= 0.72
+            and upper_wick_pct <= 0.22
+            and 1.15 <= surge_ratio <= 3.50
+            and 45.0 <= rsi <= 68.0
+            and adx14 >= 22.0
+        )
+        is_pullback_short = (
+            len(closed_candles) >= 30
+            and max_prior_rvol_20 >= 2.25
+            and ema21 < ema63 < ema150
+            and sig_cl < ema200
+            and pb_high_4 >= ema21 * 0.996
+            and pb_high_4 <= ema63 * 1.004
+            and sig_cl < closed_signal_c["open"]
+            and sig_cl < ema9
+            and sig_cl < prev_closed_c["low"]
+            and close_strength_short >= 0.72
+            and lower_wick_pct <= 0.22
+            and 1.15 <= surge_ratio <= 3.50
+            and 32.0 <= rsi <= 55.0
+            and adx14 >= 22.0
+        )
         if sig_cl >= ema63 * 0.998 and ema27 >= ema63 * 0.998 and has_fvg_bull and macd_bull and adx14 >= 20.0:
             is_mtf_long_ok = True
         if sig_cl <= ema63 * 1.002 and ema27 <= ema63 * 1.002 and has_fvg_bear and macd_bear and adx14 >= 20.0:
@@ -1239,6 +1278,9 @@ class BinanceClient:
         sm_raw_sl_l = (current_price - swing_12_low * (1.0 - config.WICK_BUFFER_PCT)) / max(current_price, 1e-9)
         sm_long_sl_pct = round(max(sm_raw_sl_l, sl_atr_mult * atr14_pct, min_allowed_sl), 4)
         sm_long_wick_sl = config.round_price(current_price * (1.0 - sm_long_sl_pct))
+        pb_raw_sl_l = (current_price - pb_low_4 * (1.0 - config.WICK_BUFFER_PCT)) / max(current_price, 1e-9)
+        pb_long_sl_pct = round(max(pb_raw_sl_l, 1.55 * atr14_pct, min_allowed_sl), 4)
+        pb_long_wick_sl = config.round_price(current_price * (1.0 - pb_long_sl_pct))
 
         recent_wick_high = max(prev_closed_c["high"], active_sig_c["high"])
         raw_short_sl = config.round_price(recent_wick_high * (1.0 + config.WICK_BUFFER_PCT))
@@ -1249,6 +1291,9 @@ class BinanceClient:
         sm_raw_sl_s = (swing_12_high * (1.0 + config.WICK_BUFFER_PCT) - current_price) / max(current_price, 1e-9)
         sm_short_sl_pct = round(max(sm_raw_sl_s, sl_atr_mult * atr14_pct, min_allowed_sl), 4)
         sm_short_wick_sl = config.round_price(current_price * (1.0 + sm_short_sl_pct))
+        pb_raw_sl_s = (pb_high_4 * (1.0 + config.WICK_BUFFER_PCT) - current_price) / max(current_price, 1e-9)
+        pb_short_sl_pct = round(max(pb_raw_sl_s, 1.55 * atr14_pct, min_allowed_sl), 4)
+        pb_short_wick_sl = config.round_price(current_price * (1.0 + pb_short_sl_pct))
 
         ref_close_trend = closed_signal_c["close"]
         if ref_close_trend >= ema9 >= ema21:
@@ -1335,6 +1380,13 @@ class BinanceClient:
             "sm_long_wick_sl": sm_long_wick_sl,
             "sm_short_sl_pct": sm_short_sl_pct,
             "sm_short_wick_sl": sm_short_wick_sl,
+            "is_pullback_long": is_pullback_long,
+            "is_pullback_short": is_pullback_short,
+            "pb_long_sl_pct": pb_long_sl_pct,
+            "pb_long_wick_sl": pb_long_wick_sl,
+            "pb_short_sl_pct": pb_short_sl_pct,
+            "pb_short_wick_sl": pb_short_wick_sl,
+            "max_prior_rvol_20": max_prior_rvol_20,
             "trend": trend,
             "atr14_pct": atr14_pct,
             "candles": candles

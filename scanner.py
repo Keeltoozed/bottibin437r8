@@ -35,7 +35,12 @@ class MarketScanner:
 
     @staticmethod
     def compute_dynamic_exit_plan(ctx: Dict[str, Any], side: str, sl_dist: float) -> Dict[str, Any]:
-        """Индивидуальный план выхода: Full-Hold 100% (по умолчанию — без вытаскиваний, ступени замка SL + Trail, PF 2.13) или Partial-Split."""
+        """
+        Индивидуальный ML-адаптивный план выхода:
+          • TREND_PULLBACK (откат к EMA21): быстрый щит +0.85R -> БЕ+, TP1 1.00R, TP2 1.85R (WR 69–75%)
+          • TOP_ROCKET (ml_prob >= TopQ35 или без ML-тега): 100% Full-Hold без раннего удушения (Lock1 1.46R / Lock2 2.25R / Trail)
+          • SHIELD_WIN (средний ML [Q08..Q35]): защита +0.92R -> гарантированный плюс (перекрывает комиссии) + Full-Hold ранер!
+        """
         brk_type = ctx.get("breakout_type", "STRUCT_3H")
         atr_pct = float(ctx.get("atr14_pct", 0.006) or 0.006)
         adx14 = float(ctx.get("adx14", 20.0) or 20.0)
@@ -45,16 +50,28 @@ class MarketScanner:
         sh2_rug = 0.0 if full_hold else 0.30
         sh2_std = 0.0 if full_hold else 0.25
 
-        if brk_type == "SM_15M":
-            return {"profile": "SMART_MONEY_15M", "tp1_r": 1.15, "tp1_share": sh1, "tp1_lock_r": 0.25, "tp2_r": 1.65, "tp2_share": sh2_std, "tp2_lock_r": 0.95, "trail_r": 2.50}
+        ml_val = ctx.get("ml_prob")
+        top_thr = float(getattr(config, "ML_TOP_ROCKET_PROB", 0.495))
+        med_be = float(getattr(config, "ML_MEDIUM_BE_TRIGGER_R", 0.92))
+        eff_early_be = 99.0 if (ml_val is None or float(ml_val) >= top_thr) else med_be
+
+        if brk_type == "TREND_PULLBACK":
+            return {
+                "profile": "TREND_PULLBACK",
+                "tp1_r": 1.00, "tp1_share": sh1, "tp1_lock_r": 0.25,
+                "tp2_r": 1.85, "tp2_share": sh2_std, "tp2_lock_r": 1.05,
+                "trail_r": 2.60, "early_be_r": 0.85,
+            }
+        elif brk_type == "SM_15M":
+            return {"profile": "SMART_MONEY_15M", "tp1_r": 1.15, "tp1_share": sh1, "tp1_lock_r": 0.25, "tp2_r": 1.65, "tp2_share": sh2_std, "tp2_lock_r": 0.95, "trail_r": 2.50, "early_be_r": 99.0}
         elif brk_type == "RUG_SHORT":
-            return {"profile": "FAST_RUG_DUMP", "tp1_r": 1.25, "tp1_share": sh1, "tp1_lock_r": 0.25, "tp2_r": 1.95, "tp2_share": sh2_rug, "tp2_lock_r": 1.10, "trail_r": 2.80}
+            return {"profile": "FAST_RUG_DUMP", "tp1_r": 1.25, "tp1_share": sh1, "tp1_lock_r": 0.25, "tp2_r": 1.95, "tp2_share": sh2_rug, "tp2_lock_r": 1.10, "trail_r": 2.80, "early_be_r": eff_early_be}
         elif brk_type == "SQUEEZE_80M" or (has_fvg and adx14 >= 20.0):
-            return {"profile": "EXPLOSIVE_FVG", "tp1_r": 1.46, "tp1_share": sh1, "tp1_lock_r": 0.35, "tp2_r": 2.25, "tp2_share": sh2_std, "tp2_lock_r": 1.25, "trail_r": 2.80}
+            return {"profile": "EXPLOSIVE_FVG", "tp1_r": 1.46, "tp1_share": sh1, "tp1_lock_r": 0.35, "tp2_r": 2.25, "tp2_share": sh2_std, "tp2_lock_r": 1.32, "trail_r": 2.80, "early_be_r": eff_early_be}
         elif atr_pct >= 0.012 or sl_dist >= 0.030:
-            return {"profile": "HIGH_VOL_SWING", "tp1_r": 1.35, "tp1_share": sh1, "tp1_lock_r": 0.30, "tp2_r": 2.00, "tp2_share": sh2_std, "tp2_lock_r": 1.10, "trail_r": 2.80}
+            return {"profile": "HIGH_VOL_SWING", "tp1_r": 1.35, "tp1_share": sh1, "tp1_lock_r": 0.30, "tp2_r": 2.00, "tp2_share": sh2_std, "tp2_lock_r": 1.15, "trail_r": 2.80, "early_be_r": eff_early_be}
         else:
-            return {"profile": "STD_TREND_FIB", "tp1_r": 1.46, "tp1_share": sh1, "tp1_lock_r": 0.35, "tp2_r": 2.25, "tp2_share": sh2_std, "tp2_lock_r": 1.25, "trail_r": 2.80}
+            return {"profile": "STD_TREND_FIB", "tp1_r": 1.46, "tp1_share": sh1, "tp1_lock_r": 0.35, "tp2_r": 2.25, "tp2_share": sh2_std, "tp2_lock_r": 1.32, "trail_r": 2.80, "early_be_r": eff_early_be}
 
     async def scan_market_once(self, force: bool = False) -> List[Dict[str, Any]]:
         """Один параллельный проход сканирования рынка строго на закрытии 5m свечи (защита от HTTP 418/429)."""
@@ -90,7 +107,7 @@ class MarketScanner:
                 portfolio.btc_regime_str = f"🛑 Дневной лимит убытков достигнут ({portfolio.daily_losses_count}/{config.DAILY_LOSS_LIMIT})"
                 return []
 
-        at_risk_open = sum(1 for p in portfolio.open_positions.values() if not p.get("tp1_hit", False))
+        at_risk_open = sum(1 for p in portfolio.open_positions.values() if not (p.get("tp1_hit", False) or p.get("breakeven_set", False)))
         max_total_slots = config.MAX_CONCURRENT_POSITIONS + int(getattr(config, "MAX_RISK_FREE_RUNNERS", 2))
         if at_risk_open >= config.MAX_CONCURRENT_POSITIONS or len(portfolio.open_positions) >= max_total_slots:
             return []
@@ -376,6 +393,50 @@ class MarketScanner:
                                 analysis["short_wick_stop_loss"] = analysis.get("sm_short_wick_sl", analysis["short_wick_stop_loss"])
                                 analysis["short_wick_sl"] = analysis["short_wick_stop_loss"]
 
+                    # СНАЙПЕР ТРЕНДОВОГО ОТКАТА К EMA21 (WR 69–75% в свободные слоты <= PULLBACK_MAX_SLOTS!):
+                    pb_max_slots = int(getattr(config, "PULLBACK_MAX_SLOTS", 8))
+                    if (
+                        (not is_long and not is_short)
+                        and getattr(config, "ENABLE_TREND_PULLBACK", True)
+                        and at_risk_open < pb_max_slots
+                        and not is_dead_night
+                        and vol_floor_ok
+                        and atr_pct >= min_atr_pct
+                    ):
+                        pb_sl_l = float(analysis.get("pb_long_sl_pct", 0.99) or 0.99)
+                        pb_sl_s = float(analysis.get("pb_short_sl_pct", 0.99) or 0.99)
+                        if (
+                            analysis.get("is_pullback_long", False)
+                            and btc_bull_5m
+                            and not btc_regime.get("is_dumping", False)
+                            and alpha_5m >= 0.35
+                            and analysis.get("live_drift_long_pct", 0.0) <= config.MAX_LIVE_DRIFT_PCT
+                            and config.STOP_LOSS_MIN_PCT <= pb_sl_l <= 0.0280
+                        ):
+                            is_long = True
+                            brk_type = "TREND_PULLBACK"
+                            sl_long_dist = pb_sl_l
+                            analysis["breakout_type"] = "TREND_PULLBACK"
+                            analysis["sl_pct_distance"] = pb_sl_l
+                            analysis["wick_stop_loss"] = analysis.get("pb_long_wick_sl", analysis["wick_stop_loss"])
+                        elif (
+                            config.ENABLE_SHORT
+                            and analysis.get("is_pullback_short", False)
+                            and btc_bear_5m
+                            and not btc_regime.get("is_pumping", False)
+                            and alpha_5m <= -0.35
+                            and analysis.get("live_drift_short_pct", 0.0) <= config.MAX_LIVE_DRIFT_PCT
+                            and config.STOP_LOSS_MIN_PCT <= pb_sl_s <= 0.0280
+                        ):
+                            is_short = True
+                            brk_type = "TREND_PULLBACK"
+                            sl_short_dist = pb_sl_s
+                            analysis["breakout_type"] = "TREND_PULLBACK"
+                            analysis["short_sl_dist"] = pb_sl_s
+                            analysis["short_sl_pct_distance"] = pb_sl_s
+                            analysis["short_wick_stop_loss"] = analysis.get("pb_short_wick_sl", analysis["short_wick_stop_loss"])
+                            analysis["short_wick_sl"] = analysis["short_wick_stop_loss"]
+
                 if (tech_long and not is_long) or (tech_short and not is_short):
                     portfolio.funnel_stats["btc_blocked"] = portfolio.funnel_stats.get("btc_blocked", 0) + 1
 
@@ -451,32 +512,37 @@ class MarketScanner:
                     "btc_regime": btc_regime.get("status_str", "Neutral")
                 }
 
-                # Оценка квантовой моделью строго по закрытой сигнальной свече
+                # Оценка квантовой моделью строго по закрытой сигнальной свече (Dual Multi-Scale 5m+15m)
                 ml_res = ml_engine.evaluate_candidate(chosen)
                 chosen["ml_prob"] = ml_res.get("ml_probability", 0.5)
                 chosen["ml_reason"] = ml_res.get("reason", "")
                 chosen["ml_approved"] = ml_res.get("ml_approved", False)
+                chosen["ml_tier"] = ml_res.get("ml_tier", "TOP_ROCKET")
 
-                min_ml = float(getattr(config, "ML_MIN_FILTER_PROB", 0.0))
+                min_ml = float(getattr(config, "ML_PULLBACK_MIN_PROB", 0.484)) if brk_type == "TREND_PULLBACK" else float(getattr(config, "ML_MIN_FILTER_PROB", 0.450))
                 if min_ml > 0 and ml_res.get("ml_active") and chosen["ml_prob"] < min_ml:
                     portfolio.funnel_stats["gate_failed"] = portfolio.funnel_stats.get("gate_failed", 0) + 1
-                    chosen["radar_status"] = f"🧠 Отсев ML ({chosen['ml_prob']*100:.0f}% < {min_ml*100:.0f}%)"
+                    chosen["radar_status"] = f"🧠 Отсев ML [{brk_type}] ({chosen['ml_prob']*100:.1f}% < {min_ml*100:.1f}%)"
                     chosen["watch_activity"] = round(surge * 3.0 + abs(alpha_5m), 3)
                     return {"kind": "watch", "data": chosen}
 
-                # Smart Money Confluence Score Boost (FVG + HTF EMA200 + ADX >= 20):
-                # Вход только при строгих условиях AlphaRocket, а лучшие трендовые FVG-ракеты поднимаются в топ!
-                sm_mult = 0.85 if is_sm_fvg else 1.0
-                if not is_sm_fvg:
-                    if (side == "LONG" and analysis.get("has_fvg_bull") and analysis.get("above_ema200")) or (
-                        side == "SHORT" and analysis.get("has_fvg_bear") and not analysis.get("above_ema200", True)
-                    ):
-                        sm_mult *= float(getattr(config, "FVG_EMA200_SCORE_BOOST", 1.25))
-                    if float(analysis.get("adx14", 0.0) or 0.0) >= 20.0:
-                        sm_mult *= float(getattr(config, "ADX_TREND_SCORE_BOOST", 1.15))
+                # Приоритет + ML-взвешивание: топ-вероятностные ракеты поднимаются выше, откаты добирают свободные слоты
+                ml_mult = (max(chosen["ml_prob"], 0.25) / 0.50) ** 1.5
+                if brk_type == "TREND_PULLBACK":
+                    chosen["score"] = round(0.75 * surge * clv_used * ml_mult, 3)
+                    chosen["radar_status"] = f"🎯 ОТКАТ К EMA21 [{chosen['ml_tier']}] (ML {chosen['ml_prob']*100:.1f}%)"
+                else:
+                    sm_mult = 0.85 if is_sm_fvg else 1.0
+                    if not is_sm_fvg:
+                        if (side == "LONG" and analysis.get("has_fvg_bull") and analysis.get("above_ema200")) or (
+                            side == "SHORT" and analysis.get("has_fvg_bear") and not analysis.get("above_ema200", True)
+                        ):
+                            sm_mult *= float(getattr(config, "FVG_EMA200_SCORE_BOOST", 1.25))
+                        if float(analysis.get("adx14", 0.0) or 0.0) >= 20.0:
+                            sm_mult *= float(getattr(config, "ADX_TREND_SCORE_BOOST", 1.15))
 
-                chosen["score"] = round(abs(alpha_5m) * surge * clv_used * sm_mult, 3)
-                chosen["radar_status"] = f"🚀 ALPHA ПРОБОЙ [{brk_type}] (RS {alpha_5m:+.1f}%)"
+                    chosen["score"] = round(abs(alpha_5m) * surge * clv_used * sm_mult * ml_mult, 3)
+                    chosen["radar_status"] = f"🚀 ALPHA ПРОБОЙ [{brk_type} | {chosen['ml_tier']}] (RS {alpha_5m:+.1f}%)"
                 return {"kind": "candidate", "data": chosen}
 
         tasks = [check_ticker(t) for t in tickers]
@@ -632,9 +698,12 @@ class MarketScanner:
                     actual_margin = round(min(raw_margin, max_mg, portfolio.cash * 0.50), 2)
 
                 # CORRELATION & DIRECTIONAL BETA GUARD (ДО 15 АКТИВНЫХ СЛОТОВ + ЗАЩИТА ОТ СНОСА ПАЧКИ НА BTC!):
-                # 1. Безрисковые ранеры (tp1_hit=True) НЕ учитываются — не занимают 15 активных слотов!
-                # 2. В одну сторону одновременно не более MAX_SAME_SIDE_POSITIONS (6 из 15), чтобы один пролив BTC не снес 15 лонгов разом!
-                at_risk_positions = [p for p in portfolio.open_positions.values() if not p.get("tp1_hit", False)]
+                # 1. Безрисковые ранеры (tp1_hit=True или breakeven_set=True после ML Shield) НЕ занимают 15 активных слотов!
+                # 2. Снайперские откаты TREND_PULLBACK занимают только до PULLBACK_MAX_SLOTS (8) слотов, резервируя место под взрывные ракеты.
+                at_risk_positions = [p for p in portfolio.open_positions.values() if not (p.get("tp1_hit", False) or p.get("breakeven_set", False))]
+                brk_type_chk = ctx.get("breakout_type", "STRUCT_3H")
+                if brk_type_chk == "TREND_PULLBACK" and len(at_risk_positions) >= int(getattr(config, "PULLBACK_MAX_SLOTS", 8)):
+                    continue
                 if len(at_risk_positions) >= 1:
                     same_side_positions = [p for p in at_risk_positions if p.get("side") == cand_side]
                     max_same_side = int(getattr(config, "MAX_SAME_SIDE_POSITIONS", 6))
@@ -672,11 +741,12 @@ class MarketScanner:
                         self.cooldowns[sym] = now
                         trail_left = int(round((1.0 - exit_plan["tp1_share"] - exit_plan["tp2_share"]) * 100))
                         if exit_plan["tp1_share"] <= 0.001:
-                            tp_info = f"Lock1(БУ+@{exit_plan['tp1_r']}R): {config.round_price(tp1_target)} | Lock2(+{exit_plan['tp2_lock_r']}R@{exit_plan['tp2_r']}R): {config.round_price(tp2_target)} | 100% Full-Hold Trail"
+                            sh_info = f"Shield(+@{exit_plan['early_be_r']:.2f}R) | " if float(exit_plan.get("early_be_r", 99.0)) < 90.0 else ""
+                            tp_info = f"{sh_info}Lock1(БУ+@{exit_plan['tp1_r']}R): {config.round_price(tp1_target)} | Lock2(+{exit_plan['tp2_lock_r']}R@{exit_plan['tp2_r']}R): {config.round_price(tp2_target)} | 100% Full-Hold Trail"
                         else:
                             tp_info = f"TP1({int(exit_plan['tp1_share']*100)}%@{exit_plan['tp1_r']}R): {config.round_price(tp1_target)} | TP2({int(exit_plan['tp2_share']*100)}%@{exit_plan['tp2_r']}R): {config.round_price(tp2_target)} | {trail_left}% Trail"
                         print(
-                            f"🟢 [ROCKET OPEN] {cand_side} {sym} [{brk_type} | {exit_plan['profile']}] по {config.round_price(entry_p)} | "
+                            f"🟢 [ROCKET OPEN] {cand_side} {sym} [{brk_type} | {exit_plan['profile']} | ML {ctx.get('ml_prob', 0.5)*100:.1f}%] по {config.round_price(entry_p)} | "
                             f"Маржа: ${actual_margin:.2f} ({lev_to_use}x, Риск 1R: ${risk_usd:.2f}) | "
                             f"SL: {config.round_price(exact_sl)} ({sl_dist_pct*100:.2f}%) | {tp_info}",
                             flush=True

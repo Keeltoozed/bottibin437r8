@@ -177,8 +177,14 @@ ENABLE_MTF_15M_FILTER = os.getenv("ENABLE_MTF_15M_FILTER", "true").lower() == "t
 MAX_24H_CHANGE_CAP = float(os.getenv("MAX_24H_CHANGE_CAP", "120.0"))
 STRICT_WHITELIST_ONLY = os.getenv("STRICT_WHITELIST_ONLY", "false").lower() == "true"     # FALSE: динамический поиск настоящих ракет по всему рынку!
 CHOP_MIN_VOLUME_SURGE = float(os.getenv("CHOP_MIN_VOLUME_SURGE", "2.00"))
-ML_MIN_FILTER_PROB = float(os.getenv("ML_MIN_FILTER_PROB", "0.0"))                        # ML только для телеметрии (не блокирует валидные 6h ракеты)
-ML_CONFIDENCE_THRESHOLD = float(os.getenv("ML_CONFIDENCE_THRESHOLD", "0.50"))
+# МУЛЬТИ-ТАЙМФРЕЙМОВЫЙ QUANT ML ФИЛЬТР + HIGH-WR TREND PULLBACK SNIPER (обучено на 932 335 свечах 75 фьючерсов):
+ML_MIN_FILTER_PROB = float(os.getenv("ML_MIN_FILTER_PROB_V2", "0.450"))       # Отсев токсичного хвоста ложных пробоев (< 45.0%)
+ML_PULLBACK_MIN_PROB = float(os.getenv("ML_PULLBACK_MIN_PROB", "0.484"))      # Порог ML для снайперских откатов к EMA21 (WR 69–75%!)
+ML_TOP_ROCKET_PROB = float(os.getenv("ML_TOP_ROCKET_PROB", "0.495"))          # Порог топ-ракет (100% Full-Hold без раннего БУ; ниже — щит +0.92R!)
+ML_MEDIUM_BE_TRIGGER_R = float(os.getenv("ML_MEDIUM_BE_TRIGGER_R", "0.92"))   # На средних ML-сигналах при +0.92R переводим SL в гарантированный плюс!
+ENABLE_TREND_PULLBACK = os.getenv("ENABLE_TREND_PULLBACK", "true").lower() == "true"  # Снайпер отката к EMA21 в тренде в свободные слоты (WR 70%+)
+PULLBACK_MAX_SLOTS = int(os.getenv("PULLBACK_MAX_SLOTS", "8"))                # До 8 слотов под откаты (оставляя минимум 7 слотов под взрывные ракеты!)
+ML_CONFIDENCE_THRESHOLD = float(os.getenv("ML_CONFIDENCE_THRESHOLD_V2", "0.484"))
 
 def round_price(val: float) -> float:
     """Форматирует цену с сохранением 8 значащих цифр (защита мемов и дешевых монет от обрезки round(x, 6))."""

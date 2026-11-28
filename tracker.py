@@ -152,7 +152,7 @@ class PortfolioTracker:
         """Открывает новую позицию с параметрами структурного стопа и ATR для Chandelier-трейлинга."""
         if symbol in self.open_positions:
             return False
-        at_risk_cnt = sum(1 for p in self.open_positions.values() if not p.get("tp1_hit", False))
+        at_risk_cnt = sum(1 for p in self.open_positions.values() if not (p.get("tp1_hit", False) or p.get("breakeven_set", False)))
         max_total = config.MAX_CONCURRENT_POSITIONS + int(getattr(config, "MAX_RISK_FREE_RUNNERS", 2))
         if at_risk_cnt >= config.MAX_CONCURRENT_POSITIONS or len(self.open_positions) >= max_total:
             return False
